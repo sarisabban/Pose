@@ -5,6 +5,16 @@ A bare metal Python library to build and manipulate protein molecular structures
 undertstand that indexing starts at 0 for atoms and residues, unlike the PDB where indexing starts at 1
 
 
+
+
+
+
+
+
+
+
+
+
 ## How to use:
 
 
@@ -57,6 +67,14 @@ pose.Adjust(0, 'N', 0, 'CA', 10)          Adjust the distance between any two at
 pose.Mutate(1, 'V')                       Mutate a residue at sequence index by new residue
 
 
+
+
+
+
+
+
+
+
 ## Example code:
 ```
 sequence = 'GSHMEYLGVFVDETKEYLQNLNDTLLELEKNPEDMELINEAFRALHTLKGMAGTMGFSSMAKLCHTLENILDKARNSEIKITSDLLDKIFAGVDMITRMVDKIVS'
@@ -73,10 +91,6 @@ for i in range(len(sequence)):
 	pose.Rotate(i, S, 'psi')
 pose.PDB('out.pdb')
 ```
-
-
-
-
 
 ## For collaboration:
 If anyone is interested in collaborating and contributing to this library, these are the functions that needs to be developed and added:
