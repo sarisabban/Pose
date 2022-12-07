@@ -71,7 +71,7 @@ for i in range(len(sequence)):
 	if S > 180: S = S - 360
 	pose.Rotate(i, P, 'phi')
 	pose.Rotate(i, S, 'psi')
-pose.PDB('output.pdb')
+pose.PDB('out.pdb')
 ```
 
 
