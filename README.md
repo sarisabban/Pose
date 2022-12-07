@@ -14,7 +14,8 @@ It is important to note that this library uses **zero-based array indexing**, no
 
 
 
-### Description of AminoAcid.json:
+### Description of the AminoAcid.json:
+Use this description to parameterise non-canonical amino acids. Please note that it is not possible at this time to use non-canonical amino acids that are linked to the backbone (that are similar to Proline), the reason is because the atom indexing, removal of backbone atoms to accommodate for a linked sidechain, as well as the bond graph structure is specific to Proline only.
 * Vectors: Are the position of each atom relative to the N of the backbone
 	if the N coorinate is X, Y, Z = 0, 0, 0 you will get the vectors in the
 	JSON file. To find the correct vectors position the N at coordinate
