@@ -2,23 +2,14 @@
 A bare metal Python library to build and manipulate protein molecular structures
 
 ## Description:
-undertstand that indexing starts at 0 for atoms and residues, unlike the PDB where indexing starts at 1
+This library constructs a pose for a protein molecule, which is a data structure for that contains relevant information that defines the polypeptide molecule. Primary information includes the XYZ cartesian coordinates of each atom, the identify and charge of each atom, and the bond graph of the entire molecule, as well as other secondary information such as the FASTA sequence of the molecule, the molecule's radius of gyration, potential energy, and the secondary structure that each amino acid belongs to.
+
+Using this information, the pose can build and manipulate polypeptides, such as building any polypeptide from sequence, move the torsion and rotamer angles, mutate residues, as well as measure the bond lengths and angles. This data structure can be used to build higher level protocols such as simulated annealing, and machine learning-based protein design.
+
+It is important to note that this library uses 
 
 
-
-
-
-
-
-
-
-
-
-
-## How to use:
-
-
-## Description of AminoAcid.json:
+### Description of AminoAcid.json:
 * Vectors: Are the position of each atom relative to the N of the backbone
 	if the N coorinate is X, Y, Z = 0, 0, 0 you will get the vectors in the
 	JSON file. To find the correct vectors position the N at coordinate
@@ -36,7 +27,7 @@ undertstand that indexing starts at 0 for atoms and residues, unlike the PDB whe
 
 
 
-## Description of the polypeptide's data structure:
+### Description of the polypeptide's data structure:
 describe the pose dictionary:
 'Energy':0,								float, default 0, potential energy of molecule
 'Rg':0,									float, default 0, radius of gyration of the molecule
@@ -47,6 +38,16 @@ describe the pose dictionary:
 'Atoms':{},								dictionary, key is index in coordinates, value is atom name, symbol, and charge of each index in coordinates
 'Bond Tree':{},							dictionary, bond graph of the molecule in adjecency list
 'Coordinates':np.array([[0, 0, 0]])}	numpy array, XYZ cartesian coordinates of each atom
+
+
+
+
+
+
+
+
+
+
 
 
 ## Table of methods:
