@@ -40,7 +40,7 @@ class Pose():
 			'FASTA':None,
 			'Amino Acids':{},
 			'Atoms':{},
-			'Bond Tree':{},
+			'Bonds':{},
 			'Coordinates':np.array([[0, 0, 0]])}
 		self.AminoAcids = AminoAcids
 		self.Masses = Masses
@@ -219,7 +219,7 @@ class Pose():
 				BBi.append(atomi)
 		self.data['Amino Acids'][AA_index] = (AA, chain, BBi, SCi, 'L')
 	def BondTree_PRO(self, BB, SC):
-		''' Construct proline bond tree by adding sidechain to backbone '''
+		''' Construct proline bond graph by adding sidechain to backbone '''
 		BBb = self.AminoAcids[BB]['Bonds'].copy()
 		SCb = self.AminoAcids[SC]['Bonds'].copy()
 		for key in list(BBb.keys()): BBb[int(key)] = BBb.pop(key)
@@ -260,7 +260,7 @@ class Pose():
 			BBb[k] = sorted(BBb[k])
 		return(BBb)
 	def BondTree_AA(self, BB, SC):
-		''' Construct amino acid bond tree by adding sidechain to backbone '''
+		''' Construct amino acid bond graph by adding sidechain to backbone '''
 		if SC == 'P':
 			BBb = self.BondTree_PRO(BB, SC)
 			return(BBb)
@@ -291,12 +291,12 @@ class Pose():
 			BBb[k] = sorted(BBb[k])
 		return(BBb)
 	def BondTree(self, BB, AA):
-		''' Update the pose bond tree when adding a new amino acid '''
+		''' Update the pose bond graph when adding a new amino acid '''
 		BBb = self.BondTree_AA(BB, AA)
-		BT = self.data['Bond Tree']
+		BT = self.data['Bonds']
 		length = len(BT)
 		if length == 0:
-			self.data['Bond Tree'] = BBb
+			self.data['Bonds'] = BBb
 			return
 		i_max = max([k for k in BT.keys()])
 		BT[i_max-1] += [i_max+1]
@@ -306,7 +306,7 @@ class Pose():
 			V = [x+length for x in v]
 			if i == 0: V.append(i_max-1)
 			BT[K] = V
-		self.data['Bond Tree'] = BT
+		self.data['Bonds'] = BT
 	def FASTA(self):
 		''' Return FASTA sequence of peptide as a string '''
 		AAs = self.data['Amino Acids']
