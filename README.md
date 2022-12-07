@@ -58,6 +58,7 @@ pose.Mutate(1, 'V')                       Mutate a residue at sequence index by 
 
 
 ## Example code:
+```
 sequence = 'GSHMEYLGVFVDETKEYLQNLNDTLLELEKNPEDMELINEAFRALHTLKGMAGTMGFSSMAKLCHTLENILDKARNSEIKITSDLLDKIFAGVDMITRMVDKIVS'
 pose = Pose()
 pose.Build(sequence)
@@ -70,21 +71,23 @@ for i in range(len(sequence)):
 	if S > 180: S = S - 360
 	pose.Rotate(i, P, 'phi')
 	pose.Rotate(i, S, 'psi')
-pose.PDB('temp.pdb')
+pose.PDB('output.pdb')
+```
+
 
 
 
 
 ## For collaboration:
 If anyone is interested in collaborating and contributing to this library, these are the functions that needs to be developed and added:
-0.  Mutate residues [complete def Mutate()]
-1.  Replace atom and adjust all bonds attached to it
-2.  Import/Export from/to PDB, cif, omol, topol, mmft [re-organise Hs, add missing Hs after importing, separate each chain to a different pose, import only peptide atoms, deal with MSE Selenomethionine]
-3.  2 poses MSA
-4.  2 poses RMSD between them
-5.  DSSP
-6.  OpenBabel
-7.  Find H-bonds in pose
-8.  AMBER energy function
-9.  Simulated Annealing
-10. Relax protocol
+* Mutate residues (complete def Mutate())
+* Replace atom and adjust all bonds attached to it
+* Import/Export from/to PDB, cif, omol, topol, mmft (re-organise Hs, add missing Hs after importing, separate each chain to a different pose, import only peptide atoms, deal with MSE Selenomethionine)
+* 2 poses MSA
+* 2 poses RMSD between them
+* DSSP
+* OpenBabel
+* Find H-bonds in pose
+* AMBER energy function
+* Simulated Annealing
+* Relax protocol
