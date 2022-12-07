@@ -6,7 +6,12 @@ This library constructs a pose for a protein molecule, which is a data structure
 
 Using this information, the pose can build and manipulate polypeptides, such as building any polypeptide from sequence, move the torsion and rotamer angles, mutate residues, as well as measure the bond lengths and angles. This data structure can be used to build higher level protocols such as simulated annealing, and machine learning-based protein design.
 
-It is important to note that this library uses 
+It is important to note that this library uses **zero-based array indexing**, not one-based as is in the PDB. It is thus important to note that the first amino acid and/or the first atom is indexed as 0 and not 1.
+
+
+
+
+
 
 
 ### Description of AminoAcid.json:
