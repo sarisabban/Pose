@@ -50,25 +50,23 @@ describe the pose dictionary:
 
 
 ## Table of methods:
-pose = Pose()                             Construct class
-pose.Build('GGG')                         Construct a polypeptide with this sequence
-pose.PDB('temp.pdb')                      Export pose as .pdb file
-pose.GetAtom(0, 'N')                      Get coordinates of first (0) amino acid's Nitrogen (N)
-pose.SecondaryStructures()                Get a list of each amino acids secondary structure
-pose.Distance(0, 'N', 'CA')               Get distance between any two atoms within the same amino acid
-pose.AtomList(PDB=True)                   Get a list of all the atoms in the polypeptide, PDB=True to get their PDB formatted names
-pose.Identify(0, 'atom', q=True)          Identify what is atom belongs to a particular index in the coordinates, q=True to identify the atom's charge, use 'redisue' or 'amino acid' to identify the amino acid by index in the polypeptide sequence
-pose.Atom3Angle(0, 'N', 0, 'CA', 0, 'C')  Get angle between any three atoms in any amino acid
-print(pose.data)                          Print the dictionary data where all the molecule's information reside
-pose.Info()                               Print all information about the molecule in an organised printout
-pose.Angle(2, 'chi', 1)                   Get phi, psi, omega, chi angles
-pose.Rotate(2, 20, 'chi', 1)              Rotate an angle to x degrees given amino acid position and angle type
-pose.Adjust(0, 'N', 0, 'CA', 10)          Adjust the distance between any two atoms in any residue
-pose.Mutate(1, 'V')                       Mutate a residue at sequence index by new residue
-
-
-
-
+| Method                                  | Description with example |
+|-----------------------------------------|--------------------------|
+|pose = Pose()                            | Construct the Pose class |
+|pose.Build('SARI')                       | Build a polypeptide using a sequence, the polypeptide will be in primary structure. Example: the sequence 'SARI' |
+|pose.PDB('out.pdb')                      | Export the polypeptide to a .pdb file. Example: the output file's name is out.pdb |
+|pose.GetAtom(3, 'N')                     | Get XYZ cartesian coordinates of an atom. Example: third amino acid's Nitrogen atom |
+|pose.SecondaryStructures()               | Get a list of each amino acid's secondary structure H:Helix, S:Sheet, L:Loop |
+|pose.Distance(0, 'N', 1, 'CA')           | Get the distance (in Å) between any two atoms in any amno acid. Example: distance between first amino acid's Nitrogen atom and second amino acid's Carbon alpha atom |
+|pose.AtomList(PDB=True)                  | Get a list of all the atoms in the polypeptide, use PDB=True to get their PDB formatted names |
+|pose.Identify(3, 'atom', q=True)         | Identify what 'atom' type belongs to a particular index in the coordinates matrix, use q=True to identify the atom's charge, use 'redisue' or 'amino acid' to instead identify the amino acid by index in the polypeptide sequence |
+|pose.Atom3Angle(0, 'N', 0, 'CA', 0, 'C') | Get the angle between any three atoms in any amino acid. Example: amino acid 0's Nitrogen, amino acid 0's Carbon alpha, and amino acid 0's Carbon |
+|print(pose.data)                         | Print the dictionary data structure where all the polypeptide's information reside |
+|pose.Info()                              | Print all the information about the polypeptide in an organised printout |
+|pose.Angle(2, 'chi', 1)                  | Get the PHI, PSI, OMEGA, or CHI 1-4 angles of an amino acid. Example: second amino acid's CHI 1 angle | 
+|pose.Rotate(2, 20, 'chi', 1)             | Change an angle to reach a degrees. Example: amino acid 2, change angle to become 20 degrees, the angle type is CHI 1 |
+|pose.Adjust(0, 'N', 0, 'CA', 10)         | Adjust the distance between any two atoms in any amno acids. Example: distance betwen amino acid number 0's Nitrogen atom and amino acid number 0's Carbon alpha atom to become 10 Å |
+|pose.Mutate(1, 'V')                      | Mutate an amno acid. Example: Mutate redidue number 1 to become Valine |
 
 
 
