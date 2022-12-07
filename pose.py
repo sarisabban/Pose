@@ -317,10 +317,10 @@ class Pose():
 		''' Return secondary strucutre of each amino acid of the peptide '''
 		SS = [x[4] for x in self.data['Amino Acids'].values()]
 		return(SS)
-	def Distance(self, AA, atom1, atom2):
+	def Distance(self, AA1, atom1, AA2, atom2):
 		''' Measure distance between any two atoms '''
-		A = self.GetAtom(AA, atom1)
-		B = self.GetAtom(AA, atom2)
+		A = self.GetAtom(AA1, atom1)
+		B = self.GetAtom(AA2, atom2)
 		mag = math.sqrt(np.sum((B-A)**2))
 		mag = round(mag, 3)
 		return(mag)
