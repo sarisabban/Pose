@@ -15,37 +15,28 @@ It is important to note that this library uses **zero-based array indexing**, no
 
 
 ### Description of the AminoAcid.json:
-Use this description to parameterise non-canonical amino acids. Please note that it is not possible at this time to use non-canonical amino acids that are linked to the backbone (that are similar to Proline), the reason is because the atom indexing, removal of backbone atoms to accommodate for a linked sidechain, as well as the bond graph structure is specific to Proline only.
-* Vectors: Are the position of each atom relative to the N of the backbone
-	if the N coorinate is X, Y, Z = 0, 0, 0 you will get the vectors in the
-	JSON file. To find the correct vectors position the N at coordinate
-	X, Y, Z = 0, 0, 0, and use the corresponding coordinates of each atom.
-* Tricode: Is the three letter code for each structure
-* Atoms: The atom identity of each coordinate point, first coordinate point
-	is the nitrogen with symbol N and PDB entry N, next atom is the hydrogen
-	that is bonded to the nitrogen with symbol H and PDB entry 1H etc...
-	Unlike the PDB where all hydrogens of an amino acids are collected after
-	the amino acid, here each atom's hydrogens come right after it. It is so
-	to make the matrix operation easier.
-* Chi Angle Atoms: The atoms in the sidechain that are contributing to a
-	chi angle.
-* Bonds: The bond graph as an adjacency list.
+| Dictionary Key | Value Type    | Description of Values |
+|----------------|---------------|-----------------------|
+| Vectors        | List of lists | : Are the position of each atom relative to the N of the backbone if the N coorinate is X, Y, Z = 0, 0, 0 you will get the vectors in the JSON file. To find the correct vectors position the N at coordinate X, Y, Z = 0, 0, 0, and use the corresponding coordinates of each atom.
+| Tricode        | String        | : Is the three letter code for each structure
+| Atoms          | List of lists | : The atom identity of each coordinate point, first coordinate point is the nitrogen with symbol N and PDB entry N, next atom is the hydrogen that is bonded to the nitrogen with symbol H and PDB entry 1H etc... Unlike the PDB where all hydrogens of an amino acids are collected after the amino acid, here each atom's hydrogens come right after it. It is so to make the matrix operation easier.
+| Chi Angle Atoms| List of lists | : The atoms in the sidechain that are contributing to a chi angle.
+| Bonds          | Dictionary    | : The bond graph as an adjacency list.
 
 
 
 ### Description of the polypeptide's data structure:
-describe the pose dictionary:
-'Energy':0,								float, default 0, potential energy of molecule
-'Rg':0,									float, default 0, radius of gyration of the molecule
-'Mass':0,								float, default 0, mass in Da of the molecule
-'Size':0,								int, default, sequence length of the molecule
-'FASTA':None,							string, default None, FASTA sequence of the molecule
-'Amino Acids':{},						dictionary, key is amino acid index in sequence, values are tuples of amino acid symbol, chain, backbone atom indices, sidechain atom indices, and secondary structure of the amino acid
-'Atoms':{},								dictionary, key is index in coordinates, value is atom name, symbol, and charge of each index in coordinates
-'Bond Tree':{},							dictionary, bond graph of the molecule in adjecency list
-'Coordinates':np.array([[0, 0, 0]])}	numpy array, XYZ cartesian coordinates of each atom
-
-
+| Dictionary Key | Value Type  | Description of Values |
+|----------------|-------------|-----------------------|
+| Energy         | Float       | potential energy of molecule
+| Rg             | Float       | radius of gyration of the molecule
+| Mass           | Float       | mass in Da of the molecule
+| Size           | Int         | sequence length of the molecule
+| FASTA          | String      | FASTA sequence of the molecule
+| Amino Acids    | Dictionary  | key is amino acid index in sequence, values are tuples of amino acid symbol, chain, backbone atom indices, sidechain atom indices, and secondary structure of the amino acid
+| Atoms          | Dictionary  | key is index in coordinates, value is atom name, symbol, and charge of each index in coordinates
+| Bonds          | Dictionary  | bond graph of the molecule in adjecency list
+| Coordinates    | Numpy array | XYZ cartesian coordinates of each atom
 
 
 
