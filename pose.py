@@ -372,8 +372,8 @@ class Pose():
 		atom1 = self.GetAtom(AA1, atom1)
 		atom2 = self.GetAtom(AA2, atom2)
 		atom3 = self.GetAtom(AA3, atom3)
-		A = atom2-atom1
-		B = atom2-atom3
+		A = atom2 - atom1
+		B = atom2 - atom3
 		magA = math.sqrt(A[0]**2 + A[1]**2 + A[2]**2)
 		magB = math.sqrt(B[0]**2 + B[1]**2 + B[2]**2)
 		cos_theta = np.dot(A, B) / (magA * magB)
@@ -638,54 +638,31 @@ class Pose():
 		old_AA = self.data['Amino Acids'][index][0]
 		list_SC = self.data['Amino Acids'][index][3]
 		before = self.data['Coordinates'][:list_SC[0]]
-		side = self.data['Coordinates'][list_SC[0]:list_SC[-1] + 1]
+		old_side = self.data['Coordinates'][list_SC[0]:list_SC[-1] + 1]
 		after = self.data['Coordinates'][list_SC[-1] + 1:]
 		local_N = self.GetAtom(index, 'N')
 		X, Y, Z =  local_N[0], local_N[1], local_N[2]
 		new_SC = self.Insert(new_AA, X, Y, Z)
-		difference = len(new_SC) - len(side)
+		difference = len(new_SC) - len(old_side)
 		side = new_SC
-	############################################################################
-		'''
-		this setup so far correctly places the CB, but all other atoms are wrong
-		one way is to repeat this paragraph for each atom    origin then new location
-		problem is how to determine new location vector (when the starting side chain is different from the replacement side chain)?
-	
-		one way is to determine the vactors of each atom from side chain before transformation
-		then move the CB to new transformed postion
-		then from there pposition each atom according to the new CB position
-		'''
-		# Find out orientation of current CA-CB vector
-		# 1. This is upward N-CA NOT ROTATED vector
-		a = self.GetAtom(index, 'CA') - side[0]
-		mag_a = np.linalg.norm(a)
-		# 2. Find CA-CB rotated vector
-		b = self.GetAtom(index, 'CA') - self.GetAtom(index, 'CB')
-		mag_b = np.linalg.norm(b)
-	
-	
-	
-		# 3. Transform sidechain
-		ori = self.GetAtom(index, 'CA')
-		side = side - ori
-	
-		TM = np.array([
-		[b[0]/a[0],  0       , 0       ],
-		[ 0       , b[1]/a[1], 0       ],
-		[ 0       ,  0       , b[2]/a[2]]])
-		print(TM)
-		side = np.matmul(side, TM)
-	
-		side = side + ori
-	
-	
-		a = np.matmul(a, TM)
-		print(a)
-		print(b)
-	
-	
-	
-	############################################################################
+		CAi = self.GetAtom(index, 'CA')
+		oldSC = old_side - CAi
+		CAl = pose.GetAtom(index, 'N') + np.array([1.458, 0, 0])
+		newSC = side - CAl
+		i = oldSC[0]
+		ui = i / np.linalg.norm(i)
+		l = newSC[0]
+		ul = l / np.linalg.norm(l)
+		v = np.cross(ui, ul)
+		sint = np.linalg.norm(v)
+		cost = np.dot(ui, ul)
+		skew = np.array(
+			[[  0, -v[2], v[1]],
+			[ v[2],   0, -v[0]],
+			[-v[1], v[0],   0]])
+		R = np.identity(3) + skew + (np.dot(skew, skew) *((1-cost)/sint**2))
+		side = np.matmul(newSC, R)
+		side = side + CAi
 		chain = self.data['Amino Acids'][index][1]
 		n = 4
 		if index == 0: n = 6
@@ -734,10 +711,3 @@ class Pose():
 		self.data['FASTA'] = self.FASTA()
 		self.data['Length'] = self.Size()
 		self.data['Rg'] = self.Rg()
-
-
-
-pose = Pose()
-pose.Build('VSV')
-pose.Mutate(1, 'S')
-pose.PDB('temp.pdb')
