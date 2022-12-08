@@ -8,44 +8,27 @@ Using this information, the pose can build and manipulate polypeptides, such as 
 
 It is important to note that this library uses **zero-based array indexing**, not one-based as is in the PDB. It is thus important to note that the first amino acid and/or the first atom is indexed as 0 and not 1.
 
-
-
-
-
-
-
 ### Description of the AminoAcid.json:
 | Dictionary Key | Value Type    | Description of Values |
 |----------------|---------------|-----------------------|
-| Vectors        | List of lists | : Are the position of each atom relative to the N of the backbone if the N coorinate is X, Y, Z = 0, 0, 0 you will get the vectors in the JSON file. To find the correct vectors position the N at coordinate X, Y, Z = 0, 0, 0, and use the corresponding coordinates of each atom.
-| Tricode        | String        | : Is the three letter code for each structure
-| Atoms          | List of lists | : The atom identity of each coordinate point, first coordinate point is the nitrogen with symbol N and PDB entry N, next atom is the hydrogen that is bonded to the nitrogen with symbol H and PDB entry 1H etc... Unlike the PDB where all hydrogens of an amino acids are collected after the amino acid, here each atom's hydrogens come right after it. It is so to make the matrix operation easier.
-| Chi Angle Atoms| List of lists | : The atoms in the sidechain that are contributing to a chi angle.
-| Bonds          | Dictionary    | : The bond graph as an adjacency list.
-
-
+| Vectors        | List of lists | The position of each atom relative to the N of the backbone. If the N coorinate is X, Y, Z = 0, 0, 0 you will get these vectors. To find the correct vectors position the N at coordinate X, Y, Z = 0, 0, 0, and use the corresponding coordinates of each atom.
+| Tricode        | String        | The three letter code for each structure.
+| Atoms          | List of lists | The atom identity of each coordinate point, first coordinate point is the nitrogen with symbol N and PDB entry N, next atom is the hydrogen that is bonded to the nitrogen with symbol H and PDB entry 1H etc... Unlike the PDB where all hydrogens are collected after the amino acid, here each atom's hydrogens come right after it. This makes for easier matrix operations.
+| Chi Angle Atoms| List of lists | The atoms in the sidechain that are contributing to a chi angle.
+| Bonds          | Dictionary    | The bond graph as an adjacency list.
 
 ### Description of the polypeptide's data structure:
 | Dictionary Key | Value Type  | Description of Values |
 |----------------|-------------|-----------------------|
-| Energy         | Float       | potential energy of molecule
-| Rg             | Float       | radius of gyration of the molecule
-| Mass           | Float       | mass in Da of the molecule
-| Size           | Int         | sequence length of the molecule
-| FASTA          | String      | FASTA sequence of the molecule
-| Amino Acids    | Dictionary  | key is amino acid index in sequence, values are tuples of amino acid symbol, chain, backbone atom indices, sidechain atom indices, and secondary structure of the amino acid
-| Atoms          | Dictionary  | key is index in coordinates, value is atom name, symbol, and charge of each index in coordinates
-| Bonds          | Dictionary  | bond graph of the molecule in adjecency list
-| Coordinates    | Numpy array | XYZ cartesian coordinates of each atom
-
-
-
-
-
-
-
-
-
+| Energy         | Float       | The potential energy of the molecule.
+| Rg             | Float       | The radius of gyration of the molecule.
+| Mass           | Float       | The mass of the molecule in Daltons.
+| Size           | Int         | The sequence length of the molecule.
+| FASTA          | String      | The FASTA sequence of the molecule.
+| Amino Acids    | Dictionary  | The key is the index in sequence, the value is the amino acid symbol, chain, backbone atom indices, sidechain atom indices, and the secondary structure the amino acid belongs to.
+| Atoms          | Dictionary  | The key is the index in the coordinates matrix, the value is the atom's PDB symbol, the element symbol, and the charge.
+| Bonds          | Dictionary  | The bond graph of the molecule as an adjecency list.
+| Coordinates    | Numpy array | The XYZ cartesian coordinates of each atom.
 
 ## Table of methods:
 | Method                                   | Description with example |
