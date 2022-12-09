@@ -112,13 +112,85 @@ class Pose():
 						continue
 			TER = 'TER'
 			f.write(TER)
+	def GetAtom_P(self, AA, atom):
+		''' Get specific atom coordinates for the Proline amino acid '''
+		if atom == 'OXT':
+			if AA == 0: n = 1
+			elif AA != 0: n = -1
+			try:
+				OXT = self.data['Amino Acids'][AA][2][6 + n]
+				coordinates = self.data['Coordinates'][OXT]
+				return(coordinates)
+			except:
+				raise Exception('Amino acid does not have this atom')
+		if AA == 0:
+			if atom == '1H':
+				raise Exception('Amino acid does not have this atom')
+			N  = self.data['Amino Acids'][AA][2][0]
+			H2 = self.data['Amino Acids'][AA][2][1]
+			H3 = self.data['Amino Acids'][AA][2][2]
+			CA = self.data['Amino Acids'][AA][2][3]
+			HA = self.data['Amino Acids'][AA][2][4]
+			C  = self.data['Amino Acids'][AA][2][5]
+			O  = self.data['Amino Acids'][AA][2][6]
+		else:
+			N  = self.data['Amino Acids'][AA][2][0]
+			CA = self.data['Amino Acids'][AA][2][1]
+			HA = self.data['Amino Acids'][AA][2][2]
+			C  = self.data['Amino Acids'][AA][2][3]
+			O  = self.data['Amino Acids'][AA][2][4]
+		if atom.upper() == 'N' :
+			coordinates = self.data['Coordinates'][N]
+			return(coordinates)
+		if atom.upper() == '1H':
+			coordinates = self.data['Coordinates'][H1]
+			return(coordinates)
+		if atom.upper() == '2H':
+			coordinates = self.data['Coordinates'][H2]
+			return(coordinates)
+		if atom.upper() == '3H':
+			coordinates = self.data['Coordinates'][H3]
+			return(coordinates)
+		if atom.upper() == 'CA':
+			coordinates = self.data['Coordinates'][CA]
+			return(coordinates)
+		if atom.upper() == 'HA':
+			coordinates = self.data['Coordinates'][HA]
+			return(coordinates)
+		if atom.upper() == 'C' :
+			coordinates = self.data['Coordinates'][C]
+			return(coordinates)
+		if atom.upper() == 'O' :
+			coordinates = self.data['Coordinates'][O]
+			return(coordinates)
+		try:
+			AminoAcid = self.data['Amino Acids'][AA][0]
+			L = self.AminoAcids[AminoAcid]['Sidechain Atoms']
+			amino_index = [x[0] for x in L].index(atom)
+			i = self.data['Amino Acids'][AA][3][amino_index]
+			coordinates = self.data['Coordinates'][i]
+		except ValueError:
+			raise Exception('Amino acid does not have this atom')
+		return(coordinates)
 	def GetAtom(self, AA, atom):
 		''' Get specific atom coordinates '''
 		n = 0
-		if AA != 0 and (atom == 'H2' or atom == 'H3'):
+		Amino = self.data['Amino Acids'][AA][0]
+		if Amino == 'P':
+			coordinates = self.GetAtom_P(AA, atom)
+			return(coordinates)
+		if atom == 'OXT':
+			if AA == 0: n = 2
+			elif AA != 0: n = 0
+			try:
+				OXT = self.data['Amino Acids'][AA][2][6 + n]
+				coordinates = self.data['Coordinates'][OXT]
+				return(coordinates)
+			except:
+				raise Exception('Amino acid does not have this atom')
+		if AA != 0 and (atom == '2H' or atom == '3H'):
 			raise Exception('Amino acid does not have this atom')
-			exit()
-		if AA == 0:
+		elif AA == 0:
 			n = 2
 			H2 = self.data['Amino Acids'][AA][2][2]
 			H3 = self.data['Amino Acids'][AA][2][3]
@@ -131,13 +203,13 @@ class Pose():
 		if atom.upper() == 'N' :
 			coordinates = self.data['Coordinates'][N]
 			return(coordinates)
-		if atom.upper() == 'H1':
+		if atom.upper() == '1H':
 			coordinates = self.data['Coordinates'][H1]
 			return(coordinates)
-		if atom.upper() == 'H2':
+		if atom.upper() == '2H':
 			coordinates = self.data['Coordinates'][H2]
 			return(coordinates)
-		if atom.upper() == 'H3':
+		if atom.upper() == '3H':
 			coordinates = self.data['Coordinates'][H3]
 			return(coordinates)
 		if atom.upper() == 'CA':
@@ -187,36 +259,26 @@ class Pose():
 		SC = self.Insert(aa, X, Y, Z)
 		AA = np.insert(BB, index, SC, axis=0)
 		if flip: AA = self.Flip(AA)
+		if aa == 'P': AA = np.delete(AA, [1], axis=0)
 		self.data['Coordinates'] = \
 		np.append(self.data['Coordinates'], AA, axis=0)
 		if backbone_type == 'Backbone' or backbone_type == 'Backbone start':
 			self.data['Coordinates'] = \
 			np.delete(self.data['Coordinates'], [0], axis=0)
-			if aa == 'P':
-				self.data['Coordinates'] = \
-				np.delete(self.data['Coordinates'], [1], axis=0)
 	def Atoms(self, AA, chain, backbone_type, BB_index, AA_index, I):
 		''' Construct, and add to pose, atom and amino acid identities '''
 		BB = backbone_type[:BB_index]
-		if backbone_type == self.AminoAcids['Backbone']['Backbone Atoms'] \
-		or backbone_type == self.AminoAcids['Backbone start']['Backbone Atoms']:
-			if AA == 'P': BB.pop(1)
+		if AA == 'P': BB.pop(1)
 		BB = BB + self.AminoAcids[AA]['Sidechain Atoms']
 		BB = BB + backbone_type[BB_index:]
 		BBi = []
 		SCi = []
-		BBtop = BB_index
-		SCtop = len(self.AminoAcids[AA]['Sidechain Atoms'])
 		for atomi, v in enumerate(BB, I):
 			self.data['Atoms'][atomi] = v
-			if BBtop != 0:
+			if v[0] in ['N', '1H', '2H', '3H', 'CA', 'HA', 'C', 'O', 'OXT']:
 				BBi.append(atomi)
-				BBtop -= 1
-			elif BBtop == 0 and SCtop != 0:
-				SCi.append(atomi)
-				SCtop -= 1
 			else:
-				BBi.append(atomi)
+				SCi.append(atomi)
 		self.data['Amino Acids'][AA_index] = (AA, chain, BBi, SCi, 'L')
 	def BondTree_PRO(self, BB, SC):
 		''' Construct proline bond graph by adding sidechain to backbone '''
@@ -390,7 +452,6 @@ class Pose():
 		print('Energy:\t\t{}'.format(self.data['Energy']))
 	def Build(self, sequence, chain='A'):
 		''' Build a polypeptide primary structure from sequence '''
-		sequence = sequence.upper()
 		X, Y, Z = 0, 0, 0
 		Ex_adjust, Ey_adjust, Ez_adjust = 0.400, 1.472, 0
 		Ox_adjust, Oy_adjust, Oz_adjust = 0.812, 0.940, 0
@@ -635,6 +696,8 @@ class Pose():
 			self.data['Coordinates'] = combine
 	def Mutate(self, index, new_AA):
 		''' Mutate an amino acid into a different amino acid '''
+		original = self.data['Amino Acids'][index][0]
+		if original == new_AA: return
 		old_AA = self.data['Amino Acids'][index][0]
 		list_SC = self.data['Amino Acids'][index][3]
 		before = self.data['Coordinates'][:list_SC[0]]
@@ -664,6 +727,9 @@ class Pose():
 		side = np.matmul(newSC, R)
 		side = side + CAi
 		chain = self.data['Amino Acids'][index][1]
+		if original == 'P':
+			self.Mutate_from_P(index, before, side, after, difference, new_AA)
+			return
 		n = 4
 		if index == 0: n = 6
 		BBi_before = self.data['Amino Acids'][index][2][:n]
@@ -707,7 +773,113 @@ class Pose():
 		self.data['Atoms'] = new_Atoms
 		new = np.concatenate((before, side, after))
 		self.data['Coordinates'] = new
+		if new_AA == 'P':
+			Ai  = self.data['Atoms']
+			H1i = [i for i in BBi if Ai[i][0] == '1H'][0]
+			self.data['Coordinates'] = \
+			np.delete(self.data['Coordinates'], H1i, axis=0)
+			Ai.pop(H1i)
+			for key in list(Ai.keys()):
+				if key > self.data['Amino Acids'][index][2][0]:
+					Ai[key - 1] = Ai.pop(key)
+			for i in range(index, len(self.data['Amino Acids'])):
+				amino = self.data['Amino Acids'][i][0]
+				chain = self.data['Amino Acids'][i][1]
+				oBBi  = self.data['Amino Acids'][i][2]
+				oSCi  = self.data['Amino Acids'][i][3]
+				SS    = self.data['Amino Acids'][i][4]
+				if i == index:
+					nBBi = [x-1 for x in oBBi if x != oBBi[0]]
+				else:
+					nBBi = [x-1 for x in oBBi]
+				nSCi = [x-1 for x in oSCi]
+				pose.data['Amino Acids'][i] = (amino, chain, nBBi, nSCi, SS)
+		if len(self.AminoAcids[new_AA]['Chi Angle Atoms']) != 0:
+			self.Rotate(index, 0, 'CHI', 1)
 		self.data['Mass'] = self.Mass()
 		self.data['FASTA'] = self.FASTA()
 		self.data['Length'] = self.Size()
 		self.data['Rg'] = self.Rg()
+##############
+#		adjust bond tree
+#		old_bonds = self.data['Bonds']
+#		SCb = self.AminoAcids[new_AA]['Bonds']
+#		for key in list(SCb.keys()): SCb[int(key)] = SCb.pop(key)
+#		length = len(SCb)
+#		BBi = self.data['Amino Acids'][index][2]
+#		Ai  = self.data['Atoms']
+#		CAi = [i for i in BBi if Ai[i][0] == 'CA'][0]
+
+
+
+
+	def Mutate_from_P(self, index, before, side, after, difference, new_AA):
+		''' Specifically mutating proline into any other amino acid '''
+		n = 3
+		H1i = self.data['Amino Acids'][index][2][:n][1]
+		H1c = self.GetAtom(index, 'N') + np.array([-0.334,  0.471,  0.816])
+		before = np.insert(before, H1i, H1c, axis=0)
+		new = np.concatenate((before, side, after))
+		BBi_before = self.data['Amino Acids'][index][2][:n]
+		atoms = self.data['Atoms']
+		before_indices = [x for x in range(BBi_before[-1] + 1)]
+		before_values = []
+		for k, v in zip(atoms.keys(), atoms.values()):
+			if k <= BBi_before[-1]:
+				before_values.append(v)
+		before_indices.append(before_indices[-1] + 1)
+		before_values.insert(H1i, ['1H', 'H', 0])
+		side_values = [x for x in self.AminoAcids[new_AA]['Sidechain Atoms']]
+		R = range(BBi_before[-1] + 1, BBi_before[-1] + len(side_values) + 1)
+		side_indices = [x + 1 for x in R]
+		list_SC = self.data['Amino Acids'][index][3]
+		R = range(list_SC[-1]+1, len(atoms))
+		after_indices = [x + difference + 1 for x in R]
+		after_values = []
+		for k, v in zip(atoms.keys(), atoms.values()):
+			if k >= list_SC[-1] + 1:
+				after_values.append(v)
+		new_Atoms = {}
+		for k, v in zip(before_indices, before_values):
+			new_Atoms[k] = v
+		for k, v in zip(side_indices, side_values):
+			new_Atoms[k] = v
+		for k, v in zip(after_indices, after_values):
+			new_Atoms[k] = v
+		chain = self.data['Amino Acids'][index][1]
+		BBi_after = self.data['Amino Acids'][index][2][n:]
+		BBi_after = [x + difference + 1 for x in BBi_after]
+		BBi_before.append(BBi_before[-1] + 1)
+		BBi = BBi_before + BBi_after
+		SCi = side_indices
+		self.data['Amino Acids'][index] = (new_AA, chain, BBi, SCi, 'L')
+		AA_dict = self.data['Amino Acids']
+		for k, v in zip(AA_dict.keys(), AA_dict.values()):
+			if k > index:
+				aa = v[0]
+				ch = v[1]
+				bb = [x + difference + 1 for x in v[2]]
+				sc = [x + difference + 1 for x in v[3]]
+				ss = v[4]
+				self.data['Amino Acids'][k] = (aa, ch, bb, sc, ss)
+		self.data['Atoms'] = new_Atoms
+		self.data['Coordinates'] = new
+		if len(self.AminoAcids[new_AA]['Chi Angle Atoms']) != 0:
+			self.Rotate(index, 0, 'CHI', 1)
+
+sequence = 'GPG'
+
+pose = Pose()
+pose.Build(sequence)
+pose.Rotate(0, 20, 'psi')
+pose.PDB('ori.pdb')
+
+pose = Pose()
+pose.Build(sequence)
+pose.Rotate(0, 20, 'psi')
+pose.Mutate(1, 'V')
+pose.PDB('temp.pdb')
+
+import os
+os.system('pymol *.pdb')
+os.system('rm *.pdb')
