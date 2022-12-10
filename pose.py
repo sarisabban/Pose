@@ -894,15 +894,72 @@ class Pose():
 		n_bonds.update(n_side)
 		n_bonds.update(n_after)
 		self.data['Bonds'] = n_bonds
-
 	def UpdateBonds_P(self, index, new_AA, list_SC):
 		''' Adjust the bond graph after mutation '''
-		print('HERE')
+		if new_AA != 'P':
+			n = 3
+			if index == 0: n += 2
+			old_bonds = self.data['Bonds']
+			before = self.data['Amino Acids'][index][2][:n]
+			before.append(before[-1] + 1)
+			side = list_SC
+			i1 = list_SC[-1] + 1
+			il = max([x[0] for x in self.data['Bonds'].items()])
+			after = [x for x in range(i1, il + 1)]
+			difference = len(self.data['Amino Acids'][index][3]) - len(side)
+			CA = old_bonds[after[0]][0] + 1
+			N = before[0]
+			old_bondsH = {}
+			for k, v in zip(old_bonds.keys(), old_bonds.values()):
+				if k > N:
+					k += 1
+				else:
+					k += 0
+				old_bondsH[k] = v
+			old_bondsH[N + 1] = [N]
+			n_before = {}
+			for i in range(before[-1] + 1):
+				n_before[i] = old_bondsH[i]
+			n_before[N][0] = n_before[N][1] + 1
+			n_before[CA][1] = n_before[CA][1] + 1
+			n_before[CA][2] = n_before[CA][2] + 1
+			n_before[CA][3] = n_before[CA][3] + difference + 1
+			n_before[CA + 1] = [n_before[CA + 1][0] + 1]
+			sides = self.AminoAcids[new_AA]['Bonds']
+			for key in list(sides.keys()): sides[int(key)] = sides.pop(key)
+			n_side = {}
+			L = max([x[0] for x in n_before.items()]) + 1
+			for i in range(len(sides)):
+				v = sides[i]
+				v = [x + L for x in v]
+				k = i + 1 + before[-1]
+				n_side[k] = v
+			l = min([x[0] for x in n_side.items()])
+			if len(sides) == 1: n_side[l] = []
+			n_side[l].append(CA)
+			n_after = {}
+			for i in after:
+				v = old_bonds[i]
+				v = [x+1 if x==CA-1 else x + difference + 1 for x in v]
+				k = i + difference + 1
+				n_after[k] = v
+			n_bonds = {}
+			n_bonds.update(n_before)
+			n_bonds.update(n_side)
+			n_bonds.update(n_after)
+			self.data['Bonds'] = n_bonds
+		elif new_AA == 'P':
+			print('HERE')
+
+
+
+
+
 
 
 
 pose = Pose()
-pose.Build('GPG')
-pose.Mutate(1, 'V')
-#x = pose.data['Bonds']
-#for i in x.items(): print(i)
+pose.Build('GGG')
+pose.Mutate(1, 'P')
+x = pose.data['Bonds']
+for i in x.items(): print(i)
