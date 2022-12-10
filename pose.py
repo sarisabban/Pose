@@ -998,3 +998,46 @@ class Pose():
 			n_bonds.update(n_side)
 			n_bonds.update(n_after)
 			self.data['Bonds'] = n_bonds
+	def Rotation_NCaC(self, AA, theta):
+		''' Change angle between three atoms '''
+		amino = self.data['Amino Acids'][AA][0]
+		atoms = self.data['Atoms']
+		BB = self.data['Amino Acids'][AA][2]
+		SC = self.data['Amino Acids'][AA][3]
+		AAi = BB + SC
+		Ni, Cai, Ci = None, None, None
+		for i in AAi:
+			if   atoms[i][0] == 'N' : Ni  = i
+			elif atoms[i][0] == 'CA': Cai = i
+			elif atoms[i][0] == 'C' : Ci  = i
+		before = self.data['Coordinates'][:Ci]
+		after  = self.data['Coordinates'][Ci:]
+		A = self.GetAtom(AA, 'HA')
+		if amino == 'G':
+			B = self.GetAtom(AA, '2HA')
+		else:
+			B = self.GetAtom(AA, 'CB')##############
+
+
+
+
+		u = B - A
+		lu = np.linalg.norm(u)
+		u = u / lu
+		ori = self.GetAtom(AA, 'CA')
+		after = after - ori
+		RM = self.Rotation_Matrix(-theta, u)
+		after = np.matmul(after, RM)
+		after = after + ori
+		combine = np.append(before, after, axis=0)
+		self.data['Coordinates'] = combine
+
+
+
+pose = Pose()
+pose.Build('AAA')
+angle = pose.Atom3Angle(1, 'N', 1, 'CA', 1, 'C')
+print(angle)
+pose.Rotation_NCaC(1, 5)
+angle = pose.Atom3Angle(1, 'N', 1, 'CA', 1, 'C')
+print(angle)
