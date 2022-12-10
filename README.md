@@ -48,7 +48,7 @@ It is important to note that this library uses **zero-based array indexing**, no
 | pose.Rotate(2, 20, 'chi', 1)             | Change an angle to reach a degrees. Example: third amino acid, change angle to become 20 degrees, the angle type is CHI 1 |
 | pose.Adjust(0, 'N', 0, 'CA', 10)         | Adjust the distance between any two atoms in any amno acid. Example: distance between first amino acid's Nitrogen and first amino acid's Carbon alpha to become 10 Å |
 | pose.Mutate(1, 'V')                      | Mutate an amno acid. Example: Mutate second amino acid to become Valine |
-| pose.Rotation_NCaC(1, 20)                 | Change the N-Ca-C angle to reach a degrees. Example: second amino acid, change angle to become 20 degrees | 
+| pose.Rotation_NCaC(1, -2)                 | Add/Subtract the N-Ca-C angle from current degrees. Example: second amino acid, subtract 2 degrees | 
 
 ## Example code:
 ```
