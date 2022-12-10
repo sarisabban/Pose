@@ -76,4 +76,4 @@ If anyone is interested in collaborating and contributing to this library, these
 5. Find H-bonds in pose
 6. calculate DSSP
 7. AMBER energy function
-8. Simulated Annealing (Relax protocol)
+8. Simulated Annealing (Minimisatin/Relax protocol)
