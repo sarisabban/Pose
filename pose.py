@@ -848,6 +848,8 @@ class Pose():
 					nBBi = [x-1 for x in oBBi]
 				nSCi = [x-1 for x in oSCi]
 				pose.data['Amino Acids'][i] = (amino, chain, nBBi, nSCi, SS)
+			self.UpdateBonds_P(index, new_AA, list_SC)
+			return
 		if len(self.AminoAcids[new_AA]['Chi Angle Atoms']) != 0:
 			self.Rotate(index, 0, 'CHI', 1)
 		self.data['Mass'] = self.Mass()
@@ -903,7 +905,7 @@ class Pose():
 			before = self.data['Amino Acids'][index][2][:n]
 			before.append(before[-1] + 1)
 			side = list_SC
-			i1 = list_SC[-1] + 1
+			i1 = max(list_SC) + 1
 			il = max([x[0] for x in self.data['Bonds'].items()])
 			after = [x for x in range(i1, il + 1)]
 			difference = len(self.data['Amino Acids'][index][3]) - len(side)
@@ -949,17 +951,50 @@ class Pose():
 			n_bonds.update(n_after)
 			self.data['Bonds'] = n_bonds
 		elif new_AA == 'P':
-			print('HERE')
-
-
-
-
-
-
-
-
-pose = Pose()
-pose.Build('GGG')
-pose.Mutate(1, 'P')
-x = pose.data['Bonds']
-for i in x.items(): print(i)
+			n = 3
+			if index == 0: n += 2
+			old_bondsH = self.data['Bonds']
+			before = self.data['Amino Acids'][index][2][:n]
+			side = list_SC
+			sides = self.AminoAcids[new_AA]['Bonds']
+			for key in list(sides.keys()): sides[int(key)] = sides.pop(key)
+			H = before[1]
+			del old_bondsH[H]
+			i1 = max(list_SC) + 1
+			il = max([x[0] for x in self.data['Bonds'].items()])
+			after = [x for x in range(i1, il + 1)]
+			old_bonds = {}
+			for k, v in zip(old_bondsH.keys(), old_bondsH.values()):
+				if k > H-1:
+					k -= 1
+				else:
+					k -= 0
+				old_bonds[k] = v
+			n_before = {}
+			for i in range(before[-1] + 1):
+				n_before[i] = old_bonds[i]
+			n_before[H - 1][1] = n_before[H - 1][1] + len(sides) - 3
+			n_before[H] = [x if x == H - 1 else x - 1 for x in n_before[H]]
+			n_before[H][-1] = n_before[H][-1] + len(sides) - 5
+			n_before[H + 1] = [n_before[H + 1][0] - 1]
+			n_side = {}
+			L = max([x[0] for x in n_before.items()]) + 1
+			for i in range(len(sides) - 1):
+				v = sides[i]
+				v = [x + L for x in v]
+				k = i + 1 + before[-1]
+				n_side[k] = v
+			n_side[H + 2].append(H)
+			n_side[H + 8][-1] = n_side[H + 8][-1] + 2
+			difference = len(self.data['Amino Acids'][index][3]) - len(side)
+			n_after = {}
+			for i in after:
+				v = old_bonds[i - 1]
+				v = [x-1 if x==H+1 else x + difference - 1 for x in v]
+				k = i + difference - 1
+				n_after[k] = v
+			n_bonds = {}
+			n_bonds.update(n_before)
+			n_bonds.update(n_side)
+			n_bonds.update(n_after)
+			self.data['Bonds'] = n_bonds
