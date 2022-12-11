@@ -1016,11 +1016,10 @@ class Pose():
 		if amino == 'G':
 			B = self.GetAtom(AA, '2HA')
 		else:
-			B = self.GetAtom(AA, 'CB')##############
-
-
-
-
+			CB = self.GetAtom(AA, 'CB')
+			CA = self.GetAtom(AA, 'CA')
+			u = (CB - CA) / 1.39805509187
+			B = u + CA
 		u = B - A
 		lu = np.linalg.norm(u)
 		u = u / lu
@@ -1031,13 +1030,3 @@ class Pose():
 		after = after + ori
 		combine = np.append(before, after, axis=0)
 		self.data['Coordinates'] = combine
-
-
-
-pose = Pose()
-pose.Build('AAA')
-angle = pose.Atom3Angle(1, 'N', 1, 'CA', 1, 'C')
-print(angle)
-pose.Rotation_NCaC(1, 5)
-angle = pose.Atom3Angle(1, 'N', 1, 'CA', 1, 'C')
-print(angle)
