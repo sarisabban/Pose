@@ -68,12 +68,11 @@ pose.PDB('out.pdb')
 
 ## For collaboration:
 If anyone is interested in collaborating and contributing to this library, these are the functions that needs to be developed and added:
-1. Import/Export from/to PDB, cif, omol, topol, mmft (re-organise Hs, add missing Hs after importing, separate each chain to a different pose, import only peptide atoms, deal with MSE Selenomethionine)
-2. 2 poses MSA
-3. 2 poses RMSD between them
-
-4. Calculating Gasteiger Partial Charges
-5. Find H-bonds in pose
-6. calculate DSSP
-7. AMBER energy function
-8. Simulated Annealing (Minimisatin/Relax protocol)
+1. **Easy**: Import from PDB, remove all Hs, then add missing Hs, separate each chain to a different pose, import only peptide atoms, deal with MSE Selenomethionine
+2. **Easy**: 2 poses MSA
+3. **Moderate**: 2 poses RMSD between them
+4. **Moderate**: Calculating Gasteiger Partial Charges
+5. **Moderate**: Find H-bonds in pose
+6. **Moderate**: calculate DSSP
+7. **Hard**: AMBER energy function
+8. **Easy** - if energy function is available: Simulated Annealing (Minimisatin/Relax protocol)
