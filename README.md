@@ -6,6 +6,7 @@ This library constructs a pose for a protein molecule, which is a data structure
 
 Using this information, the pose can build and manipulate polypeptides, such as building any polypeptide from sequence, move the torsion and rotamer angles, mutate residues, as well as measure the bond lengths and angles. This data structure can be used to build higher level protocols such as simulated annealing, and machine learning-based protein design.
 
+> __Note__
 It is important to note that this library uses **zero-based array indexing**, not one-based as is in the PDB. It is thus important to note that the first amino acid and/or the first atom is indexed as 0 and not 1.
 
 ### Description of the AminoAcid.json:
@@ -69,7 +70,7 @@ pose.PDB('out.pdb')
 ## For collaboration:
 If anyone is interested in collaborating and contributing to this library, these are the functions that needs to be developed and added:
 1. **Easy**: Import from PDB, remove all Hs, then add missing Hs, separate each chain to a different pose, import only peptide atoms, deal with MSE Selenomethionine
-2. **Easy**: 2 poses MSA
+2. **Easy**: 2 poses BLAST & MSA
 3. **Moderate**: 2 poses RMSD between them
 4. **Moderate**: Calculating Gasteiger Partial Charges
 5. **Moderate**: Find H-bonds in pose
