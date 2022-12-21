@@ -64,7 +64,7 @@ class Pose():
 		E = '{:<2} \n'.format(e)
 		entry = ATOM + N + A + L + R + C + S + I + X + Y + Z + O + T + Q + E
 		return(entry)
-	def PDB(self, filename):
+	def Export(self, filename):
 		''' Export pose to a .pdb file '''
 		with open(filename, 'w') as f:
 			DATE = datetime.date.today().strftime("%d-%b-%Y")
@@ -95,7 +95,7 @@ class Pose():
 				y = coordinate[1]
 				z = coordinate[2]
 				o = 1.0
-				t = 0.0
+				t = atom[1][3]
 				q = atom[1][2]
 				e = atom[1][1]
 				line = self.PDB_entry(A,n,a,l,r,c,s,i,x,y,z,o,t,q,e)
@@ -539,7 +539,7 @@ class Pose():
 		''' Measure angle at bond '''
 		AminoAcid = self.data['Amino Acids'][AA][0]
 		if angle_type.upper() == 'PHI':
-			if AA == 0: r1 = self.GetAtom(AA, 'N') - self.GetAtom(AA, 'CA')
+			if AA == 0: return(0.0)
 			else: r1 = self.GetAtom(AA-1, 'C')
 			r2 = self.GetAtom(AA, 'N')
 			r3 = self.GetAtom(AA, 'CA')
@@ -551,7 +551,7 @@ class Pose():
 			try:
 				r4 = self.GetAtom(AA+1, 'N')
 			except:
-				r4 = self.GetAtom(AA,'C')+self.GetAtom(AA,'CA')+[0.091,0.025,0]
+				return(0.0)
 		if angle_type.upper() == 'OMEGA':
 			r1 = self.GetAtom(AA, 'CA')
 			r2 = self.GetAtom(AA, 'C')
@@ -694,310 +694,6 @@ class Pose():
 			combine = np.append(before, side, axis=0)
 			combine = np.append(combine, after, axis=0)
 			self.data['Coordinates'] = combine
-	def Mutate_from_P(self, index, before, side, after, difference, new_AA):
-		''' Specifically mutating proline into any other amino acid '''
-		n = 3
-		H1i = self.data['Amino Acids'][index][2][:n][1]
-		H1c = self.GetAtom(index, 'N') + np.array([-0.334,  0.471,  0.816])
-		before = np.insert(before, H1i, H1c, axis=0)
-		new = np.concatenate((before, side, after))
-		BBi_before = self.data['Amino Acids'][index][2][:n]
-		atoms = self.data['Atoms']
-		before_indices = [x for x in range(BBi_before[-1] + 1)]
-		before_values = []
-		for k, v in zip(atoms.keys(), atoms.values()):
-			if k <= BBi_before[-1]:
-				before_values.append(v)
-		before_indices.append(before_indices[-1] + 1)
-		before_values.insert(H1i, ['1H', 'H', 0])
-		side_values = [x for x in self.AminoAcids[new_AA]['Sidechain Atoms']]
-		R = range(BBi_before[-1] + 1, BBi_before[-1] + len(side_values) + 1)
-		side_indices = [x + 1 for x in R]
-		list_SC = self.data['Amino Acids'][index][3]
-		R = range(list_SC[-1]+1, len(atoms))
-		after_indices = [x + difference + 1 for x in R]
-		after_values = []
-		for k, v in zip(atoms.keys(), atoms.values()):
-			if k >= list_SC[-1] + 1:
-				after_values.append(v)
-		new_Atoms = {}
-		for k, v in zip(before_indices, before_values):
-			new_Atoms[k] = v
-		for k, v in zip(side_indices, side_values):
-			new_Atoms[k] = v
-		for k, v in zip(after_indices, after_values):
-			new_Atoms[k] = v
-		chain = self.data['Amino Acids'][index][1]
-		BBi_after = self.data['Amino Acids'][index][2][n:]
-		BBi_after = [x + difference + 1 for x in BBi_after]
-		BBi_before.append(BBi_before[-1] + 1)
-		BBi = BBi_before + BBi_after
-		SCi = side_indices
-		self.data['Amino Acids'][index] = (new_AA, chain, BBi, SCi, 'L')
-		AA_dict = self.data['Amino Acids']
-		for k, v in zip(AA_dict.keys(), AA_dict.values()):
-			if k > index:
-				aa = v[0]
-				ch = v[1]
-				bb = [x + difference + 1 for x in v[2]]
-				sc = [x + difference + 1 for x in v[3]]
-				ss = v[4]
-				self.data['Amino Acids'][k] = (aa, ch, bb, sc, ss)
-		self.data['Atoms'] = new_Atoms
-		self.data['Coordinates'] = new
-		if len(self.AminoAcids[new_AA]['Chi Angle Atoms']) != 0:
-			self.Rotate(index, 0, 'CHI', 1)
-		self.UpdateBonds_P(index, new_AA, list_SC)
-	def Mutate(self, index, new_AA):
-		''' Mutate an amino acid into a different amino acid '''
-		original = self.data['Amino Acids'][index][0]
-		if original == new_AA: return
-		old_AA = self.data['Amino Acids'][index][0]
-		list_SC = self.data['Amino Acids'][index][3]
-		before = self.data['Coordinates'][:list_SC[0]]
-		old_side = self.data['Coordinates'][list_SC[0]:list_SC[-1] + 1]
-		after = self.data['Coordinates'][list_SC[-1] + 1:]
-		local_N = self.GetAtom(index, 'N')
-		X, Y, Z =  local_N[0], local_N[1], local_N[2]
-		new_SC = self.Insert(new_AA, X, Y, Z)
-		difference = len(new_SC) - len(old_side)
-		side = new_SC
-		CAi = self.GetAtom(index, 'CA')
-		oldSC = old_side - CAi
-		CAl = pose.GetAtom(index, 'N') + np.array([1.458, 0, 0])
-		newSC = side - CAl
-		i = oldSC[0]
-		ui = i / np.linalg.norm(i)
-		l = newSC[0]
-		ul = l / np.linalg.norm(l)
-		v = np.cross(ui, ul)
-		sint = np.linalg.norm(v)
-		cost = np.dot(ui, ul)
-		skew = np.array(
-			[[  0, -v[2], v[1]],
-			[ v[2],   0, -v[0]],
-			[-v[1], v[0],   0]])
-		R = np.identity(3) + skew + (np.dot(skew, skew) *((1-cost)/sint**2))
-		side = np.matmul(newSC, R)
-		side = side + CAi
-		chain = self.data['Amino Acids'][index][1]
-		if original == 'P':
-			self.Mutate_from_P(index, before, side, after, difference, new_AA)
-			return
-		n = 4
-		if index == 0: n = 6
-		BBi_before = self.data['Amino Acids'][index][2][:n]
-		BBi_after = self.data['Amino Acids'][index][2][n:]
-		BBi_after = [x + difference for x in BBi_after]
-		BBi = BBi_before + BBi_after
-		len_SCi = len(self.AminoAcids[new_AA]['Sidechain Atoms'])
-		SCi = [x + 1 + BBi_before[-1] for x in range(len_SCi)]
-		self.data['Amino Acids'][index] = (new_AA, chain, BBi, SCi, 'L')
-		AA_dict = self.data['Amino Acids']
-		for k, v in zip(AA_dict.keys(), AA_dict.values()):
-			if k > index:
-				aa = v[0]
-				ch = v[1]
-				bb = [x + difference for x in v[2]]
-				sc = [x + difference for x in v[3]]
-				ss = v[4]
-				self.data['Amino Acids'][k] = (aa, ch, bb, sc, ss)
-		atoms = self.data['Atoms']
-		ori_len = len(self.data['Atoms'])
-		before_indices = [x for x in range(BBi_before[-1] + 1)]
-		before_values = []
-		for k, v in zip(atoms.keys(), atoms.values()):
-			if k <= BBi_before[-1]:
-				before_values.append(v)
-		side_values = [x for x in self.AminoAcids[new_AA]['Sidechain Atoms']]
-		R = range(BBi_before[-1] + 1, BBi_before[-1] + len(side_values) + 1)
-		side_indices = [x for x in R]
-		after_indices = [x + difference for x in range(list_SC[-1]+1, ori_len)]
-		after_values = []
-		for k, v in zip(atoms.keys(), atoms.values()):
-			if k >= list_SC[-1] + 1:
-				after_values.append(v)
-		new_Atoms = {}
-		for k, v in zip(before_indices, before_values):
-			new_Atoms[k] = v
-		for k, v in zip(side_indices, side_values):
-			new_Atoms[k] = v
-		for k, v in zip(after_indices, after_values):
-			new_Atoms[k] = v
-		self.data['Atoms'] = new_Atoms
-		new = np.concatenate((before, side, after))
-		self.data['Coordinates'] = new
-		if new_AA == 'P':
-			Ai  = self.data['Atoms']
-			H1i = [i for i in BBi if Ai[i][0] == '1H'][0]
-			self.data['Coordinates'] = \
-			np.delete(self.data['Coordinates'], H1i, axis=0)
-			Ai.pop(H1i)
-			for key in list(Ai.keys()):
-				if key > self.data['Amino Acids'][index][2][0]:
-					Ai[key - 1] = Ai.pop(key)
-			for i in range(index, len(self.data['Amino Acids'])):
-				amino = self.data['Amino Acids'][i][0]
-				chain = self.data['Amino Acids'][i][1]
-				oBBi  = self.data['Amino Acids'][i][2]
-				oSCi  = self.data['Amino Acids'][i][3]
-				SS    = self.data['Amino Acids'][i][4]
-				if i == index:
-					nBBi = [x-1 for x in oBBi if x != oBBi[0]]
-				else:
-					nBBi = [x-1 for x in oBBi]
-				nSCi = [x-1 for x in oSCi]
-				pose.data['Amino Acids'][i] = (amino, chain, nBBi, nSCi, SS)
-			self.UpdateBonds_P(index, new_AA, list_SC)
-			return
-		if len(self.AminoAcids[new_AA]['Chi Angle Atoms']) != 0:
-			self.Rotate(index, 0, 'CHI', 1)
-		self.data['Mass'] = self.Mass()
-		self.data['FASTA'] = self.FASTA()
-		self.data['Length'] = self.Size()
-		self.data['Rg'] = self.Rg()
-		self.UpdateBonds(index, new_AA, list_SC)
-	def UpdateBonds(self, index, new_AA, list_SC):
-		''' Adjust the bond graph after mutation '''
-		n = 4
-		if index == 0: n += 2
-		old_bonds = self.data['Bonds']
-		before = self.data['Amino Acids'][index][2][:n]
-		side = list_SC
-		i1 = list_SC[-1] + 1
-		il = max([x[0] for x in self.data['Bonds'].items()])
-		after = [x for x in range(i1, il + 1)]
-		difference = len(self.data['Amino Acids'][index][3]) - len(side)
-		CA = old_bonds[after[0]][0]
-		n_before = {}
-		for i in range(before[-1] + 1):
-			n_before[i] = old_bonds[i]
-		n_before[CA][-1] = after[0] + difference
-		sides = self.AminoAcids[new_AA]['Bonds']
-		for key in list(sides.keys()): sides[int(key)] = sides.pop(key)
-		n_side = {}
-		L = max([x[0] for x in n_before.items()]) + 1
-		for i in range(len(sides)):
-			v = sides[i]
-			v = [x + L for x in v]
-			k = i + 1 + before[-1]
-			n_side[k] = v
-		l = min([x[0] for x in n_side.items()])
-		if len(sides) == 1: n_side[l] = []
-		n_side[l].append(CA)
-		n_after = {}
-		for i in after:
-			v = old_bonds[i]
-			v = [x if x==CA else x + difference for x in v]
-			k = i + difference
-			n_after[k] = v
-		n_bonds = {}
-		n_bonds.update(n_before)
-		n_bonds.update(n_side)
-		n_bonds.update(n_after)
-		self.data['Bonds'] = n_bonds
-	def UpdateBonds_P(self, index, new_AA, list_SC):
-		''' Adjust the bond graph after mutation '''
-		if new_AA != 'P':
-			n = 3
-			if index == 0: n += 2
-			old_bonds = self.data['Bonds']
-			before = self.data['Amino Acids'][index][2][:n]
-			before.append(before[-1] + 1)
-			side = list_SC
-			i1 = max(list_SC) + 1
-			il = max([x[0] for x in self.data['Bonds'].items()])
-			after = [x for x in range(i1, il + 1)]
-			difference = len(self.data['Amino Acids'][index][3]) - len(side)
-			CA = old_bonds[after[0]][0] + 1
-			N = before[0]
-			old_bondsH = {}
-			for k, v in zip(old_bonds.keys(), old_bonds.values()):
-				if k > N:
-					k += 1
-				else:
-					k += 0
-				old_bondsH[k] = v
-			old_bondsH[N + 1] = [N]
-			n_before = {}
-			for i in range(before[-1] + 1):
-				n_before[i] = old_bondsH[i]
-			n_before[N][0] = n_before[N][1] + 1
-			n_before[CA][1] = n_before[CA][1] + 1
-			n_before[CA][2] = n_before[CA][2] + 1
-			n_before[CA][3] = n_before[CA][3] + difference + 1
-			n_before[CA + 1] = [n_before[CA + 1][0] + 1]
-			sides = self.AminoAcids[new_AA]['Bonds']
-			for key in list(sides.keys()): sides[int(key)] = sides.pop(key)
-			n_side = {}
-			L = max([x[0] for x in n_before.items()]) + 1
-			for i in range(len(sides)):
-				v = sides[i]
-				v = [x + L for x in v]
-				k = i + 1 + before[-1]
-				n_side[k] = v
-			l = min([x[0] for x in n_side.items()])
-			if len(sides) == 1: n_side[l] = []
-			n_side[l].append(CA)
-			n_after = {}
-			for i in after:
-				v = old_bonds[i]
-				v = [x+1 if x==CA-1 else x + difference + 1 for x in v]
-				k = i + difference + 1
-				n_after[k] = v
-			n_bonds = {}
-			n_bonds.update(n_before)
-			n_bonds.update(n_side)
-			n_bonds.update(n_after)
-			self.data['Bonds'] = n_bonds
-		elif new_AA == 'P':
-			n = 3
-			if index == 0: n += 2
-			old_bondsH = self.data['Bonds']
-			before = self.data['Amino Acids'][index][2][:n]
-			side = list_SC
-			sides = self.AminoAcids[new_AA]['Bonds']
-			for key in list(sides.keys()): sides[int(key)] = sides.pop(key)
-			H = before[1]
-			del old_bondsH[H]
-			i1 = max(list_SC) + 1
-			il = max([x[0] for x in self.data['Bonds'].items()])
-			after = [x for x in range(i1, il + 1)]
-			old_bonds = {}
-			for k, v in zip(old_bondsH.keys(), old_bondsH.values()):
-				if k > H-1:
-					k -= 1
-				else:
-					k -= 0
-				old_bonds[k] = v
-			n_before = {}
-			for i in range(before[-1] + 1):
-				n_before[i] = old_bonds[i]
-			n_before[H - 1][1] = n_before[H - 1][1] + len(sides) - 3
-			n_before[H] = [x if x == H - 1 else x - 1 for x in n_before[H]]
-			n_before[H][-1] = n_before[H][-1] + len(sides) - 5
-			n_before[H + 1] = [n_before[H + 1][0] - 1]
-			n_side = {}
-			L = max([x[0] for x in n_before.items()]) + 1
-			for i in range(len(sides) - 1):
-				v = sides[i]
-				v = [x + L for x in v]
-				k = i + 1 + before[-1]
-				n_side[k] = v
-			n_side[H + 2].append(H)
-			n_side[H + 8][-1] = n_side[H + 8][-1] + 2
-			difference = len(self.data['Amino Acids'][index][3]) - len(side)
-			n_after = {}
-			for i in after:
-				v = old_bonds[i - 1]
-				v = [x-1 if x==H+1 else x + difference - 1 for x in v]
-				k = i + difference - 1
-				n_after[k] = v
-			n_bonds = {}
-			n_bonds.update(n_before)
-			n_bonds.update(n_side)
-			n_bonds.update(n_after)
-			self.data['Bonds'] = n_bonds
 	def Rotation_NCaC(self, AA, theta):
 		''' Change angle between three atoms '''
 		amino = self.data['Amino Acids'][AA][0]
@@ -1030,3 +726,45 @@ class Pose():
 		after = after + ori
 		combine = np.append(before, after, axis=0)
 		self.data['Coordinates'] = combine
+	def Mutate(self, index, AA):
+		''' Mutate an amino acid to a different amino acid '''
+		sequence_old = self.data['FASTA']
+		PHIs = []
+		PSIs = []
+		CHIs = {}
+		for i in range(len(sequence_old)):
+			PHIs.append(self.Angle(i, 'PHI'))
+			PSIs.append(self.Angle(i, 'PSI'))
+			chi = []
+			try: chi.append(self.Angle(i, 'CHI', 1))
+			except: pass
+			try: chi.append(self.Angle(i, 'CHI', 2))
+			except: pass
+			try: chi.append(self.Angle(i, 'CHI', 3))
+			except: pass
+			try: chi.append(self.Angle(i, 'CHI', 4))
+			except: pass
+			CHIs[i] = chi
+		CHIs[index] = []
+		data ={
+			'Energy':0,
+			'Rg':0,
+			'Mass':0,
+			'Size':0,
+			'FASTA':None,
+			'Amino Acids':{},
+			'Atoms':{},
+			'Bonds':{},
+			'Coordinates':np.array([[0, 0, 0]])}
+		self.data = data
+		sequence_new = sequence_old.replace(sequence_old[index], AA)
+		self.Build(sequence_new)
+		for i, (p, s) in enumerate(zip(PHIs, PSIs)):
+			self.Rotate(i, p, 'PHI')
+			self.Rotate(i, s, 'PSI')
+		for i in range(len(sequence_new)):
+			chi = CHIs[i]
+			if chi == []: continue
+			for ii, c in enumerate(chi):
+				if sequence_new[i] == 'P': continue
+				self.Rotate(i, c+1, 'CHI', ii+1)
