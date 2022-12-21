@@ -64,7 +64,7 @@ for i in range(len(sequence)):
 	pose.Rotate(i, phi[i], 'phi')
 	pose.Rotate(i, psi[i], 'psi')
 
-pose.PDB('out.pdb')
+pose.Export('out.pdb')
 ```
 
 ## For collaboration:
