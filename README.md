@@ -1,5 +1,5 @@
 # Pose
-A bare metal Python library to build and manipulate protein molecular structures
+A bare metal Python library for building and manipulating protein molecular structures
 
 ## Description:
 This library constructs a pose for a protein molecule, which is a data structure for that contains relevant information that defines the polypeptide molecule. Primary information includes the XYZ cartesian coordinates of each atom, the identify and charge of each atom, and the bond graph of the entire molecule, as well as other secondary information such as the FASTA sequence of the molecule, the molecule's radius of gyration, potential energy, and the secondary structure that each amino acid belongs to.
