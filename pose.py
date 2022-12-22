@@ -731,10 +731,12 @@ class Pose():
 		sequence_old = self.data['FASTA']
 		PHIs = []
 		PSIs = []
+		OMGs = []
 		CHIs = {}
 		for i in range(len(sequence_old)):
 			PHIs.append(self.Angle(i, 'PHI'))
 			PSIs.append(self.Angle(i, 'PSI'))
+			OMGs.append(self.Angle(i, 'OMEGA'))
 			chi = []
 			try: chi.append(self.Angle(i, 'CHI', 1))
 			except: pass
@@ -759,9 +761,11 @@ class Pose():
 		self.data = data
 		sequence_new = sequence_old.replace(sequence_old[index], AA)
 		self.Build(sequence_new)
-		for i, (p, s) in enumerate(zip(PHIs, PSIs)):
+		for i, (p, s, o) in enumerate(zip(PHIs, PSIs, OMGs)):
 			self.Rotate(i, p, 'PHI')
 			self.Rotate(i, s, 'PSI')
+			if i != len(sequence_new) -1:
+				self.Rotate(i, o, 'OMEGA')
 		for i in range(len(sequence_new)):
 			chi = CHIs[i]
 			if chi == []: continue
