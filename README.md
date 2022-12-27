@@ -49,7 +49,9 @@ It is important to note that this library uses **zero-based array indexing**, no
 | pose.Rotate(2, 20, 'chi', 1)             | Change an angle to reach a degrees. Example: third amino acid, change angle to become 20 degrees, the angle type is CHI 1 |
 | pose.Adjust(0, 'N', 0, 'CA', 10)         | Adjust the distance between any two atoms in any amno acid. Example: distance between first amino acid's Nitrogen and first amino acid's Carbon alpha to become 10 Å |
 | pose.Mutate(1, 'V')                      | Mutate an amno acid. Example: Mutate second amino acid to become Valine |
-| pose.Rotation_NCaC(1, -2)                 | Add/Subtract the N-Ca-C angle from current degrees. Example: second amino acid, subtract 2 degrees | 
+| pose.Rotation_NCaC(1, -2)                | Add/Subtract the N-Ca-C angle from current degrees. Example: second amino acid, subtract 2 degrees | 
+| pose.Import('1tqg.pdb')                  | Import a .pdb file | 
+
 
 ## Example code:
 ```
@@ -73,7 +75,7 @@ pose.Export('out.pdb')
 
 ## For collaboration:
 If anyone is interested in collaborating and contributing to this library, these are the functions that needs to be developed and added:
-1. **Easy**: Import from PDB, remove all Hs, then add missing Hs, separate each chain to a different pose, import only peptide atoms, deal with MSE Selenomethionine
+1. **Easy**: in the pose.Import() function, add missing hydrogens
 2. **Easy**: 2 poses BLAST & MSA
 3. **Moderate**: 2 poses RMSD between them
 4. **Moderate**: Calculating Gasteiger Partial Charges
