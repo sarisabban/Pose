@@ -2,6 +2,7 @@ import math
 import json
 import datetime
 import numpy as np
+from collections import defaultdict
 
 class Pose():
 	''' Data structure that represents a protein '''
@@ -112,127 +113,20 @@ class Pose():
 						continue
 			TER = 'TER'
 			f.write(TER)
-	def GetAtom_P(self, AA, atom):
-		''' Get specific atom coordinates for the Proline amino acid '''
-		if atom == 'OXT':
-			if AA == 0: n = 1
-			elif AA != 0: n = -1
-			try:
-				OXT = self.data['Amino Acids'][AA][2][6 + n]
-				coordinates = self.data['Coordinates'][OXT]
-				return(coordinates)
-			except:
-				raise Exception('Amino acid does not have this atom')
-		if AA == 0:
-			if atom == '1H':
-				raise Exception('Amino acid does not have this atom')
-			N  = self.data['Amino Acids'][AA][2][0]
-			H2 = self.data['Amino Acids'][AA][2][1]
-			H3 = self.data['Amino Acids'][AA][2][2]
-			CA = self.data['Amino Acids'][AA][2][3]
-			HA = self.data['Amino Acids'][AA][2][4]
-			C  = self.data['Amino Acids'][AA][2][5]
-			O  = self.data['Amino Acids'][AA][2][6]
-		else:
-			N  = self.data['Amino Acids'][AA][2][0]
-			CA = self.data['Amino Acids'][AA][2][1]
-			HA = self.data['Amino Acids'][AA][2][2]
-			C  = self.data['Amino Acids'][AA][2][3]
-			O  = self.data['Amino Acids'][AA][2][4]
-		if atom.upper() == 'N' :
-			coordinates = self.data['Coordinates'][N]
-			return(coordinates)
-		if atom.upper() == '1H':
-			coordinates = self.data['Coordinates'][H1]
-			return(coordinates)
-		if atom.upper() == '2H':
-			coordinates = self.data['Coordinates'][H2]
-			return(coordinates)
-		if atom.upper() == '3H':
-			coordinates = self.data['Coordinates'][H3]
-			return(coordinates)
-		if atom.upper() == 'CA':
-			coordinates = self.data['Coordinates'][CA]
-			return(coordinates)
-		if atom.upper() == 'HA':
-			coordinates = self.data['Coordinates'][HA]
-			return(coordinates)
-		if atom.upper() == 'C' :
-			coordinates = self.data['Coordinates'][C]
-			return(coordinates)
-		if atom.upper() == 'O' :
-			coordinates = self.data['Coordinates'][O]
-			return(coordinates)
-		try:
-			AminoAcid = self.data['Amino Acids'][AA][0]
-			L = self.AminoAcids[AminoAcid]['Sidechain Atoms']
-			amino_index = [x[0] for x in L].index(atom)
-			i = self.data['Amino Acids'][AA][3][amino_index]
-			coordinates = self.data['Coordinates'][i]
-		except ValueError:
-			raise Exception('Amino acid does not have this atom')
-		return(coordinates)
 	def GetAtom(self, AA, atom):
 		''' Get specific atom coordinates '''
-		n = 0
-		Amino = self.data['Amino Acids'][AA][0]
-		if Amino == 'P':
-			coordinates = self.GetAtom_P(AA, atom)
-			return(coordinates)
-		if atom == 'OXT':
-			if AA == 0: n = 2
-			elif AA != 0: n = 0
-			try:
-				OXT = self.data['Amino Acids'][AA][2][6 + n]
-				coordinates = self.data['Coordinates'][OXT]
+		info = self.data['Amino Acids'][AA]
+		backbone = ['N', '1H', '2H', '3H', 'CA', 'HA', 'C', 'O', 'OXT']
+		if atom in backbone:
+			indexes = info[2]
+		else:
+			indexes = info[3]
+		for i in indexes:
+			A = self.data['Atoms'][i][0]
+			if A == atom:
+				coordinates = self.data['Coordinates'][i]
 				return(coordinates)
-			except:
-				raise Exception('Amino acid does not have this atom')
-		if AA != 0 and (atom == '2H' or atom == '3H'):
-			raise Exception('Amino acid does not have this atom')
-		elif AA == 0:
-			n = 2
-			H2 = self.data['Amino Acids'][AA][2][2]
-			H3 = self.data['Amino Acids'][AA][2][3]
-		N  = self.data['Amino Acids'][AA][2][0]
-		H1 = self.data['Amino Acids'][AA][2][1]
-		CA = self.data['Amino Acids'][AA][2][2 + n]
-		HA = self.data['Amino Acids'][AA][2][3 + n]
-		C  = self.data['Amino Acids'][AA][2][4 + n]
-		O  = self.data['Amino Acids'][AA][2][5 + n]
-		if atom.upper() == 'N' :
-			coordinates = self.data['Coordinates'][N]
-			return(coordinates)
-		if atom.upper() == '1H':
-			coordinates = self.data['Coordinates'][H1]
-			return(coordinates)
-		if atom.upper() == '2H':
-			coordinates = self.data['Coordinates'][H2]
-			return(coordinates)
-		if atom.upper() == '3H':
-			coordinates = self.data['Coordinates'][H3]
-			return(coordinates)
-		if atom.upper() == 'CA':
-			coordinates = self.data['Coordinates'][CA]
-			return(coordinates)
-		if atom.upper() == 'HA':
-			coordinates = self.data['Coordinates'][HA]
-			return(coordinates)
-		if atom.upper() == 'C' :
-			coordinates = self.data['Coordinates'][C]
-			return(coordinates)
-		if atom.upper() == 'O' :
-			coordinates = self.data['Coordinates'][O]
-			return(coordinates)
-		try:
-			AminoAcid = self.data['Amino Acids'][AA][0]
-			L = self.AminoAcids[AminoAcid]['Sidechain Atoms']
-			amino_index = [x[0] for x in L].index(atom)
-			i = self.data['Amino Acids'][AA][3][amino_index]
-			coordinates = self.data['Coordinates'][i]
-		except ValueError:
-			raise Exception('Amino acid does not have this atom')
-		return(coordinates)
+		raise Exception('Amino acid does not have this atom')
 	def Insert(self, AA, X, Y, Z):
 		''' Inser a backbone or sidechain given its initial coordinates '''
 		atoms = np.array(self.AminoAcids[AA]['Vectors']) + np.array([X, Y, Z])
@@ -759,7 +653,7 @@ class Pose():
 			'Bonds':{},
 			'Coordinates':np.array([[0, 0, 0]])}
 		self.data = data
-		sequence_new = sequence_old.replace(sequence_old[index], AA)
+		sequence_new = sequence_old[:index] + AA + sequence_old[index + 1:]
 		self.Build(sequence_new)
 		for i, (p, s, o) in enumerate(zip(PHIs, PSIs, OMGs)):
 			self.Rotate(i, p, 'PHI')
@@ -772,3 +666,77 @@ class Pose():
 			for ii, c in enumerate(chi):
 				if sequence_new[i] == 'P': continue
 				self.Rotate(i, c+1, 'CHI', ii+1)
+	def Import(self, filename):
+		''' Import a structure from a .pdb file '''
+		ATOM, N, A, L, R, C, S, I, X, Y, Z, O, T, Q, E = \
+		[], [], [], [], [], [], [], [], [], [], [], [], [], [], []
+		with open(filename) as f:
+			for line in f:
+				line = line.strip()
+				if line.split()[0] == 'ATOM':
+					ATOM.append(line[:4].strip())
+					N.append(int(line[6:11].strip()))
+					A.append(line[12:16].strip())
+					L.append(line[16].strip())
+					R.append(line[17:20].strip())
+					C.append(line[21].strip())
+					S.append(int(line[22:26].strip()))
+					I.append(line[26].strip())
+					X.append(float(line[30:38].strip()))
+					Y.append(float(line[38:46].strip()))
+					Z.append(float(line[46:54].strip()))
+					O.append(float(line[54:60].strip()))
+					T.append(float(line[60:66].strip()))
+					q = line[70:76].strip()
+					if q != '': Q.append(float(q))
+					else: q = 0
+					Q.append(q)
+					E.append(line[76:78].strip())
+		N = [x-N[0] for x in N]
+		S = [x-S[0] for x in S]
+		ALL = [[a, r, c, s, x, y, z, o, t, q, e] \
+		for a, r, c, s, x, y, z, o, t, q, e in \
+		zip(A, R, C, S, X, Y, Z, O, T, Q, E)]
+		Structure = defaultdict(list)
+		for atom in ALL: Structure[atom[3]].append(atom)
+		for repeat in range(2):
+			for k, v in zip(Structure.keys(), Structure.values()):
+				atom = None
+				for i, entry in enumerate(v):
+					if atom == entry[0]:
+						Structure[k].pop(i)
+					atom = entry[0]
+		count = 0
+		Atoms = {}
+		Aminos = {}
+		Coordinates = []
+		backbone = ['N', 'CA', 'C', 'O', 'OXT']
+		for k, v in zip(Structure.keys(), Structure.values()):
+			BB = []
+			SC = []
+			for info in v:
+				atom = info[0]
+				amino = info[1]
+				chain = info[2]
+				residue = info[3]
+				x = info[4]
+				y = info[5]
+				z = info[6]
+				o = info[7]
+				t = info[8]
+				c = info[9]
+				e = info[10]
+				Coordinates.append([x, y, z])
+				Atoms[count] = [atom, e, c, t]
+				if atom in backbone:
+					BB.append(count)
+				else:
+					SC.append(count)
+				count += 1
+			amino = \
+			[k for k, v in self.AminoAcids.items() if v['Tricode'] == amino][0]
+			Aminos[k] = [amino, chain, BB, SC, 'L']
+		Coordinates = np.array(Coordinates)
+		self.data['Coordinates'] = Coordinates
+		self.data['Amino Acids'] = Aminos
+		self.data['Atoms'] = Atoms
