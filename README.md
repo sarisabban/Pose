@@ -32,25 +32,25 @@ It is important to note that this library uses **zero-based array indexing**, no
 | Coordinates    | Numpy array | The XYZ cartesian coordinates of each atom.
 
 ## Table of methods:
-| Method                                   | Description with example |
-|------------------------------------------|--------------------------|
-| pose = Pose()                            | Construct the Pose class |
-| pose.Build('SARI')                       | Build a polypeptide using a sequence, the polypeptide will be in primary structure. Example: the sequence 'SARI' |
-| pose.Export('out.pdb')                   | Export the polypeptide to a .pdb file. Example: the output file's name is out.pdb |
-| pose.GetAtom(3, 'N')                     | Get XYZ cartesian coordinates of an atom. Example: fourth amino acid's Nitrogen atom |
-| pose.SecondaryStructures()               | Get a list of each amino acid's secondary structure H:Helix, S:Sheet, L:Loop |
-| pose.Distance(0, 'N', 1, 'CA')           | Get the distance (in Å) between any two atoms in any amno acid. Example: distance between first amino acid's Nitrogen atom and second amino acid's Carbon alpha atom |
-| pose.AtomList(PDB=True)                  | Get a list of all the atoms in the polypeptide, use PDB=True to get their PDB formatted names |
-| pose.Identify(3, 'atom', q=True)         | Identify what 'atom' type belongs to a particular index in the coordinates matrix, use q=True to identify the atom's charge, use 'redisue' or 'amino acid' to instead identify the amino acid by index in the polypeptide sequence |
-| pose.Atom3Angle(0, 'N', 0, 'CA', 0, 'C') | Get the angle between any three atoms in any amino acid. Example: first amino acid's Nitrogen, first amino acid's Carbon alpha, and first amino acid's Carbon |
-| print(pose.data)                         | Print the dictionary data structure where all the polypeptide's information reside |
-| pose.Info()                              | Print all the information about the polypeptide in an organised printout |
-| pose.Angle(2, 'chi', 1)                  | Get the PHI, PSI, OMEGA, or CHI 1-4 angles of an amino acid. Example: second amino acid's CHI 1 angle. For the PHI, PSI, and OMEGA angles no need to include the second argument (the 1 in this example) | 
-| pose.Rotate(2, 20, 'chi', 1)             | Change an angle to reach a degrees. Example: third amino acid, change angle to become 20 degrees, the angle type is CHI 1 |
-| pose.Adjust(0, 'N', 0, 'CA', 10)         | Adjust the distance between any two atoms in any amno acid. Example: distance between first amino acid's Nitrogen and first amino acid's Carbon alpha to become 10 Å |
-| pose.Mutate(1, 'V')                      | Mutate an amno acid. Example: Mutate second amino acid to become Valine |
-| pose.Rotation_NCaC(1, -2)                | Add/Subtract the N-Ca-C angle from current degrees. Example: second amino acid, subtract 2 degrees | 
-| pose.Import('1tqg.pdb')                  | Import a .pdb file | 
+| Method                                          | Description with example |
+|-------------------------------------------------|--------------------------|
+| pose = Pose()                                   | Construct the Pose class |
+| pose.Build('SARI')                              | Build a polypeptide using a sequence, the polypeptide will be in primary structure. Example: the sequence 'SARI' |
+| pose.Export('out.pdb')                          | Export the polypeptide to a .pdb file. Example: the output file's name is out.pdb |
+| pose.GetAtom(3, 'N')                            | Get XYZ cartesian coordinates of an atom. Example: fourth amino acid's Nitrogen atom |
+| pose.SecondaryStructures()                      | Get a list of each amino acid's secondary structure H:Helix, S:Sheet, L:Loop |
+| pose.Distance(0, 'N', 1, 'CA')                  | Get the distance (in Å) between any two atoms in any amno acid. Example: distance between first amino acid's Nitrogen atom and second amino acid's Carbon alpha atom |
+| pose.AtomList(PDB=True)                         | Get a list of all the atoms in the polypeptide, use PDB=True to get their PDB formatted names |
+| pose.Identify(3, 'atom', q=True)                | Identify what 'atom' type belongs to a particular index in the coordinates matrix, use q=True to identify the atom's charge, use 'redisue' or 'amino acid' to instead identify the amino acid by index in the polypeptide sequence |
+| pose.Atom3Angle(0, 'N', 0, 'CA', 0, 'C')        | Get the angle between any three atoms in any amino acid. Example: first amino acid's Nitrogen, first amino acid's Carbon alpha, and first amino acid's Carbon |
+| print(pose.data)                                | Print the dictionary data structure where all the polypeptide's information reside |
+| pose.Info()                                     | Print all the information about the polypeptide in an organised printout |
+| pose.Angle(2, 'chi', 1)                         | Get the PHI, PSI, OMEGA, or CHI 1-4 angles of an amino acid. Example: second amino acid's CHI 1 angle. For the PHI, PSI, and OMEGA angles no need to include the second argument (the 1 in this example) | 
+| pose.Rotate(2, 20, 'chi', 1)                    | Change an angle to reach a degrees. Example: third amino acid, change angle to become 20 degrees, the angle type is CHI 1 |
+| pose.Adjust(0, 'N', 0, 'CA', 10)                | Adjust the distance between any two atoms in any amno acid. Example: distance between first amino acid's Nitrogen and first amino acid's Carbon alpha to become 10 Å |
+| pose.Mutate(1, 'V')                             | Mutate an amno acid. Example: Mutate second amino acid to become Valine |
+| pose.Rotation3Angle(1, 'N', 1, 'CA', 1, 'C', -2)| Add/Subtract any three atom backbone angle from current degrees. Example: second amino acid, subtract 2 degrees from the N-Ca-C angle| 
+| pose.Import('1tqg.pdb')                         | Import a .pdb file | 
 
 
 ## Example code:
