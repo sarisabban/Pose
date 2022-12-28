@@ -39,7 +39,7 @@ It is important to note that this library uses **zero-based array indexing**, no
 | pose.Export('out.pdb')                          | Export the polypeptide to a .pdb file. Example: the output file's name is out.pdb |
 | pose.GetAtom(3, 'N')                            | Get XYZ cartesian coordinates of an atom. Example: fourth amino acid's Nitrogen atom |
 | pose.SecondaryStructures()                      | Get a list of each amino acid's secondary structure H:Helix, S:Sheet, L:Loop |
-| pose.Distance(0, 'N', 1, 'CA')                  | Get the distance (in Å) between any two atoms in any amno acid. Example: distance between first amino acid's Nitrogen atom and second amino acid's Carbon alpha atom |
+| pose.Distance(0, 'N', 1, 'CA')                  | Get the distance (in Å) between any two atoms in any amino acid. Example: distance between first amino acid's Nitrogen atom and second amino acid's Carbon alpha atom |
 | pose.AtomList(PDB=True)                         | Get a list of all the atoms in the polypeptide, use PDB=True to get their PDB formatted names |
 | pose.Identify(3, 'atom', q=True)                | Identify what 'atom' type belongs to a particular index in the coordinates matrix, use q=True to identify the atom's charge, use 'redisue' or 'amino acid' to instead identify the amino acid by index in the polypeptide sequence |
 | pose.Atom3Angle(0, 'N', 0, 'CA', 0, 'C')        | Get the angle between any three atoms in any amino acid. Example: first amino acid's Nitrogen, first amino acid's Carbon alpha, and first amino acid's Carbon |
