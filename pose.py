@@ -588,41 +588,32 @@ class Pose():
 			combine = np.append(before, side, axis=0)
 			combine = np.append(combine, after, axis=0)
 			self.data['Coordinates'] = combine
-	def Rotation_NCaC(self, AA, theta):
+	def Rotation3Angle(self, AA1, atom1, AA2, atom2, AA3, atom3, theta):
 		''' Change angle between three atoms '''
-		amino = self.data['Amino Acids'][AA][0]
 		atoms = self.data['Atoms']
-		BB = self.data['Amino Acids'][AA][2]
-		SC = self.data['Amino Acids'][AA][3]
-		AAi = BB + SC
-		Ni, Cai, Ci = None, None, None
-		for i in AAi:
-			if   atoms[i][0] == 'N' : Ni  = i
-			elif atoms[i][0] == 'CA': Cai = i
-			elif atoms[i][0] == 'C' : Ci  = i
-		before = self.data['Coordinates'][:Ci]
-		after  = self.data['Coordinates'][Ci:]
-		A = self.GetAtom(AA, 'HA')
-		if amino == 'G':
-			B = self.GetAtom(AA, '2HA')
-		else:
-			CB = self.GetAtom(AA, 'CB')
-			CA = self.GetAtom(AA, 'CA')
-			u = (CB - CA) / 1.39805509187
-			B = u + CA
-		u = B - A
+		BB = self.data['Amino Acids'][AA2][2]
+		atom2i = None
+		for i in BB:
+			if atoms[i][0] == atom2 : atom2i  = i
+		if atom2i == None:
+			raise Exception('Chosen atom not in backbone')
+		before = self.data['Coordinates'][:atom2i]
+		after  = self.data['Coordinates'][atom2i:]
+		A = self.GetAtom(AA3, atom3) - self.GetAtom(AA1, atom1)
+		B = self.GetAtom(AA3, atom3) - self.GetAtom(AA2, atom2)
+		u = np.cross(B, A)
 		lu = np.linalg.norm(u)
 		u = u / lu
-		ori = self.GetAtom(AA, 'CA')
+		ori = self.GetAtom(AA2, atom2)
 		after = after - ori
-		RM = self.Rotation_Matrix(-theta, u)
+		RM = self.Rotation_Matrix(theta, u)
 		after = np.matmul(after, RM)
 		after = after + ori
 		combine = np.append(before, after, axis=0)
 		self.data['Coordinates'] = combine
 	def Mutate(self, index, AA):
 		''' Mutate an amino acid to a different amino acid '''
-		sequence_old = self.data['FASTA']
+		sequence_old = self.FASTA()
 		PHIs = []
 		PSIs = []
 		OMGs = []
@@ -666,7 +657,7 @@ class Pose():
 			for ii, c in enumerate(chi):
 				if sequence_new[i] == 'P': continue
 				self.Rotate(i, c+1, 'CHI', ii+1)
-	def Import(self, filename):
+	def Import(self, filename, Build=False):
 		''' Import a structure from a .pdb file '''
 		ATOM, N, A, L, R, C, S, I, X, Y, Z, O, T, Q, E = \
 		[], [], [], [], [], [], [], [], [], [], [], [], [], [], []
@@ -688,8 +679,11 @@ class Pose():
 					O.append(float(line[54:60].strip()))
 					T.append(float(line[60:66].strip()))
 					q = line[70:76].strip()
-					if q != '': Q.append(float(q))
-					else: q = 0
+					if q != '':
+						q = float(q)
+						Q.append(q)
+					else:
+						q = 0.0
 					Q.append(q)
 					E.append(line[76:78].strip())
 		N = [x-N[0] for x in N]
@@ -740,3 +734,51 @@ class Pose():
 		self.data['Coordinates'] = Coordinates
 		self.data['Amino Acids'] = Aminos
 		self.data['Atoms'] = Atoms
+
+
+
+
+
+		if Build == True:
+			sequence = self.FASTA()
+			PHIs = []
+			PSIs = []
+			OMGs = []
+			CHIs = {}
+			for i in range(len(sequence)):
+				PHIs.append(self.Angle(i, 'PHI'))
+				PSIs.append(self.Angle(i, 'PSI'))
+				OMGs.append(self.Angle(i, 'OMEGA'))
+				chi = []
+				try: chi.append(self.Angle(i, 'CHI', 1))
+				except: pass
+				try: chi.append(self.Angle(i, 'CHI', 2))
+				except: pass
+				try: chi.append(self.Angle(i, 'CHI', 3))
+				except: pass
+				try: chi.append(self.Angle(i, 'CHI', 4))
+				except: pass
+				CHIs[i] = chi
+			data ={
+				'Energy':0,
+				'Rg':0,
+				'Mass':0,
+				'Size':0,
+				'FASTA':None,
+				'Amino Acids':{},
+				'Atoms':{},
+				'Bonds':{},
+				'Coordinates':np.array([[0, 0, 0]])}
+			self.data = data
+			self.Build(sequence)
+			for i, (p, s, o) in enumerate(zip(PHIs, PSIs, OMGs)):
+				self.Rotate(i, p, 'PHI')
+				self.Rotate(i, s, 'PSI')
+				if i != len(sequence) -1:
+					self.Rotate(i, o, 'OMEGA')
+			for i in range(len(sequence)):
+				chi = CHIs[i]
+				if chi == []: continue
+				for ii, c in enumerate(chi):
+					if sequence[i] == 'P': continue
+					self.Rotate(i, c+1, 'CHI', ii+1)
