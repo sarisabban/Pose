@@ -7,7 +7,9 @@ from collections import defaultdict
 class Pose():
 	''' Data structure that represents a protein '''
 	def __init__(self):
-		with open('AminoAcids.json') as f: AminoAcids = json.load(f)
+		path = __file__.split('/')[:-1]
+		path = '/'.join(path)
+		with open(f'{path}/AminoAcids.json') as f: AminoAcids = json.load(f)
 		Masses = {
 			'H':1.008,    'He':4.003,   'Li':6.941,   'Be':9.012,
 			'B':10.811,   'C':12.011,   'N':14.007,   'O':15.999,
