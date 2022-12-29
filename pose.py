@@ -677,6 +677,13 @@ class Pose():
 			BL = np.array([Ba - Bo, Bb - Bo, Bc - Bo, Bo])
 			BL[1][2] = 1
 			BL_= np.linalg.inv(BL)
+		elif AA == 'P':
+			Aa, Ao, Ab, Ac = A[0], A[1], A[4], A[2]
+			Ba, Bo, Bb, Bc = B[0], B[1+n], B[3], B[-2-e]
+			AL = np.array([Aa - Ao, Ab - Ao, Ac - Ao, Ao])
+			BL = np.array([Ba - Bo, Bb - Bo, Bc - Bo, Bo])
+			BL[1][2] = 1
+			BL_= np.linalg.inv(BL)
 		else:
 			Aa, Ao, Ab, Ac = A[0], A[1], A[4], A[2]
 			Ba, Bo, Bb, Bc = B[0], B[2+n], B[4+n], B[-2-e]
@@ -766,8 +773,15 @@ class Pose():
 		self.data['Coordinates'] = Coordinates
 		self.data['Amino Acids'] = Aminos
 		self.data['Atoms'] = Atoms
+		sequence = self.FASTA()
+		for i, aa in enumerate(list(sequence)):
+			if i == 0:
+				self.BondTree('Backbone start', aa)
+			elif i == len(sequence)-1:
+				self.BondTree('Backbone end', aa)
+			else:
+				self.BondTree('Backbone middle', aa)
 		if Build == True:
-			sequence = self.FASTA()
 			PHIs = []
 			PSIs = []
 			OMGs = []
