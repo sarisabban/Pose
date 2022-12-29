@@ -657,6 +657,32 @@ class Pose():
 			for ii, c in enumerate(chi):
 				if sequence_new[i] == 'P': continue
 				self.Rotate(i, c+1, 'CHI', ii+1)
+	def RigidMotion(self, AA, A, B, BB='Backbone middle'):
+		''' Superimpose amino B into A '''
+		n, e = 0, 0
+		if BB == 'Backbone start': n = 2
+		if BB == 'Backbone end': e = 1
+		A1s = np.ones(len(A))
+		B1s = np.ones(len(B))
+		A = np.c_[A, A1s]
+		B = np.c_[B, B1s]
+		if AA == 'G':
+			Aa, Ao, Ab, Ac = A[0], A[1], A[3], A[2]
+			Ba, Bo, Bb, Bc = B[0], B[2+n], B[-1], B[-2-e]
+			AL = np.array([Aa - Ao, Ab - Ao, Ac - Ao, Ao])
+			BL = np.array([Ba - Bo, Bb - Bo, Bc - Bo, Bo])
+			BL[1][2] = 1
+			BL_= np.linalg.inv(BL)
+		else:
+			Aa, Ao, Ab, Ac = A[0], A[1], A[4], A[2]
+			Ba, Bo, Bb, Bc = B[0], B[2+n], B[4+n], B[-2-e]
+			AL = np.array([Aa - Ao, Ab - Ao, Ac - Ao, Ao])
+			BL = np.array([Ba - Bo, Bb - Bo, Bc - Bo, Bo])
+			BL_= np.linalg.inv(BL)
+		M = np.matmul(BL_, AL)
+		B = [np.matmul(i, M)[:3] for i in B]
+		B = np.array(B)
+		return(B)
 	def Import(self, filename, Build=False):
 		''' Import a structure from a .pdb file '''
 		ATOM, N, A, L, R, C, S, I, X, Y, Z, O, T, Q, E = \
@@ -734,11 +760,6 @@ class Pose():
 		self.data['Coordinates'] = Coordinates
 		self.data['Amino Acids'] = Aminos
 		self.data['Atoms'] = Atoms
-
-
-
-
-
 		if Build == True:
 			sequence = self.FASTA()
 			PHIs = []
@@ -769,16 +790,84 @@ class Pose():
 				'Atoms':{},
 				'Bonds':{},
 				'Coordinates':np.array([[0, 0, 0]])}
+			Idata = self.data
 			self.data = data
-			self.Build(sequence)
-			for i, (p, s, o) in enumerate(zip(PHIs, PSIs, OMGs)):
-				self.Rotate(i, p, 'PHI')
-				self.Rotate(i, s, 'PSI')
-				if i != len(sequence) -1:
-					self.Rotate(i, o, 'OMEGA')
-			for i in range(len(sequence)):
-				chi = CHIs[i]
-				if chi == []: continue
-				for ii, c in enumerate(chi):
-					if sequence[i] == 'P': continue
-					self.Rotate(i, c+1, 'CHI', ii+1)
+			for i, aa in enumerate(list(sequence)):
+				if i == 0:
+					X, Y, Z = 0, 0, 0
+					Aaa = Idata['Amino Acids'][i]
+					chain = Aaa[1]
+					I = len(self.data['Coordinates']) - 1
+					self.Amino('Backbone start', X, Y, Z, aa, [6])
+					AAs = self.AminoAcids['Backbone start']['Backbone Atoms']
+					self.Atoms(aa, chain, AAs, 6, i, I)
+					self.BondTree('Backbone start', aa)
+					Aindeces = Aaa[2] + Aaa[3]
+					Baa = self.data['Amino Acids'][i]
+					Bindeces = Baa[2] + Baa[3]
+					A = Idata['Coordinates'][min(Aindeces):max(Aindeces)+1]
+					B = self.data['Coordinates'][min(Bindeces):max(Bindeces)+1]
+					B = self.RigidMotion(aa, A, B, BB='Backbone start')
+					self.data['Coordinates'][min(Bindeces):max(Bindeces)+1] = B
+					chi = CHIs[i]
+					if chi != []:
+						for ii, c in enumerate(chi):
+							if sequence[i] == 'P': continue
+							self.Rotate(i, c+1, 'CHI', ii+1)
+				elif i == len(sequence)-1:
+					X, Y, Z = 0, 0, 0
+					Aaa = Idata['Amino Acids'][i]
+					chain = Aaa[1]
+					I = len(self.data['Coordinates']) - 0
+					self.Amino('Backbone end', X, Y, Z, aa, [4], flip=True)
+					AAs = self.AminoAcids['Backbone end']['Backbone Atoms']
+					self.Atoms(aa, chain, AAs, 4, i, I)
+					self.BondTree('Backbone end', aa)
+					Aindeces = Aaa[2] + Aaa[3]
+					Baa = self.data['Amino Acids'][i]
+					Bindeces = Baa[2] + Baa[3]
+					A = Idata['Coordinates'][min(Aindeces):max(Aindeces)+1]
+					B = self.data['Coordinates'][min(Bindeces):max(Bindeces)+1]
+					B = self.RigidMotion(aa, A, B, BB='Backbone end')
+					self.data['Coordinates'][min(Bindeces):max(Bindeces)+1] = B
+					chi = CHIs[i]
+					if chi != []:
+						for ii, c in enumerate(chi):
+							if sequence[i] == 'P': continue
+							self.Rotate(i, c+1, 'CHI', ii+1)
+				else:
+					X, Y, Z = 0, 0, 0
+					Aaa = Idata['Amino Acids'][i]
+					chain = Aaa[1]
+					I = len(self.data['Coordinates']) - 0
+					self.Amino('Backbone middle', X, Y, Z, aa, [4], flip=True)
+					AAs = self.AminoAcids['Backbone middle']['Backbone Atoms']
+					self.Atoms(aa, chain, AAs, 4, i, I)
+					self.BondTree('Backbone middle', aa)
+					Aindeces = Aaa[2] + Aaa[3]
+					Baa = self.data['Amino Acids'][i]
+					Bindeces = Baa[2] + Baa[3]
+					A = Idata['Coordinates'][min(Aindeces):max(Aindeces)+1]
+					B = self.data['Coordinates'][min(Bindeces):max(Bindeces)+1]
+					B = self.RigidMotion(aa, A, B, BB='Backbone middle')
+					self.data['Coordinates'][min(Bindeces):max(Bindeces)+1] = B
+					chi = CHIs[i]
+					if chi != []:
+						for ii, c in enumerate(chi):
+							if sequence[i] == 'P': continue
+							self.Rotate(i, c+1, 'CHI', ii+1)
+			for i, aa in enumerate(list(sequence)):
+				Aaa = Idata['Amino Acids'][i]
+				Baa = self.data['Amino Acids'][i]
+				Aidx = Aaa[2] + Aaa[3]
+				Bidx = Baa[2] + Baa[3]
+				Aidx.sort()
+				Bidx.sort()
+				for a in Aidx:
+					for b in Bidx:
+						Aatom = Idata['Atoms'][a]
+						Batom = self.data['Atoms'][b]
+						if Aatom[0] == Batom[0]:
+							self.data['Atoms'][b][2] = Aatom[2]
+							self.data['Atoms'][b][3] = Aatom[3]
+			Idata = {}
