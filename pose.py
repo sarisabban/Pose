@@ -686,6 +686,8 @@ class Pose():
 		M = np.matmul(BL_, AL)
 		B = [np.matmul(i, M)[:3] for i in B]
 		B = np.array(B)
+		Aoxy = A[3][:3]
+		B[-1] = Aoxy
 		return(B)
 	def Import(self, filename, Build=False):
 		''' Import a structure from a .pdb file '''
