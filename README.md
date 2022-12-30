@@ -77,9 +77,9 @@ pose.Export('out.pdb')
 
 ## For collaboration:
 If anyone is interested in collaborating and contributing to this library, these are the functions that needs to be developed and added:
-1. **Easy**: in the pose.Import() function, add missing hydrogens
-2. **Easy**: 2 poses BLAST & MSA
-3. **Moderate**: 2 poses RMSD between them
+1. **Easy**: in the pose.Import() function, add hydrogens to polypeptide algorithm
+2. **Easy**: 2 sequences BLAST & MSA
+3. **Easy**: 2 poses RMSD between them
 4. **Moderate**: Calculating Gasteiger Partial Charges
 5. **Moderate**: Find H-bonds in pose
 6. **Moderate**: calculate DSSP
