@@ -50,7 +50,7 @@ It is important to note that this library uses **zero-based array indexing**, no
 | pose.Adjust(0, 'N', 0, 'CA', 10)                | Adjust the distance between any two atoms in any amno acid. Example: distance between first amino acid's Nitrogen and first amino acid's Carbon alpha to become 10 Å |
 | pose.Mutate(1, 'V')                             | Mutate an amno acid. Example: Mutate second amino acid to become Valine |
 | pose.Rotation3Angle(1, 'N', 1, 'CA', 1, 'C', -2)| Add/Subtract any three atom backbone angle from current degrees. Example: second amino acid, subtract 2 degrees from the N-Ca-C angle| 
-| pose.Import('1tqg.pdb', Build=True)             | Import a .pdb file (no hydrogens nor a bond graph). If the argument Build=True is used the molecule will be re-built to include hydrogens and a bond graph, but it will very slightly deviate from the original molecule. currently i would advise to add hydrogens to a .pdb file (using pymol, export it from pymol into a new hydrated .pdb file) THEN import it here to the pose and NOT include the Build=True argument, this would be the most accurate representation of an imported hydrated polypeptide| 
+| pose.Import('1tqg.pdb', chain='B', Build=True)  | Import the 1tqg.pdb file's chain B (no hydrogens). If the argument Build=True is used the molecule will be re-built to include hydrogens, but it will very slightly deviate from the original molecule. currently I would advise to add hydrogens to a .pdb file (using pymol, export it from pymol into a new hydrated .pdb file) THEN import it here to the pose and NOT include the Build=True argument, this would be the most accurate representation of an imported hydrated polypeptide| 
 
 
 ## Example code:
