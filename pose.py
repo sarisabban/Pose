@@ -603,8 +603,10 @@ class Pose():
 			raise Exception('Chosen atom not in backbone')
 		before = self.data['Coordinates'][:atom2i]
 		after  = self.data['Coordinates'][atom2i:]
-		A = self.GetAtom(AA3, atom3) - self.GetAtom(AA1, atom1)
-		B = self.GetAtom(AA3, atom3) - self.GetAtom(AA2, atom2)
+		A = self.GetAtom(AA1, atom1)
+		B = self.GetAtom(AA3, atom3)
+		if (A==0).all(): A += 1e-10
+		if (B==0).all(): B += 1e-10
 		u = np.cross(B, A)
 		lu = np.linalg.norm(u)
 		u = u / lu
