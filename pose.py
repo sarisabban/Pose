@@ -177,7 +177,7 @@ class Pose():
 				BBi.append(atomi)
 			else:
 				SCi.append(atomi)
-		self.data['Amino Acids'][AA_index] = (AA, chain, BBi, SCi, 'L')
+		self.data['Amino Acids'][AA_index] = [AA, chain, BBi, SCi, 'L']
 	def BondTree_PRO(self, BB, SC):
 		''' Construct proline bond graph by adding sidechain to backbone '''
 		BBb = self.AminoAcids[BB]['Bonds'].copy()
