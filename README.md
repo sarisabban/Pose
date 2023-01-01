@@ -43,6 +43,7 @@ It is important to note that this library uses **zero-based array indexing**, no
 | pose.AtomList(PDB=True)                         | Get a list of all the atoms in the polypeptide, use PDB=True to get their PDB formatted names |
 | pose.Identify(3, 'atom', q=True)                | Identify what 'atom' type belongs to a particular index in the coordinates matrix, use q=True to identify the atom's charge, use 'redisue' or 'amino acid' to instead identify the amino acid by index in the polypeptide sequence |
 | pose.Atom3Angle(0, 'N', 0, 'CA', 0, 'C')        | Get the angle between any three atoms in any amino acid. Example: first amino acid's Nitrogen, first amino acid's Carbon alpha, and first amino acid's Carbon |
+| pose.GetBondAtoms(0, 1)                         | Get the atom pair that participate in a bond from their index. Example: atom index 0 and atom index 1 return ['N', 'N', 'HA', 'H'], this returns both atom's PDB name and the element's name |
 | print(pose.data)                                | Print the dictionary data structure where all the polypeptide's information reside |
 | pose.Info()                                     | Print all the information about the polypeptide in an organised printout |
 | pose.Angle(2, 'chi', 1)                         | Get the PHI, PSI, OMEGA, or CHI 1-4 angles of an amino acid. Example: second amino acid's CHI 1 angle. For the PHI, PSI, and OMEGA angles no need to include the second argument (the 1 in this example) | 
@@ -50,7 +51,7 @@ It is important to note that this library uses **zero-based array indexing**, no
 | pose.Adjust(0, 'N', 0, 'CA', 10)                | Adjust the distance between any two atoms in any amno acid. Example: distance between first amino acid's Nitrogen and first amino acid's Carbon alpha to become 10 Å |
 | pose.Mutate(1, 'V')                             | Mutate an amno acid. Example: Mutate second amino acid to become Valine |
 | pose.Rotation3Angle(1, 'N', 1, 'CA', 1, 'C', -2)| Add/Subtract any three atom backbone angle from current degrees. Example: second amino acid, subtract 2 degrees from the N-Ca-C angle| 
-| pose.Import('1tqg.pdb', chain='B', Build=True)  | Import the 1tqg.pdb file's chain B (no hydrogens). If the argument Build=True is used the molecule will be re-built to include hydrogens, but it will very slightly deviate from the original molecule. currently I would advise to add hydrogens to a .pdb file (using pymol, export it from pymol into a new hydrated .pdb file) THEN import it here to the pose and NOT include the Build=True argument, this would be the most accurate representation of an imported hydrated polypeptide| 
+| pose.Import('1tqg.pdb', Build=True)             | Import a .pdb file (no hydrogens nor a bond graph). If the argument Build=True is used the molecule will be re-built to include hydrogens and a bond graph, but it will very slightly deviate from the original molecule. currently i would advise to add hydrogens to a .pdb file (using pymol, export it from pymol into a new hydrated .pdb file) THEN import it here to the pose and NOT include the Build=True argument, this would be the most accurate representation of an imported hydrated polypeptide| 
 
 
 ## Example code:
