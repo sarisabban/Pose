@@ -2,6 +2,7 @@
 
 import math
 import json
+import copy
 import datetime
 import numpy as np
 from collections import defaultdict
@@ -130,7 +131,7 @@ class Pose():
 			if A == atom:
 				coordinates = self.data['Coordinates'][i]
 				return(coordinates)
-		raise Exception('Amino acid does not have this atom')
+		raise Exception(f'Amino acid does not have the {atom} atom')
 	def Insert(self, AA, X, Y, Z):
 		''' Inser a backbone or sidechain given its initial coordinates '''
 		atoms = np.array(self.AminoAcids[AA]['Vectors']) + np.array([X, Y, Z])
@@ -180,8 +181,8 @@ class Pose():
 		self.data['Amino Acids'][AA_index] = [AA, chain, BBi, SCi, 'L']
 	def BondTree_PRO(self, BB, SC):
 		''' Construct proline bond graph by adding sidechain to backbone '''
-		BBb = self.AminoAcids[BB]['Bonds'].copy()
-		SCb = self.AminoAcids[SC]['Bonds'].copy()
+		BBb = copy.deepcopy(self.AminoAcids[BB]['Bonds'])
+		SCb = copy.deepcopy(self.AminoAcids[SC]['Bonds'])
 		for key in list(BBb.keys()): BBb[int(key)] = BBb.pop(key)
 		for key in list(SCb.keys()): SCb[int(key)] = SCb.pop(key)
 		length = len(SCb)
@@ -224,8 +225,8 @@ class Pose():
 		if SC == 'P':
 			BBb = self.BondTree_PRO(BB, SC)
 			return(BBb)
-		BBb = self.AminoAcids[BB]['Bonds']
-		SCb = self.AminoAcids[SC]['Bonds']
+		BBb = copy.deepcopy(self.AminoAcids[BB]['Bonds'])
+		SCb = copy.deepcopy(self.AminoAcids[SC]['Bonds'])
 		for key in list(BBb.keys()): BBb[int(key)] = BBb.pop(key)
 		for key in list(SCb.keys()): SCb[int(key)] = SCb.pop(key)
 		length = len(SCb)
@@ -241,7 +242,7 @@ class Pose():
 				newk = i+length
 				del BBb[i]
 				BBb[newk] = newvals
-		BBb[n].append(n+2+length)
+		BBb[n].append(n + 2 + length)
 		for i, (k, v) in enumerate(zip(SCb.keys(), SCb.values()), start=n+2):
 			k = i
 			if length != 1: v = [x+n+2 for x in v]
@@ -340,6 +341,17 @@ class Pose():
 		theta = math.acos(cos_theta)
 		theta = theta * 180 / math.pi
 		return(theta)
+	def GetBondAtoms(self, index1, index2):
+		''' Get the atom pair that participate in a bond from their index '''
+		bonds = self.data['Bonds'][index1]
+		if index2 not in bonds:
+			error = 'Requested two atoms are not bonded'
+			raise Exception(error)
+		atomA = self.data['Atoms'][index1][0]
+		elementA = self.data['Atoms'][index1][1]
+		atomB = self.data['Atoms'][index2][0]
+		elementB = self.data['Atoms'][index2][1]
+		return([atomA, elementA, atomB, elementB])
 	def Info(self):
 		''' Print all basic info about a peptide '''
 		print('Sequence:\t{}'.format(self.data['FASTA']))
@@ -408,31 +420,82 @@ class Pose():
 		self.data['FASTA'] = self.FASTA()
 		self.data['Size'] = self.Size()
 		self.data['Rg'] = self.Rg()
-	def Adjust(self, AA1, atom1, AA2, atom2, distance):
+	def Adjust(self, AA1, atom1, AA2, atom2, length):
 		''' Change the distance between any two atoms '''
-		A = self.GetAtom(AA1, atom1)
-		B = self.GetAtom(AA2, atom2)
-		mag = math.sqrt(np.sum((B-A)**2))
-		mut = distance/mag
-		aa1 = self.data['Amino Acids'][AA1][0]
-		aa1 = atom1 in [x[0] for x in self.AminoAcids[aa1]['Sidechain Atoms']]
-		aa2 = self.data['Amino Acids'][AA2][0]
-		aa2 = atom2 in [x[0] for x in self.AminoAcids[aa2]['Sidechain Atoms']]
-		Aelements = (self.data['Coordinates'] == A)
-		Awhole_row = Aelements.all(axis=1)
-		Aindex = np.argwhere(Awhole_row)[0][0]
-		Belements = (self.data['Coordinates'] == B)
-		Bwhole_row = Belements.all(axis=1)
-		Bindex = np.argwhere(Bwhole_row)[0][0]
-		if aa2 or aa1:
-			raise Exception('Distance adjustments allowed only for backbone')
-		else:
-			before = self.data['Coordinates'][:Bindex]
-			after = self.data['Coordinates'][Bindex:]
-			nB = B * mut
-			after = after - B + nB
-			new = np.concatenate((before, after))
-			self.data['Coordinates'] = new
+		BB_ATOMS = ['N', '1H', '2H', '3H', 'CA', 'HA', 'C', 'O']
+		sidechain = False
+		backbone = True
+		if (atom1 not in BB_ATOMS or atom2 not in BB_ATOMS):
+			sidechain = True
+			backbone = False
+		if sidechain:
+			index = self.data['Amino Acids'][AA1][2] + \
+					self.data['Amino Acids'][AA1][3]
+			Ai = None
+			Bi = None
+			for idx in index:
+				atoms = self.data['Atoms'][idx][0]
+				if atom1 == atoms:
+					Ai = idx
+				elif atom2 == atoms:
+					Bi = idx
+			coordinates = self.data['Coordinates']
+			vectors = {}
+			for k, v in zip(self.data['Bonds'].keys(), \
+			self.data['Bonds'].values()):
+				vbonds = [coordinates[x] - coordinates[k] for x in v]
+				vectors[k] = vbonds
+			Bidx = None
+			current_bonds = self.data['Bonds'][Ai]
+			for i, b in enumerate(current_bonds):
+				if Bi == b:
+					Bidx = i
+			v = vectors[Ai][Bidx]
+			mag = np.linalg.norm(v)
+			v = v*(length/mag)
+			vectors[Ai][Bidx] = v
+			temp = {}
+			Bond_Coord = {0: self.data['Coordinates'][0]}
+			for i in range(len(vectors)):
+				vs = [Bond_Coord[i] + x for x in vectors[i]]
+				temp[i] = vs
+				bonds = self.data['Bonds'][i]
+				for b, v  in zip(bonds, vs):
+					Bond_Coord[b] = v
+			coordinates = [0 for x in range(len(temp))]
+			for k, vs in zip(temp.keys(), temp.values()):
+				bonds = self.data['Bonds'][k]
+				for b, v in zip(bonds, vs):
+					coordinates[b] = v
+			coordinates = np.array(coordinates)
+			self.data['Coordinates'] = coordinates
+		elif backbone:
+			A = self.GetAtom(AA1, atom1)
+			B = self.GetAtom(AA2, atom2)
+			mag = math.sqrt(np.sum((B-A)**2))
+			mut = length/mag
+			aa1 = self.data['Amino Acids'][AA1][0]
+			aa1 = atom1 in [x[0] for x \
+			in self.AminoAcids[aa1]['Sidechain Atoms']]
+			aa2 = self.data['Amino Acids'][AA2][0]
+			aa2 = atom2 in [x[0] for x \
+			in self.AminoAcids[aa2]['Sidechain Atoms']]
+			Aelements = (self.data['Coordinates'] == A)
+			Awhole_row = Aelements.all(axis=1)
+			Aindex = np.argwhere(Awhole_row)[0][0]
+			Belements = (self.data['Coordinates'] == B)
+			Bwhole_row = Belements.all(axis=1)
+			Bindex = np.argwhere(Bwhole_row)[0][0]
+			if aa2 or aa1:
+				error = 'Distance adjustments allowed only for backbone'
+				raise Exception(error)
+			else:
+				before = self.data['Coordinates'][:Bindex]
+				after = self.data['Coordinates'][Bindex:]
+				nB = B * mut
+				after = after - B + nB
+				new = np.concatenate((before, after))
+				self.data['Coordinates'] = new
 	def Angle(self, AA, angle_type, chi_type=None):
 		''' Measure angle at bond '''
 		AminoAcid = self.data['Amino Acids'][AA][0]
@@ -649,7 +712,7 @@ class Pose():
 			'Atoms':{},
 			'Bonds':{},
 			'Coordinates':np.array([[0, 0, 0]])}
-		self.data = data
+		self.data = copy.deepcopy(data)
 		sequence_new = sequence_old[:index] + AA + sequence_old[index + 1:]
 		self.Build(sequence_new)
 		for i, (p, s, o) in enumerate(zip(PHIs, PSIs, OMGs)):
@@ -815,7 +878,7 @@ class Pose():
 				'Bonds':{},
 				'Coordinates':np.array([[0, 0, 0]])}
 			Idata = self.data
-			self.data = data
+			self.data = copy.deepcopy(data)
 			self.Build(sequence)
 			for i, (p, s, o) in enumerate(zip(PHIs, PSIs, OMGs)):
 				self.Rotate(i, p, 'PHI')
@@ -828,20 +891,3 @@ class Pose():
 				for ii, c in enumerate(chi):
 					if sequence[i] == 'P': continue
 					self.Rotate(i, c+1, 'CHI', ii+1)
-			for i in range(len(sequence)):
-				resA = Idata['Amino Acids'][i]
-				aaA = resA[0]
-				Ai = resA[2] + resA[3]
-				A = Idata['Coordinates'][min(Ai):max(Ai)+1]
-				resB = self.data['Amino Acids'][i]
-				aaB = resB[0]
-				Bi = resB[2] + resB[3]
-				B = self.data['Coordinates'][min(Bi):max(Bi)+1]
-				if i == 0:
-					BB = 'Backbone start'
-				elif i == len(sequence):
-					BB = 'Backbone end'
-				else:
-					BB = 'Backbone middle'
-				B = self.RigidMotion(aaB, A, B, BB)
-				self.data['Coordinates'][min(Bi):max(Bi)+1] = B
