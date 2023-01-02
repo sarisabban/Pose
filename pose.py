@@ -846,6 +846,7 @@ class Pose():
 				self.BondTree('Backbone end', aa)
 			else:
 				self.BondTree('Backbone middle', aa)
+		# PREFERABLE TO USE A BETTER ALGORITHM TO ADD HYDROGENS
 		if Build == True:
 			PHIs = []
 			PSIs = []
@@ -891,3 +892,78 @@ class Pose():
 				for ii, c in enumerate(chi):
 					if sequence[i] == 'P': continue
 					self.Rotate(i, c+1, 'CHI', ii+1)
+			for i in range(len(sequence)):
+				resA = Idata['Amino Acids'][i]
+				aaA = resA[0]
+				Ai = resA[2] + resA[3]
+				A = Idata['Coordinates'][min(Ai):max(Ai)+1]
+				resB = self.data['Amino Acids'][i]
+				aaB = resB[0]
+				Bi = resB[2] + resB[3]
+				B = self.data['Coordinates'][min(Bi):max(Bi)+1]
+				if i == 0:
+					BB = 'Backbone start'
+				elif i == len(sequence):
+					BB = 'Backbone end'
+				else:
+					BB = 'Backbone middle'
+				B = self.RigidMotion(aaB, A, B, BB)
+				self.data['Coordinates'][min(Bi):max(Bi)+1] = B
+			Bonds = []
+			for k, v in zip(self.data['Amino Acids'].keys(), \
+			self.data['Amino Acids'].values()):
+				IDX = v[2] + v[3]
+				for A in IDX:
+					for B in IDX:
+						if A != B:
+							try: A1, E1, A2, E2 = self.GetBondAtoms(A, B)
+							except: continue
+							bond = self.Distance(k, A1, k, A2)
+							if bond != 0.0:
+								bonds = [k, A, A1, E1, B, A2, E2, bond]
+								Bonds.append(bonds)
+			for _ in range(2):
+				for i, itemA in enumerate(Bonds):
+					for itemB in Bonds:
+						if  itemA[0] == itemB[0] \
+						and itemA[2] == itemB[5] \
+						and itemA[5] == itemB[2]:
+							Bonds.pop(i)
+			for b in Bonds:
+				residue  = b[0]
+				atom1i   = b[1]
+				atom1    = b[2]
+				element1 = b[3]
+				atom2i   = b[4]
+				atom2    = b[5]
+				element2 = b[6]
+				length   = b[7]
+				if (element1 == 'C' and element2 == 'C') \
+				and not (1.0 <= length <= 2.0):
+					L = 1.54
+					self.Adjust(residue, atom2, residue, atom1, L)
+				if ((element1 == 'O' and element2 == 'C') \
+				or (element1 == 'C' and element2 == 'O')) \
+				and not (1.0 <= length <= 2.0):
+					L = 1.43
+					self.Adjust(residue, atom2, residue, atom1, L)
+				if ((element1 == 'O' and element2 == 'H') \
+				or (element1 == 'H' and element2 == 'O')) \
+				and not (0.5 <= length <= 1.0):
+					L = 0.96
+					self.Adjust(residue, atom2, residue, atom1, L)
+				if ((element1 == 'N' and element2 == 'C') \
+				or (element1 == 'C' and element2 == 'N')) \
+				and not (1.0 <= length <= 2):
+					L = 1.47
+					self.Adjust(residue, atom2, residue, atom1, L)
+				if ((element1 == 'S' and element2 == 'C') \
+				or (element1 == 'C' and element2 == 'S')) \
+				and not (1.5 <= length <= 2.5):
+					L = 1.82
+					self.Adjust(residue, atom2, residue, atom1, L)
+				if ((element1 == 'S' and element2 == 'H') \
+				or (element1 == 'H' and element2 == 'S')) \
+				and not (1.0 <= length <= 1.5):
+					L = 1.34
+					self.Adjust(residue, atom2, residue, atom1, L)
