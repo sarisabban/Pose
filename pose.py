@@ -422,7 +422,7 @@ class Pose():
 		self.data['Rg'] = self.Rg()
 	def Adjust(self, AA1, atom1, AA2, atom2, length):
 		''' Change the distance between any two atoms '''
-		BB_ATOMS = ['N', '1H', '2H', '3H', 'CA', 'HA', 'C', 'O']
+		BB_ATOMS = ['N', 'CA', 'C', 'O']
 		sidechain = False
 		backbone = True
 		if (atom1 not in BB_ATOMS or atom2 not in BB_ATOMS):
@@ -939,6 +939,11 @@ class Pose():
 				atom2    = b[5]
 				element2 = b[6]
 				length   = b[7]
+				if ((element1 == 'H' and element2 == 'C') \
+				or (element1 == 'C' and element2 == 'H')) \
+				and not (0.5 <= length <= 1.3):
+					L = 1.09
+					self.Adjust(residue, atom1, residue, atom2, L)
 				if (element1 == 'C' and element2 == 'C') \
 				and not (1.0 <= length <= 2.0):
 					L = 1.54
@@ -957,6 +962,11 @@ class Pose():
 				or (element1 == 'C' and element2 == 'N')) \
 				and not (1.0 <= length <= 2):
 					L = 1.47
+					self.Adjust(residue, atom2, residue, atom1, L)
+				if ((element1 == 'N' and element2 == 'H') \
+				or (element1 == 'H' and element2 == 'N')) \
+				and not (0.5 <= length <= 1.3):
+					L = 1.01
 					self.Adjust(residue, atom2, residue, atom1, L)
 				if ((element1 == 'S' and element2 == 'C') \
 				or (element1 == 'C' and element2 == 'S')) \
