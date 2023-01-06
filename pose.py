@@ -582,7 +582,8 @@ class Pose():
 			self.data['Coordinates'] = combine
 		if angle_type.upper() == 'PSI':
 			ori = self.GetAtom(AA, 'C')
-			n = 0
+			n = 1
+			if AA == 0: n = 3
 			index = self.data['Amino Acids'][AA][2][4]
 			before = self.data['Coordinates'][:index + n]
 			after = self.data['Coordinates'][index + n:]
