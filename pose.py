@@ -943,7 +943,9 @@ class Pose():
 				or (element1 == 'C' and element2 == 'H')) \
 				and not (0.5 <= length <= 1.3):
 					L = 1.09
+					print(residue, atom1, residue, atom2, length)
 					self.Adjust(residue, atom1, residue, atom2, L)
+					self.Adjust(residue, atom2, residue, atom1, L)
 				if (element1 == 'C' and element2 == 'C') \
 				and not (1.0 <= length <= 2.0):
 					L = 1.54
@@ -968,6 +970,7 @@ class Pose():
 				and not (0.5 <= length <= 1.3):
 					L = 1.01
 					self.Adjust(residue, atom2, residue, atom1, L)
+					self.Adjust(residue, atom1, residue, atom2, L)
 				if ((element1 == 'S' and element2 == 'C') \
 				or (element1 == 'C' and element2 == 'S')) \
 				and not (1.5 <= length <= 2.5):
