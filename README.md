@@ -81,11 +81,11 @@ pose.Export('out.pdb')
 
 ## For collaboration:
 If anyone is interested in collaborating and contributing to this library, these are the functions that needs to be developed and added:
-1. **Hard**: in the pose.Import() function, add hydrogens to polypeptide algorithm
+1. **Hard**: Add hydrogens to polypeptide algorithm
 2. **Easy**: Sequences alignment (BLAST & MSA)
 3. **Easy**: Structure alignment (RMSD between two poses)
 4. **Moderate**: Calculating Gasteiger Partial Charges for each atom
 5. **Moderate**: Find H-bonds in pose
-6. **Moderate**: calculate DSSP
+6. **Moderate**: Calculate DSSP
 7. **Hard**: AMBER energy function
 8. **Easy** - if energy function is available: Simulated Annealing (Minimisatin/Relax protocol)
