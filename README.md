@@ -28,7 +28,7 @@ It is important to note that this library uses **zero-based array indexing**, no
 | FASTA          | String      | The FASTA sequence of the molecule.
 | Amino Acids    | Dictionary  | The key is the index in sequence, the value is the amino acid symbol, chain, backbone atom indices, sidechain atom indices, and the secondary structure the amino acid belongs to.
 | Atoms          | Dictionary  | The key is the index in the coordinates matrix, the value is the atom's PDB symbol, the element symbol, and the charge.
-| Bonds          | Dictionary  | The bond graph of the molecule as an adjecency list.
+| Bonds          | Dictionary  | The bond graph of the molecule as an adjacency list.
 | Coordinates    | Numpy array | The XYZ cartesian coordinates of each atom.
 
 ## Table of methods:
