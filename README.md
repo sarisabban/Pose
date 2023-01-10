@@ -24,7 +24,7 @@ It is important to note that this library uses **zero-based array indexing**, no
 | Energy         | Float       | The potential energy of the molecule.
 | Rg             | Float       | The radius of gyration of the molecule.
 | Mass           | Float       | The mass of the molecule in Daltons.
-| Size           | Int         | The sequence length of the molecule.
+| Size           | Integer     | The sequence length of the molecule.
 | FASTA          | String      | The FASTA sequence of the molecule.
 | Amino Acids    | Dictionary  | The key is the index in sequence, the value is the amino acid symbol, chain, backbone atom indices, sidechain atom indices, and the secondary structure the amino acid belongs to.
 | Atoms          | Dictionary  | The key is the index in the coordinates matrix, the value is the atom's PDB symbol, the element symbol, and the charge.
