@@ -283,7 +283,6 @@ class Pose():
 		A = self.GetAtom(AA1, atom1)
 		B = self.GetAtom(AA2, atom2)
 		mag = math.sqrt(np.sum((B-A)**2))
-		mag = round(mag, 3)
 		return(mag)
 	def Size(self):
 		''' Calculate length of peptide '''
