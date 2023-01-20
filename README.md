@@ -89,3 +89,4 @@ If anyone is interested in collaborating and contributing to this library, these
 6. **Moderate**: Calculate DSSP
 7. **Hard**: AMBER energy function
 8. **Easy** - if energy function is available: Simulated Annealing (Minimisatin/Relax protocol)
+9. Non-canonical amino acids including all D-amino acid backbones
