@@ -14,7 +14,7 @@ It is important to note that this library uses **zero-based array indexing**, no
 |----------------|---------------|-----------------------|
 | Vectors        | List of lists | The position of each atom relative to the N of the backbone. If the N coorinate is X, Y, Z = 0, 0, 0 you will get these vectors. To find the correct vectors position the N at coordinate X, Y, Z = 0, 0, 0, and use the corresponding coordinates of each atom.
 | Tricode        | String        | The three letter code for each amino acid.
-| Atoms          | List of lists | The atom identity of each coordinate point, first coordinate point is the nitrogen with symbol N and PDB entry N, next atom is the hydrogen that is bonded to the nitrogen with symbol H and PDB entry 1H etc... Unlike the PDB where all hydrogens are collected after the amino acid, here each atom's hydrogens come right after it. This makes for easier matrix operations.
+| Atoms          | List of lists | The atom identity of each coordinate point, first coordinate point is the nitrogen with symbol N and PDB entry N, next atom is the hydrogen that is bonded to the nitrogen with symbol H and PDB entry 1H etc... Unlike the PDB where all hydrogens are collected after the amino acid, here each atom's hydrogens come right after it. This makes for easier matrix operations. Order is index [0] == PDB atom's name, index [1] == element, index [2] == charge, index [3] == temperature factor.
 | Chi Angle Atoms| List of lists | The atoms in the sidechain that are contributing to a chi angle.
 | Bonds          | Dictionary    | The bond graph as an adjacency list.
 
@@ -27,7 +27,7 @@ It is important to note that this library uses **zero-based array indexing**, no
 | Size           | Integer     | The sequence length of the molecule.
 | FASTA          | String      | The FASTA sequence of the molecule.
 | Amino Acids    | Dictionary  | The key is the index in sequence, the value is the amino acid symbol, chain, backbone atom indices, sidechain atom indices, and the secondary structure the amino acid belongs to.
-| Atoms          | Dictionary  | The key is the index in the coordinates matrix, the value is the atom's PDB symbol, the element symbol, and the charge.
+| Atoms          | Dictionary  | The key is the index in the coordinates matrix, the value is the atom's PDB symbol, the element symbol, the charge, the temperature factor.
 | Bonds          | Dictionary  | The bond graph of the molecule as an adjacency list.
 | Coordinates    | Numpy array | The XYZ cartesian coordinates of each atom.
 
