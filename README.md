@@ -91,3 +91,5 @@ If anyone is interested in collaborating and contributing to this library, these
 8. **Easy** - if energy function is available: Simulated Annealing (Minimisatin/Relax protocol)
 9. **Easy**: Script to automate amino acid parametrisation
 10. **Easy**: Update Build to include Non-canonical amino acids including all D-amino acid backbones
+11. **Hard**: Pocket and void calculation
+12. **Moderate**: SASA calculation for each amino acid
