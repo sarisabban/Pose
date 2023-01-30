@@ -80,7 +80,7 @@ pose.Export('out.pdb')
 ```
 
 ## For collaboration:
-If anyone is interested in collaborating and contributing to this library, these are the functions that needs to be developed and added:
+If anyone is interested in collaborating and contributing to this library, these are functions that needs to be added:
 1. **Hard**: Add hydrogens to polypeptide algorithm
 2. **Easy**: Sequences alignment (BLAST & MSA)
 3. **Easy**: Structure alignment (RMSD between two poses)
