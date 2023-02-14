@@ -86,7 +86,7 @@ If anyone is interested in collaborating and contributing to this library, these
 3. **Easy**: Structure alignment (RMSD between two poses)
 4. **Moderate**: Calculating Gasteiger Partial Charges for each atom (python openbabel - temporary)
 5. **Moderate**: Find H-bonds in pose
-6. **Moderate**: Calculate DSSP
+6. **Moderate**: Calculate DSSP for each amino acid
 7. **Hard**: AMBER energy function
 8. **Easy** - if energy function is available: Simulated Annealing (Minimisatin/Relax protocol)
 9. **Easy**: Script to automate amino acid parametrisation
