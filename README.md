@@ -82,6 +82,8 @@ pose.Export('out.pdb')
 ## For collaboration:
 If anyone is interested in collaborating and contributing to this library, these are functions that needs to be added:
 1. **Hard**: Add hydrogens to polypeptide algorithm (doi.org/10.1006/jmbi.1998.2401) (python openbabel - temporary)
+	Improve AddH()
+	Improve ReBuild()
 2. **Easy**: Sequences alignment (BLAST & MSA)
 3. **Easy**: Structure alignment (RMSD between two poses)
 4. **Moderate**: Calculating Gasteiger Partial Charges for each atom (python openbabel - temporary)
