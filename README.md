@@ -51,8 +51,9 @@ It is important to note that this library uses **zero-based array indexing**, no
 | pose.Adjust(0, 'N', 0, 'CA', 10)                | Adjust the distance between any two atoms in any amno acid. Example: distance between first amino acid's Nitrogen and first amino acid's Carbon alpha to become 10 Å. The order of the atoms makes a difference, (0, 'N', 0, 'CA', 10) ≠ (0, 'CA', 0, 'N', 10), useful to seperate the chain behind the N |
 | pose.Mutate(1, 'V')                             | Mutate an amno acid. Example: Mutate second amino acid to become Valine |
 | pose.Rotation3Angle(1, 'N', 1, 'CA', 1, 'C', -2)| Add/Subtract any three atom backbone angle from current degrees. Example: second amino acid, subtract 2 degrees from the N-Ca-C angle| 
-| pose.Import('1tqg.pdb', Build=True)             | Import a .pdb file (no hydrogens nor a bond graph). If the argument Build=True is used the molecule will be re-built to include hydrogens and a bond graph, but it will very slightly deviate from the original molecule. currently i would advise to add hydrogens to a .pdb file (using pymol, export it from pymol into a new hydrated .pdb file) THEN import it here to the pose and NOT include the Build=True argument, this would be the most accurate representation of an imported hydrated polypeptide| 
-
+| pose.Import('1tqg.pdb', chain='A')              | Import a .pdb file (if no hydrogens are in the PDB they will not be added). Currently I would advise to add hydrogens to a .pdb file (using pymol or openbabel, export it as a new hydrated .pdb file) then import it to the pose| 
+| pose.ReBuild()                                  | import a polypeptide, Build() it as a primary structure then fold it using only its amino acid angles|
+| pose.AddH()                                     | Add hydrogens to a pose|
 
 ## Example code:
 ```
