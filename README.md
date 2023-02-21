@@ -35,7 +35,7 @@ It is important to note that this library uses **zero-based array indexing**, no
 | Method                                          | Description with example |
 |-------------------------------------------------|--------------------------|
 | pose = Pose()                                   | Construct the Pose class |
-| pose.Build('SARI')                              | Build a polypeptide using a sequence, the polypeptide will be in primary structure. Example: the sequence 'SARI'. Capital letters for L-amino acids, small letter for D-amino acids |
+| pose.Build('SARI')                              | Build a polypeptide using a sequence, the polypeptide will be in primary structure. Example: the sequence 'SARI'. Capital letters for L-amino acids, small letters for D-amino acids |
 | pose.Export('out.pdb')                          | Export the polypeptide to a .pdb file. Example: the output file's name is out.pdb |
 | pose.GetAtom(3, 'N')                            | Get XYZ cartesian coordinates of an atom. Example: fourth amino acid's Nitrogen atom |
 | pose.SecondaryStructures()                      | Get a list of each amino acid's secondary structure H:Helix, S:Sheet, L:Loop |
