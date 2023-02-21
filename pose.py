@@ -152,11 +152,16 @@ class Pose():
 		AA = np.matmul(AA, TM)
 		AA = AA + p
 		return(AA)
-	def Amino(self, backbone_type, X, Y, Z, aa, index, flip=False):
+	def LD(self, AA):
+		''' Convert an amino acid between L and D chirality '''
+		AA = AA * [1, 1, -1]
+		return(AA)
+	def Amino(self, backbone_type, X, Y, Z, aa, index, flip=False, LD=False):
 		''' Construct an amino acid and add its coordinates to the data '''
 		BB = self.Insert(backbone_type, X, Y, Z)
 		SC = self.Insert(aa, X, Y, Z)
 		AA = np.insert(BB, index, SC, axis=0)
+		if LD: AA = self.LD(AA)
 		if flip: AA = self.Flip(AA)
 		if aa == 'P': AA = np.delete(AA, [1], axis=0)
 		self.data['Coordinates'] = \
@@ -367,13 +372,21 @@ class Pose():
 		for i, aa in enumerate(list(sequence)):
 			if len(sequence) == 1:
 				I = len(self.data['Coordinates']) - 1
-				self.Amino('Backbone', X, Y, Z, aa, [6])
+				if aa.isupper():
+					self.Amino('Backbone', X, Y, Z, aa, [6])
+				elif aa.islower():
+					aa = aa.upper()
+					self.Amino('Backbone', X, Y, Z, aa, [6], LD=True)
 				AAs = self.AminoAcids['Backbone']['Backbone Atoms']
 				self.Atoms(aa, chain, AAs, 6, i, I)
 				self.BondTree('Backbone', aa)
 			elif i == 0:
 				I = len(self.data['Coordinates']) - 1
-				self.Amino('Backbone start', X, Y, Z, aa, [6])
+				if aa.isupper():
+					self.Amino('Backbone start', X, Y, Z, aa, [6])
+				elif aa.islower():
+					aa = aa.upper()
+					self.Amino('Backbone start', X, Y, Z, aa, [6], LD=True)
 				AAs = self.AminoAcids['Backbone start']['Backbone Atoms']
 				self.Atoms(aa, chain, AAs, 6, i, I)
 				self.BondTree('Backbone start', aa)
@@ -383,7 +396,12 @@ class Pose():
 					Y = self.data['Coordinates'][-2][1] + Ey_adjust
 					Z = self.data['Coordinates'][-2][2] + Ez_adjust
 					I = len(self.data['Coordinates']) - 0
-					self.Amino('Backbone end', X, Y, Z, aa, [4], flip=True)
+					if aa.isupper():
+						self.Amino('Backbone end', X, Y, Z, aa, [4], flip=True)
+					elif aa.islower():
+						aa = aa.upper()
+						self.Amino('Backbone end', X, Y, Z, aa, [4],
+						flip=True, LD=True)
 					AAs = self.AminoAcids['Backbone end']['Backbone Atoms']
 					self.Atoms(aa, chain, AAs, 4, i, I)
 					self.BondTree('Backbone end', aa)
@@ -392,7 +410,11 @@ class Pose():
 					Y = self.data['Coordinates'][-2][1] + Oy_adjust
 					Z = self.data['Coordinates'][-2][2] + Oz_adjust
 					I = len(self.data['Coordinates']) - 0
-					self.Amino('Backbone end', X, Y, Z, aa, [4])
+					if aa.isupper():
+						self.Amino('Backbone end', X, Y, Z, aa, [4])
+					elif aa.islower():
+						aa = aa.upper()
+						self.Amino('Backbone end', X, Y, Z, aa, [4], LD=True)
 					AAs = self.AminoAcids['Backbone end']['Backbone Atoms']
 					self.Atoms(aa, chain, AAs, 4, i, I)
 					self.BondTree('Backbone end', aa)
@@ -402,7 +424,13 @@ class Pose():
 					Y = self.data['Coordinates'][-2][1] + Ey_adjust
 					Z = self.data['Coordinates'][-2][2] + Ez_adjust
 					I = len(self.data['Coordinates']) - 0
-					self.Amino('Backbone middle', X, Y, Z, aa, [4], flip=True)
+					if aa.isupper():
+						self.Amino('Backbone middle', X, Y, Z, aa, [4],
+						flip=True)
+					elif aa.islower():
+						aa = aa.upper()
+						self.Amino('Backbone middle', X, Y, Z, aa, [4],
+						flip=True, LD=True)
 					AAs = self.AminoAcids['Backbone middle']['Backbone Atoms']
 					self.Atoms(aa, chain, AAs, 4, i, I)
 					self.BondTree('Backbone middle', aa)
@@ -411,7 +439,11 @@ class Pose():
 					Y = self.data['Coordinates'][-2][1] + Oy_adjust
 					Z = self.data['Coordinates'][-2][2] + Oz_adjust
 					I = len(self.data['Coordinates']) - 0
-					self.Amino('Backbone middle', X, Y, Z, aa, [4])
+					if aa.isupper():
+						self.Amino('Backbone middle', X, Y, Z, aa, [4])
+					elif aa.islower():
+						aa = aa.upper()
+						self.Amino('Backbone middle', X, Y, Z, aa, [4], LD=True)
 					AAs = self.AminoAcids['Backbone middle']['Backbone Atoms']
 					self.Atoms(aa, chain, AAs, 4, i, I)
 					self.BondTree('Backbone middle', aa)
