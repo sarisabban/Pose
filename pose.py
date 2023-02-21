@@ -12,7 +12,7 @@ class Pose():
 	def __init__(self):
 		path = __file__.split('/')[:-1]
 		path = '/'.join(path)
-		with open(f'{path}/AminoAcids.json') as f: AminoAcids = json.load(f)
+		with open(f'AminoAcids.json') as f: AminoAcids = json.load(f)
 		Masses = {
 			'H':1.008,    'He':4.003,   'Li':6.941,   'Be':9.012,
 			'B':10.811,   'C':12.011,   'N':14.007,   'O':15.999,
@@ -55,9 +55,9 @@ class Pose():
 		''' Construct a PDB atom entry '''
 		ATOM = '{:<6}'.format(atom)
 		N = '{:>5}  '.format(n)
-		A = '{:<3}'.format(a)
+		A = '{:<4}'.format(a)
 		L = '{:>0}'.format(l)
-		R = '{:>4}'.format(r)
+		R = '{:>3}'.format(r)
 		C = '{:>2}'.format(c)
 		S = '{:>4}'.format(s)
 		I = '{:>1}   '.format(i)
@@ -183,7 +183,7 @@ class Pose():
 			else:
 				SCi.append(atomi)
 		tri = self.AminoAcids[AA]['Tricode']
-		if LD: tri = 'D' + tri
+		if LD: tri = 'D' + tri[1:]
 		self.data['Amino Acids'][AA_index] = [AA, chain, BBi, SCi, 'L', tri]
 	def BondTree_PRO(self, BB, SC):
 		''' Construct proline bond graph by adding sidechain to backbone '''
