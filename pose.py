@@ -12,7 +12,7 @@ class Pose():
 	def __init__(self):
 		path = __file__.split('/')[:-1]
 		path = '/'.join(path)
-		with open(f'AminoAcids.json') as f: AminoAcids = json.load(f)
+		with open(f'{path}/AminoAcids.json') as f: AminoAcids = json.load(f)
 		Masses = {
 			'H':1.008,    'He':4.003,   'Li':6.941,   'Be':9.012,
 			'B':10.811,   'C':12.011,   'N':14.007,   'O':15.999,
@@ -288,7 +288,7 @@ class Pose():
 		''' Measure distance between any two atoms '''
 		A = self.GetAtom(AA1, atom1)
 		B = self.GetAtom(AA2, atom2)
-		mag = math.sqrt(np.sum((B-A)**2))
+		mag = np.linalg.norm(B - A)
 		return(mag)
 	def Size(self):
 		''' Calculate length of peptide '''
@@ -517,8 +517,8 @@ class Pose():
 			else:
 				before = self.data['Coordinates'][:Bindex]
 				after = self.data['Coordinates'][Bindex:]
-				nB = B * mut
-				after = after - B + nB
+				nB = (B-A) * mut
+				after = after - (B-A) + nB
 				new = np.concatenate((before, after))
 				self.data['Coordinates'] = new
 	def Angle(self, AA, angle_type, chi_type=None):
@@ -568,7 +568,6 @@ class Pose():
 		a = np.dot(u2, u1u2Cu2u3)
 		b = mag_u2 * u1u2Du2u3
 		theta = math.atan2(a, b) * 180 / math.pi
-		theta = round(theta, 2)
 		return(theta)
 	def Rotation_Matrix(self, theta, u):
 		''' Rotate a matrix around axis u by theta angle '''
@@ -687,15 +686,13 @@ class Pose():
 		BB = self.data['Amino Acids'][AA2][2]
 		atom2i = None
 		for i in BB:
-			if atoms[i][0] == atom2 : atom2i  = i
+			if atoms[i][0] == atom2: atom2i = i
 		if atom2i == None:
 			raise Exception('Chosen atom not in backbone')
 		before = self.data['Coordinates'][:atom2i]
 		after  = self.data['Coordinates'][atom2i:]
-		A = self.GetAtom(AA1, atom1)
-		B = self.GetAtom(AA3, atom3)
-		if (A==0).all(): A += 1e-10
-		if (B==0).all(): B += 1e-10
+		A = self.GetAtom(AA3, atom3) - self.GetAtom(AA1, atom1)
+		B = self.GetAtom(AA3, atom3) - self.GetAtom(AA2, atom2)
 		u = np.cross(B, A)
 		lu = np.linalg.norm(u)
 		u = u / lu
@@ -876,59 +873,6 @@ class Pose():
 		self.data['FASTA'] = self.FASTA()
 		self.data['Size'] = self.Size()
 		self.data['Rg'] = self.Rg()
-	def ReBuild(self, filename):
-		''' Fold a polypeptide using angles and bonds '''
-		self.Import(filename)
-		sequence = self.data['FASTA']
-		PHIs = []
-		PSIs = []
-		OMGs = []
-		NCaC = []
-		CHIs = {}
-		for i in range(len(sequence)):
-			PHIs.append(self.Angle(i, 'PHI'))
-			PSIs.append(self.Angle(i, 'PSI'))
-			OMGs.append(self.Angle(i, 'OMEGA'))
-			NCaC.append(self.Atom3Angle(i, 'N', i, 'CA', i, 'C'))
-			chi = []
-			try: chi.append(self.Angle(i, 'CHI', 1))
-			except: pass
-			try: chi.append(self.Angle(i, 'CHI', 2))
-			except: pass
-			try: chi.append(self.Angle(i, 'CHI', 3))
-			except: pass
-			try: chi.append(self.Angle(i, 'CHI', 4))
-			except: pass
-			CHIs[i] = chi
-		data ={
-			'Energy':0,
-			'Rg':0,
-			'Mass':0,
-			'Size':0,
-			'FASTA':None,
-			'Amino Acids':{},
-			'Atoms':{},
-			'Bonds':{},
-			'Coordinates':np.array([[0, 0, 0]])}
-		self.data = copy.deepcopy(data)
-		self.Build(sequence)
-		for i, (p, s, o, n) in enumerate(zip(PHIs, PSIs, OMGs, NCaC)):
-			self.Rotate(i, p, 'PHI')
-			self.Rotate(i, s, 'PSI')
-			N = pose.Atom3Angle(i, 'N', i, 'CA', i, 'C')
-			self.Rotation3Angle(i, 'N', i, 'CA', i, 'C', n-N)
-			if i != len(sequence) -1:
-				self.Rotate(i, o, 'OMEGA')
-		for i in range(len(sequence)):
-			chi = CHIs[i]
-			if chi == []: continue
-			for ii, c in enumerate(chi):
-				if sequence[i] == 'P': continue
-				self.Rotate(i, c+1, 'CHI', ii+1)
-		self.data['Mass'] = self.Mass()
-		self.data['FASTA'] = self.FASTA()
-		self.data['Size'] = self.Size()
-		self.data['Rg'] = self.Rg()
 	def AddH(self):
 		''' Add hydrogen atoms to structure '''
 		sequence = self.data['FASTA']
@@ -1032,3 +976,67 @@ class Pose():
 			and not (1.0 <= length <= 1.5):
 				L = 1.34
 				self.Adjust(residue, atom2, residue, atom1, L)
+	def ReBuild(self, filename):
+		''' Fold a polypeptide using angles and bonds '''
+		self.Import(filename)
+		sequence = self.data['FASTA']
+		PHIs = []
+		PSIs = []
+		OMGs = []
+		NCaC = []
+		CHIs = {}
+		bNCA = []
+		bCAC = []
+		bCN1 = []
+		for i in range(len(sequence)):
+			PHIs.append(self.Angle(i, 'PHI'))
+			PSIs.append(self.Angle(i, 'PSI'))
+			OMGs.append(self.Angle(i, 'OMEGA'))
+			NCaC.append(self.Atom3Angle(i, 'N', i, 'CA', i, 'C'))
+			chi = []
+			try: chi.append(self.Angle(i, 'CHI', 1))
+			except: pass
+			try: chi.append(self.Angle(i, 'CHI', 2))
+			except: pass
+			try: chi.append(self.Angle(i, 'CHI', 3))
+			except: pass
+			try: chi.append(self.Angle(i, 'CHI', 4))
+			except: pass
+			CHIs[i] = chi
+			bNCA.append(self.Distance(i, 'N', i, 'CA'))
+			bCAC.append(self.Distance(i, 'CA', i, 'C'))
+			try:bCN1.append(self.Distance(i, 'C', i+1, 'N'))
+			except: pass
+		data ={
+			'Energy':0,
+			'Rg':0,
+			'Mass':0,
+			'Size':0,
+			'FASTA':None,
+			'Amino Acids':{},
+			'Atoms':{},
+			'Bonds':{},
+			'Coordinates':np.array([[0, 0, 0]])}
+		self.data = copy.deepcopy(data)
+		self.Build(sequence)
+		for i, (p, s, o, n, b1, b2, b3) in enumerate(zip(
+		PHIs, PSIs, OMGs, NCaC, bNCA, bCAC, bCN1)):
+			self.Rotate(i, p, 'PHI')
+			self.Rotate(i, s, 'PSI')
+			N = pose.Atom3Angle(i, 'N', i, 'CA', i, 'C')
+			self.Rotation3Angle(i, 'N', i, 'CA', i, 'C', N-n)
+			self.Adjust(i, 'N', i, 'CA', b1)
+			self.Adjust(i, 'CA', i, 'C', b2)
+			if i != len(sequence) -1:
+				self.Rotate(i, o, 'OMEGA')
+				self.Adjust(i, 'C', i+1, 'N', b3)
+		for i in range(len(sequence)):
+			chi = CHIs[i]
+			if chi == []: continue
+			for ii, c in enumerate(chi):
+				if sequence[i] == 'P': continue
+				self.Rotate(i, c+1, 'CHI', ii+1)
+		self.data['Mass'] = self.Mass()
+		self.data['FASTA'] = self.FASTA()
+		self.data['Size'] = self.Size()
+		self.data['Rg'] = self.Rg()
