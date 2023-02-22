@@ -52,7 +52,7 @@ It is important to note that this library uses **zero-based array indexing**, no
 | pose.Mutate(1, 'V')                             | Mutate an amno acid. Example: Mutate second amino acid to become Valine |
 | pose.Rotation3Angle(1, 'N', 1, 'CA', 1, 'C', -2)| Add/Subtract any three atom backbone angle from current degrees. Example: second amino acid, subtract 2 degrees from the N-Ca-C angle| 
 | pose.Import('1tqg.pdb', chain='A')              | Import a .pdb file (if no hydrogens are in the PDB they will not be added). Currently I would advise to add hydrogens to a .pdb file (using pymol or openbabel, export it as a new hydrated .pdb file) then import it to the pose| 
-| pose.ReBuild()                                  | import a polypeptide, Build() it as a primary structure then fold it using only its amino acid angles|
+| pose.ReBuild()                                  | Import a polypeptide, Build() it as a primary structure then fold it using only its amino acid angles|
 | pose.AddH()                                     | Add hydrogens to a pose|
 
 ## Example code:
