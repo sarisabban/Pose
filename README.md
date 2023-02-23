@@ -9,6 +9,34 @@ Using this information, the pose can build (**canonical** and **non-canonical** 
 > __Note__
 It is important to note that this library uses **zero-based array indexing**, not one-based as is in the PDB. It is thus important to note that the first amino acid and/or the first atom is indexed as 0 and not 1.
 
+## List of available amino acids:
+A ALA
+C CYS
+D ASP
+E GLU
+F PHE
+G GLY
+H HIS
+I ILE
+J MSE
+K LYS
+L LEU
+M MET
+N ASN
+O PYL
+P PRO
+Q GLN
+R ARG
+S SER
+T THR
+U SEC
+V VAL
+W TRP
+Y TYR
+
+> __Note__
+Capital letter unicodes will build L-amino acids, small letter unicodes will build D-amino acids.
+
 ### Description of the AminoAcid.json:
 | Dictionary Key | Value Type    | Description of Values |
 |----------------|---------------|-----------------------|
