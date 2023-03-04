@@ -25,48 +25,48 @@ Capital letter unicodes will build L-amino acids, small letter unicodes will bui
 ### Description of the AminoAcid.json:
 | Dictionary Key | Value Type    | Description of Values |
 |----------------|---------------|-----------------------|
-| Vectors        | List of lists | The position of each atom relative to the N of the backbone. If the N coorinate is X, Y, Z = 0, 0, 0 you will get these vectors. To find the correct vectors position the N at coordinate X, Y, Z = 0, 0, 0, and use the corresponding coordinates of each atom.
-| Tricode        | String        | The three letter code for each amino acid.
-| Atoms          | List of lists | The atom identity of each coordinate point, first coordinate point is the nitrogen with symbol N and PDB entry N, next atom is the hydrogen that is bonded to the nitrogen with symbol H and PDB entry 1H etc... Unlike the PDB where all hydrogens are collected after the amino acid, here each atom's hydrogens come right after it. This makes for easier matrix operations. Order is index [0] == PDB atom's name, index [1] == element, index [2] == charge, index [3] == temperature factor.
-| Chi Angle Atoms| List of lists | The atoms in the sidechain that are contributing to a chi angle.
-| Bonds          | Dictionary    | The bond graph as an adjacency list.
+|Vectors         |List of lists  |The position of each atom relative to the N of the backbone. If the N coorinate is X, Y, Z = 0, 0, 0 you will get these vectors. To find the correct vectors position the N at coordinate X, Y, Z = 0, 0, 0, and use the corresponding coordinates of each atom|
+|Tricode         |String         |The three letter code for each amino acid|
+|Atoms           |List of lists  |The atom identity of each coordinate point, first coordinate point is the nitrogen with symbol N and PDB entry N, next atom is the hydrogen that is bonded to the nitrogen with symbol H and PDB entry 1H etc... Unlike the PDB where all hydrogens are collected after the amino acid, here each atom's hydrogens come right after it. This makes for easier matrix operations. Order is index [0] == PDB atom's name, index [1] == element, index [2] == charge, index [3] == temperature factor|
+|Chi Angle Atoms |List of lists  |The atoms in the sidechain that are contributing to a chi angle|
+|Bonds           |Dictionary     |The bond graph as an adjacency list|
 
 ### Description of the polypeptide's data structure:
 | Dictionary Key | Value Type  | Description of Values |
 |----------------|-------------|-----------------------|
-| Energy         | Float       | The potential energy of the molecule.
-| Rg             | Float       | The radius of gyration of the molecule.
-| Mass           | Float       | The mass of the molecule in Daltons.
-| Size           | Integer     | The sequence length of the molecule.
-| FASTA          | String      | The FASTA sequence of the molecule.
-| Amino Acids    | Dictionary  | The key is the index in sequence, the value is the amino acid symbol, chain, backbone atom indices, sidechain atom indices, and the secondary structure the amino acid belongs to.
-| Atoms          | Dictionary  | The key is the index in the coordinates matrix, the value is the atom's PDB symbol, the element symbol, the charge, and the temperature factor.
-| Bonds          | Dictionary  | The bond graph of the molecule as an adjacency list.
-| Coordinates    | Numpy array | The XYZ cartesian coordinates of each atom.
+|Energy          |Float        |The potential energy of the molecule|
+|Rg              |Float        |The radius of gyration of the molecule|
+|Mass            |Float        |The mass of the molecule in Daltons|
+|Size            |Integer      |The sequence length of the molecule|
+|FASTA           |String       |The FASTA sequence of the molecule|
+|Amino Acids     |Dictionary   |The key is the index in sequence, the value is the amino acid symbol, chain, backbone atom indices, sidechain atom indices, and the secondary structure the amino acid belongs to|
+|Atoms           |Dictionary   |The key is the index in the coordinates matrix, the value is the atom's PDB symbol, the element symbol, the charge, and the temperature factor|
+|Bonds           |Dictionary   |The bond graph of the molecule as an adjacency list|
+|Coordinates     |Numpy array  |The XYZ cartesian coordinates of each atom|
 
 ## Table of methods:
 | Method                                          | Description with example |
 |-------------------------------------------------|--------------------------|
-| pose = Pose()                                   | Construct the Pose class |
-| pose.Build('SARI')                              | Build a polypeptide using a sequence, the polypeptide will be in primary structure. Example: the sequence 'SARI'. Capital letters for L-amino acids, small letters for D-amino acids |
-| pose.Export('out.pdb')                          | Export the polypeptide to a .pdb file. Example: the output file's name is out.pdb |
-| pose.GetAtom(3, 'N')                            | Get XYZ cartesian coordinates of an atom. Example: fourth amino acid's Nitrogen atom |
-| pose.SecondaryStructures()                      | Get a list of each amino acid's secondary structure H:Helix, S:Sheet, L:Loop |
-| pose.Distance(0, 'N', 1, 'CA')                  | Get the distance (in Å) between any two atoms in any amino acid. Example: distance between first amino acid's Nitrogen atom and second amino acid's Carbon alpha atom |
-| pose.AtomList(PDB=True)                         | Get a list of all the atoms in the polypeptide, use PDB=True to get their PDB formatted names |
-| pose.Identify(3, 'atom', q=True)                | Identify what 'atom' type belongs to a particular index in the coordinates matrix, use q=True to identify the atom's charge, use 'redisue' or 'amino acid' to instead identify the amino acid by index in the polypeptide sequence |
-| pose.Atom3Angle(0, 'N', 0, 'CA', 0, 'C')        | Get the angle between any three atoms in any amino acid. Example: first amino acid's Nitrogen, first amino acid's Carbon alpha, and first amino acid's Carbon |
-| pose.GetBondAtoms(0, 1)                         | Get the atom pair that participate in a bond from their index. Example: atom index 0 and atom index 1 return ['N', 'N', 'HA', 'H'], this returns both atom's PDB name and the element's name |
-| print(pose.data)                                | Print the dictionary data structure where all the polypeptide's information reside |
-| pose.Info()                                     | Print all the information about the polypeptide in an organised printout |
-| pose.Angle(2, 'chi', 1)                         | Get the PHI, PSI, OMEGA, or CHI 1-4 angles of an amino acid. Example: second amino acid's CHI 1 angle. For the PHI, PSI, and OMEGA angles no need to include the second argument (the 1 in this example) | 
-| pose.Rotate(2, 20, 'chi', 1)                    | Change an angle to reach a degrees. Example: third amino acid, change angle to become 20 degrees, the angle type is CHI 1 |
-| pose.Adjust(0, 'N', 0, 'CA', 10)                | Adjust the distance between any two atoms in any amno acid. Example: distance between first amino acid's Nitrogen and first amino acid's Carbon alpha to become 10 Å. The order of the atoms makes a difference, (0, 'N', 0, 'CA', 10) ≠ (0, 'CA', 0, 'N', 10), useful to seperate the chain behind the N |
-| pose.Mutate(1, 'V')                             | Mutate an amno acid. Example: Mutate second amino acid to become Valine |
-| pose.Rotation3Angle(1, 'N', 1, 'CA', 1, 'C', -2)| Add/Subtract any three atom backbone angle from current degrees. Example: second amino acid, subtract 2 degrees from the N-Ca-C angle| 
-| pose.Import('1tqg.pdb', chain='A')              | Import a .pdb file (if no hydrogens are in the PDB they will not be added). Currently I would advise to add hydrogens to a .pdb file (using pymol or openbabel, export it as a new hydrated .pdb file) then import it to the pose| 
-| pose.ReBuild()                                  | Import a polypeptide, Build() it as a primary structure then fold it using only its amino acid angles|
-| pose.AddH()                                     | Add hydrogens to a pose|
+|pose = Pose()                                    |Construct the Pose class|
+|pose.Build('SARI')                               |Build a polypeptide using a sequence, the polypeptide will be in primary structure. Example: the sequence 'SARI'. Capital letters for L-amino acids, small letters for D-amino acids|
+|pose.Export('out.pdb')                           |Export the polypeptide to a .pdb file. Example: the output file's name is out.pdb|
+|pose.GetAtom(3, 'N')                             |Get XYZ cartesian coordinates of an atom. Example: fourth amino acid's Nitrogen atom|
+|pose.SecondaryStructures()                       |Get a list of each amino acid's secondary structure H:Helix, S:Sheet, L:Loop|
+|pose.Distance(0, 'N', 1, 'CA')                   |Get the distance (in Å) between any two atoms in any amino acid. Example: distance between first amino acid's Nitrogen atom and second amino acid's Carbon alpha atom|
+|pose.AtomList(PDB=True)                          |Get a list of all the atoms in the polypeptide, use PDB=True to get their PDB formatted names|
+|pose.Identify(3, 'atom', q=True)                 |Identify what 'atom' type belongs to a particular index in the coordinates matrix, use q=True to identify the atom's charge, use 'redisue' or 'amino acid' to instead identify the amino acid by index in the polypeptide sequence|
+|pose.Atom3Angle(0, 'N', 0, 'CA', 0, 'C')         |Get the angle between any three atoms in any amino acid. Example: first amino acid's Nitrogen, first amino acid's Carbon alpha, and first amino acid's Carbon|
+|pose.GetBondAtoms(0, 1)                          |Get the atom pair that participate in a bond from their index. Example: atom index 0 and atom index 1 return ['N', 'N', 'HA', 'H'], this returns both atom's PDB name and the element's name|
+|print(pose.data)                                 |Print the dictionary data structure where all the polypeptide's information reside|
+|pose.Info()                                      |Print all the information about the polypeptide in an organised printout|
+|pose.Angle(2, 'chi', 1)                          |Get the PHI, PSI, OMEGA, or CHI 1-4 angles of an amino acid. Example: second amino acid's CHI 1 angle. For the PHI, PSI, and OMEGA angles no need to include the second argument (the 1 in this example)|
+|pose.Rotate(2, 20, 'chi', 1)                     |Change an angle to reach a degrees. Example: third amino acid, change angle to become 20 degrees, the angle type is CHI 1|
+|pose.Adjust(0, 'N', 0, 'CA', 10)                 |Adjust the distance between any two atoms in any amno acid. Example: distance between first amino acid's Nitrogen and first amino acid's Carbon alpha to become 10 Å. The order of the atoms makes a difference, (0, 'N', 0, 'CA', 10) ≠ (0, 'CA', 0, 'N', 10), useful to seperate the chain behind the N|
+|pose.Mutate(1, 'V')                              |Mutate an amno acid. Example: Mutate second amino acid to become Valine|
+|pose.Rotation3Angle(1, 'N', 1, 'CA', 1, 'C', -2) |Add/Subtract any three atom backbone angle from current degrees. Example: second amino acid, subtract 2 degrees from the N-Ca-C angle|
+|pose.Import('1tqg.pdb', chain='A')               |Import a .pdb file (if no hydrogens are in the PDB they will not be added). Currently I would advise to add hydrogens to a .pdb file (using pymol or openbabel, export it as a new hydrated .pdb file) then import it to the pose|
+|pose.ReBuild()                                   |Import a polypeptide, Build() it as a primary structure then fold it using only its amino acid angles|
+|pose.AddH()                                      |Add hydrogens to a pose|
 
 ## Example code:
 ```
