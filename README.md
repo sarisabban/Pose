@@ -107,4 +107,4 @@ If anyone is interested in collaborating and contributing to this library, these
 8. **Easy** - if energy function is available: Simulated Annealing (Minimisatin/Relax protocol)
 9. **Easy**: Script to automate amino acid parametrisation
 10. **Hard**: Pocket and void calculation
-11. **Moderate**: SASA calculation for each amino acid
+11. **Hard**: SASA calculation for each amino acid
