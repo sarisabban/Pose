@@ -10,7 +10,7 @@ This library constructs a pose for a protein molecule, which is a data structure
 Using this information, the pose can build (**canonical** and **non-canonical** amino acids, including both **L-amino acids** and **D-amino acids**) and manipulate polypeptides, such as building any polypeptide from sequence, move the torsion and rotamer angles, mutate residues, as well as measure the bond lengths and angles. This data structure can be used to build higher level protocols such as simulated annealing, and machine learning-based protein design.
 
 > __Note__
-It is important to note that this library uses **zero-based array indexing**, not one-based as is in the PDB. It is thus important to note that the first amino acid and/or the first atom is indexed as 0 and not 1.
+It is important to note that this library uses **zero-based array indexing**, not one-based as is in the PDB. It is thus important to note that the first amino acid and the first atom is indexed as 0 and not 1.
 
 ## List of available amino acids:
 |||||||||||
