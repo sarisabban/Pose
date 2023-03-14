@@ -74,7 +74,7 @@ Capital letter unicodes will build L-amino acids, small letter unicodes will bui
 
 ## Example code:
 ```
-from pose import Pose
+from pose import *
 
 # PDB ID: 1TQG
 sequence = 'GSHMEYLGVFVDETKEYLQNLNDTLLELEKNPEDMELINEAFRALHTLKGMAGTMGFSSMAKLCHTLENILDKARNSEIKITSDLLDKIFAGVDMITRMVDKIVS'
