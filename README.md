@@ -12,6 +12,10 @@ Using this information, the pose can build (**canonical** and **non-canonical** 
 > __Note__
 It is important to note that this library uses **zero-based array indexing**, not one-based as is in the PDB. It is thus important to note that the first amino acid and the first atom is indexed as 0 and not 1.
 
+## Installation:
+
+`pip install git+https://github.com/sarisabban/Pose`
+
 ## List of available amino acids:
 |||||||||||
 |-|-|-|-|-|-|-|-|-|-|
