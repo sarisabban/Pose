@@ -21,7 +21,7 @@ It is important to note that this library uses **zero-based array indexing**, no
 |-|-|-|-|-|-|-|-|-|-|
 |A - ALA|C - CYS|D - ASP|E - GLU|F - PHE|G - GLY|H - HIS|I - ILE|J - MSE|K - LYS|
 |L - LEU|M - MET|N - ASN|O - PYL|P - PRO|Q - GLN|R - ARG|S - SER|T - THR|U - SEC|
-|V - VAL|W - TRP|Y - TYR|
+|V - VAL|W - TRP|X - TRF|Y - TYR|
 
 > __Note__
 Capital letter unicodes will build L-amino acids, small letter unicodes will build D-amino acids.
