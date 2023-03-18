@@ -70,7 +70,6 @@ CAi = CIF.index('CA')
 CBi = CIF.index('CB')
 Ci  = CIF.index('C')
 COORD = RigidMotion(ALA, COORD, Ni, CAi, CBi, Ci)
-print(COORD)
 atoms = [x[0] for x in CIF]
 
 '''
