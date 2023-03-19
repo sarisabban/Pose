@@ -36,17 +36,17 @@ Capital letter unicodes will build L-amino acids, small letter unicodes will bui
 |Bonds           |Dictionary     |The bond graph as an adjacency list|
 
 ### Description of the polypeptide's data structure:
-| Dictionary Key | Value Type  | Description of Values |
-|----------------|-------------|-----------------------|
-|Energy          |Float        |The potential energy of the molecule|
-|Rg              |Float        |The radius of gyration of the molecule|
-|Mass            |Float        |The mass of the molecule in Daltons|
-|Size            |Integer      |The sequence length of the molecule|
-|FASTA           |String       |The FASTA sequence of the molecule|
-|Amino Acids     |Dictionary   |The key is the index in sequence, the value is the amino acid symbol, chain, backbone atom indices, sidechain atom indices, and the secondary structure the amino acid belongs to|
-|Atoms           |Dictionary   |The key is the index in the coordinates matrix, the value is the atom's PDB symbol, the element symbol, the charge, and the temperature factor|
-|Bonds           |Dictionary   |The bond graph of the molecule as an adjacency list|
-|Coordinates     |Numpy array  |The XYZ cartesian coordinates of each atom|
+| Dictionary Key | Value Type | Description of Values |
+|----------------|------------|-----------------------|
+|Energy          |Float       |The potential energy of the molecule|
+|Rg              |Float       |The radius of gyration of the molecule|
+|Mass            |Float       |The mass of the molecule in Daltons|
+|Size            |Integer     |The sequence length of the molecule|
+|FASTA           |String      |The FASTA sequence of the molecule|
+|Amino Acids     |Dictionary  |The key is the index in sequence, the value is the amino acid symbol, chain, backbone atom indices, sidechain atom indices, and the secondary structure the amino acid belongs to|
+|Atoms           |Dictionary  |The key is the index in the coordinates matrix, the value is the atom's PDB symbol, the element symbol, the charge, and the temperature factor|
+|Bonds           |Dictionary  |The bond graph of the molecule as an adjacency list|
+|Coordinates     |Numpy array |The XYZ cartesian coordinates of each atom|
 
 ## Table of methods:
 | Method                                          | Description with example |
