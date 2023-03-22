@@ -744,6 +744,7 @@ class Pose():
 			for ii, c in enumerate(chi):
 				if sequence_new[i] == 'P': continue
 				self.Rotate(i, c, 'CHI', ii+1)
+		self.data['Rg'] = self.Rg()
 	def RigidMotion(self, AA, A, B, BB='Backbone middle'):
 		''' Superimpose amino B into A '''
 		n, e = 0, 0
@@ -990,14 +991,9 @@ class Pose():
 			OMGs.append(self.Angle(i, 'OMEGA'))
 			NCaC.append(self.Atom3Angle(i, 'N', i, 'CA', i, 'C'))
 			chi = []
-			try: chi.append(self.Angle(i, 'CHI', 1))
-			except: pass
-			try: chi.append(self.Angle(i, 'CHI', 2))
-			except: pass
-			try: chi.append(self.Angle(i, 'CHI', 3))
-			except: pass
-			try: chi.append(self.Angle(i, 'CHI', 4))
-			except: pass
+			for number in range(1, 21):
+				try: chi.append(self.Angle(i, 'CHI', number))
+				except: pass
 			CHIs[i] = chi
 			bNCA.append(self.Distance(i, 'N', i, 'CA'))
 			bCAC.append(self.Distance(i, 'CA', i, 'C'))
