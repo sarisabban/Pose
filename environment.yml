@@ -1,5 +1,0 @@
-name: pose
-channels:
-dependencies:
-   - pip:
-     - git+https://github.com/sarisabban/Pose
