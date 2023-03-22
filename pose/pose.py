@@ -715,14 +715,9 @@ class Pose():
 			PSIs.append(self.Angle(i, 'PSI'))
 			OMGs.append(self.Angle(i, 'OMEGA'))
 			chi = []
-			try: chi.append(self.Angle(i, 'CHI', 1))
-			except: pass
-			try: chi.append(self.Angle(i, 'CHI', 2))
-			except: pass
-			try: chi.append(self.Angle(i, 'CHI', 3))
-			except: pass
-			try: chi.append(self.Angle(i, 'CHI', 4))
-			except: pass
+			for number in range(1, 21):
+				try: chi.append(self.Angle(i, 'CHI', number))
+				except: pass
 			CHIs[i] = chi
 		CHIs[index] = []
 		data ={
@@ -748,7 +743,7 @@ class Pose():
 			if chi == []: continue
 			for ii, c in enumerate(chi):
 				if sequence_new[i] == 'P': continue
-				self.Rotate(i, c+1, 'CHI', ii+1)
+				self.Rotate(i, c, 'CHI', ii+1)
 	def RigidMotion(self, AA, A, B, BB='Backbone middle'):
 		''' Superimpose amino B into A '''
 		n, e = 0, 0
@@ -854,9 +849,10 @@ class Pose():
 				else:
 					SC.append(count)
 				count += 1
+			tricode = amino
 			amino = \
 			[k for k, v in self.AminoAcids.items() if v['Tricode'] == amino][0]
-			Aminos[k] = [amino, chain, BB, SC, 'L']
+			Aminos[k] = [amino, chain, BB, SC, 'L', tricode]
 		Coordinates = np.array(Coordinates)
 		self.data['Coordinates'] = Coordinates
 		self.data['Amino Acids'] = Aminos
@@ -1035,7 +1031,7 @@ class Pose():
 			if chi == []: continue
 			for ii, c in enumerate(chi):
 				if sequence[i] == 'P': continue
-				self.Rotate(i, c+1, 'CHI', ii+1)
+				self.Rotate(i, c, 'CHI', ii+1)
 		self.data['Mass'] = self.Mass()
 		self.data['FASTA'] = self.FASTA()
 		self.data['Size'] = self.Size()
