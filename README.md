@@ -22,11 +22,12 @@ It is important to note that this library uses **zero-based array indexing**, no
 ## Installation:
 
 For pip:
+
 `pip install git+https://github.com/sarisabban/Pose`
 
 For anaconda:
 ```
-conda create -n test python=3.10
+conda create -n test python=3
 conda activate test
 pip3 install git+https://github.com/sarisabban/Pose
 conda deactivate
