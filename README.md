@@ -27,10 +27,9 @@ For pip:
 
 For anaconda:
 ```
-conda create -n test python=3
-conda activate test
+conda create -n ENVIRONMENT python=3
+conda activate ENVIRONMENT
 pip3 install git+https://github.com/sarisabban/Pose
-conda deactivate
 ```
 
 ## Example code:
