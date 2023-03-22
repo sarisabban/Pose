@@ -1,0 +1,28 @@
+package:
+  name: "pose"
+  version: "1.0"
+
+source:
+  git_rev: v1.0
+  git_url: https://github.com/sarisabban/Pose
+
+requirements:
+  host:
+    - python
+  build:
+    - python
+    - numpy
+  run:
+    - python
+    - numpy
+
+about:
+  home: https://github.com/sarisabban/Pose
+  license: GPL-2.0
+  license_familY: GPL-2.0
+  license_file: LICENSE
+  summary: "A bare metal Python library for building and manipulating protein molecular structures"
+
+extra:
+  recipe-maintainers:
+    - wino6687
