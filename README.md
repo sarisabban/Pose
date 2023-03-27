@@ -117,7 +117,7 @@ If anyone is interested in collaborating and contributing to this library, these
 5. **Moderate**: Find H-bonds in pose
 6. **Moderate**: Calculate DSSP for each amino acid
 7. **Hard**: AMBER energy function
-8. **Easy** - if energy function is available: Simulated Annealing (Minimisatin/Relax protocol)
+8. **Easy** - If energy function is available: Simulated Annealing (Minimisatin/Relax protocol)
 9. **Easy**: Script to automate amino acid parametrisation
 10. **Hard**: Pocket and void calculation
 11. **Hard**: SASA calculation for each amino acid
