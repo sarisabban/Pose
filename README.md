@@ -121,3 +121,4 @@ If anyone is interested in collaborating and contributing to this library, these
 9. **Easy**: Script to automate amino acid parametrisation
 10. **Hard**: Pocket and void calculation
 11. **Hard**: SASA calculation for each amino acid
+12. address all previous functions using libraries in a different script
