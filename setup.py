@@ -12,7 +12,7 @@ setuptools.setup(
 	long_description=long_description,
 	long_description_content_type='text/markdown',
 	url='https://github.com/sarisabban/Pose',
-	project_urls = {'Bug Tracker':'https://github.com/sarisabban/Pose/issues'},
+	project_urls={'Bug Tracker':'https://github.com/sarisabban/Pose/issues'},
 	license='GPL-2.0',
 	packages=['pose'],
 	include_package_data=True,
