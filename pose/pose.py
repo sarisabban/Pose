@@ -945,7 +945,7 @@ class Pose():
 		OMGs = []
 		NCaC = []
 		CaCN = []
-		CNCa = []
+		CNCa = [0]
 		CHIs = {}
 		bNCA = []
 		bCAC = []
@@ -955,10 +955,10 @@ class Pose():
 			PSIs.append(self.Angle(i, 'PSI'))
 			OMGs.append(self.Angle(i, 'OMEGA'))
 			NCaC.append(self.Atom3Angle(i, 'N', i, 'CA', i, 'C'))
-			try: CaCN.append(self.Atom3Angle(i, 'CA', i, 'C', i+1, 'N'))
-			except: pass
-			try: CNCa.append(self.Atom3Angle(i-1, 'C', i, 'N', i, 'CA'))
-			except: pass
+			if i != 0:
+				CNCa.append(self.Atom3Angle(i-1, 'C', i, 'N', i, 'CA'))
+			if i != len(sequence) -1:
+				CaCN.append(self.Atom3Angle(i, 'CA', i, 'C', i+1, 'N'))
 			chi = []
 			for number in range(1, 21):
 				try: chi.append(self.Angle(i, 'CHI', number))
@@ -980,6 +980,7 @@ class Pose():
 			'Coordinates':np.array([[0, 0, 0]])}
 		self.data = copy.deepcopy(data)
 		self.Build(sequence)
+		print(CNCa)
 		for i, (p, s, o, n, a, c, b1, b2, b3) in enumerate(zip(
 		PHIs, PSIs, OMGs, NCaC, CaCN, CNCa, bNCA, bCAC, bCN1)):
 			self.Rotate(i, p, 'PHI')
@@ -991,7 +992,7 @@ class Pose():
 			if i != 0:
 				C = pose.Atom3Angle(i-1, 'C', i, 'N', i, 'CA')
 				self.Rotation3Angle(i-1, 'C', i, 'N', i, 'CA', C-c)
-			if i != len(sequence):
+			if i != len(sequence) -1:
 				A = pose.Atom3Angle(i, 'CA', i, 'C', i+1, 'N')
 				self.Rotation3Angle(i, 'CA', i, 'C', i+1, 'N', A-a)
 				self.Rotate(i, o, 'OMEGA')
