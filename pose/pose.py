@@ -931,52 +931,11 @@ class Pose():
 			and not (1.0 <= length <= 1.5):
 				L = 1.34
 				self.Adjust(residue, atom2, residue, atom1, L)
-	def Mutate(self, index, AA, from_import=False):
+	def Mutate(self, index, AA):
 		''' Mutate an amino acid to a different amino acid '''
 		sequence_old = self.FASTA()
-		if from_import:
-			sequence = sequence_old[:index] + AA + sequence_old[index+1:]
-			self.ReBuild(sequence)
-		else:
-			PHIs = []
-			PSIs = []
-			OMGs = []
-			CHIs = {}
-			for i in range(len(sequence_old)):
-				PHIs.append(self.Angle(i, 'PHI'))
-				PSIs.append(self.Angle(i, 'PSI'))
-				OMGs.append(self.Angle(i, 'OMEGA'))
-				chi = []
-				for number in range(1, 21):
-					try: chi.append(self.Angle(i, 'CHI', number))
-					except: pass
-				CHIs[i] = chi
-			CHIs[index] = []
-			data ={
-				'Energy':0,
-				'Rg':0,
-				'Mass':0,
-				'Size':0,
-				'FASTA':None,
-				'Amino Acids':{},
-				'Atoms':{},
-				'Bonds':{},
-				'Coordinates':np.array([[0, 0, 0]])}
-			self.data = copy.deepcopy(data)
-			sequence_new = sequence_old[:index] + AA + sequence_old[index + 1:]
-			self.Build(sequence_new)
-			for i, (p, s, o) in enumerate(zip(PHIs, PSIs, OMGs)):
-				self.Rotate(i, p, 'PHI')
-				self.Rotate(i, s, 'PSI')
-				if i != len(sequence_new) -1:
-					self.Rotate(i, o, 'OMEGA')
-			for i in range(len(sequence_new)):
-				chi = CHIs[i]
-				if chi == []: continue
-				for ii, c in enumerate(chi):
-					if sequence_new[i] == 'P': continue
-					self.Rotate(i, c, 'CHI', ii+1)
-			self.data['Rg'] = self.Rg()
+		sequence = sequence_old[:index] + AA + sequence_old[index+1:]
+		self.ReBuild(sequence)
 	def ReBuild(self, sequence=None):
 		''' Fold a polypeptide using angles and bonds '''
 		if sequence == None:
