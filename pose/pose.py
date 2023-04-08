@@ -738,6 +738,11 @@ class Pose():
 		Aoxy = A[3][:3]
 		B[-1] = Aoxy
 		return(B)
+	def Mutate(self, index, AA):
+		''' Mutate an amino acid to a different amino acid '''
+		sequence_old = self.FASTA()
+		sequence = sequence_old[:index] + AA + sequence_old[index+1:]
+		self.ReBuild(sequence)
 	def Import(self, filename, chain='A'):
 		''' Import a structure from a .pdb file '''
 		ATOM, N, A, L, R, C, S, I, X, Y, Z, O, T, Q, E = \
@@ -828,114 +833,6 @@ class Pose():
 		self.data['FASTA'] = self.FASTA()
 		self.data['Size'] = self.Size()
 		self.data['Rg'] = self.Rg()
-	def AddH(self):
-		''' Add hydrogen atoms to structure '''
-		sequence = self.data['FASTA']
-		data ={
-			'Energy':0,
-			'Rg':0,
-			'Mass':0,
-			'Size':0,
-			'FASTA':None,
-			'Amino Acids':{},
-			'Atoms':{},
-			'Bonds':{},
-			'Coordinates':np.array([[0, 0, 0]])}
-		Idata = self.data
-		self.data = copy.deepcopy(data)
-		self.Build(sequence)
-		for i in range(len(sequence)):
-			resA = Idata['Amino Acids'][i]
-			aaA = resA[0]
-			Ai = resA[2] + resA[3]
-			A = Idata['Coordinates'][min(Ai):max(Ai)+1]
-			resB = self.data['Amino Acids'][i]
-			aaB = resB[0]
-			Bi = resB[2] + resB[3]
-			B = self.data['Coordinates'][min(Bi):max(Bi)+1]
-			if i == 0:
-				BB = 'Backbone start'
-			elif i == len(sequence):
-				BB = 'Backbone end'
-			else:
-				BB = 'Backbone middle'
-			B = self.RigidMotion(aaB, A, B, BB)
-			self.data['Coordinates'][min(Bi):max(Bi)+1] = B
-		Bonds = []
-		for k, v in zip(self.data['Amino Acids'].keys(), \
-		self.data['Amino Acids'].values()):
-			IDX = v[2] + v[3]
-			for A in IDX:
-				for B in IDX:
-					if A != B:
-						try: A1, E1, A2, E2 = self.GetBondAtoms(A, B)
-						except: continue
-						bond = self.Distance(k, A1, k, A2)
-						if bond != 0.0:
-							bonds = [k, A, A1, E1, B, A2, E2, bond]
-							Bonds.append(bonds)
-		for _ in range(2):
-			for i, itemA in enumerate(Bonds):
-				for itemB in Bonds:
-					if  itemA[0] == itemB[0] \
-					and itemA[2] == itemB[5] \
-					and itemA[5] == itemB[2]:
-						Bonds.pop(i)
-		for b in Bonds:
-			residue  = b[0]
-			atom1i   = b[1]
-			atom1    = b[2]
-			element1 = b[3]
-			atom2i   = b[4]
-			atom2    = b[5]
-			element2 = b[6]
-			length   = b[7]
-			if ((element1 == 'H' and element2 == 'C') \
-			or (element1 == 'C' and element2 == 'H')) \
-			and not (0.5 <= length <= 1.3):
-				L = 1.09
-				self.Adjust(residue, atom1, residue, atom2, L)
-				self.Adjust(residue, atom2, residue, atom1, L)
-			if (element1 == 'C' and element2 == 'C') \
-			and not (1.0 <= length <= 2.0):
-				L = 1.54
-				self.Adjust(residue, atom2, residue, atom1, L)
-			if ((element1 == 'O' and element2 == 'C') \
-			or (element1 == 'C' and element2 == 'O')) \
-			and not (1.0 <= length <= 2.0):
-				L = 1.43
-				self.Adjust(residue, atom2, residue, atom1, L)
-			if ((element1 == 'O' and element2 == 'H') \
-			or (element1 == 'H' and element2 == 'O')) \
-			and not (0.5 <= length <= 1.0):
-				L = 0.96
-				self.Adjust(residue, atom2, residue, atom1, L)
-			if ((element1 == 'N' and element2 == 'C') \
-			or (element1 == 'C' and element2 == 'N')) \
-			and not (1.0 <= length <= 2):
-				L = 1.47
-				self.Adjust(residue, atom2, residue, atom1, L)
-			if ((element1 == 'N' and element2 == 'H') \
-			or (element1 == 'H' and element2 == 'N')) \
-			and not (0.5 <= length <= 1.3):
-				L = 1.01
-				self.Adjust(residue, atom2, residue, atom1, L)
-				self.Adjust(residue, atom1, residue, atom2, L)
-			if ((element1 == 'S' and element2 == 'C') \
-			or (element1 == 'C' and element2 == 'S')) \
-			and not (1.5 <= length <= 2.5):
-				L = 1.82
-				self.Adjust(residue, atom2, residue, atom1, L)
-			if ((element1 == 'S' and element2 == 'H') \
-			or (element1 == 'H' and element2 == 'S')) \
-			and not (1.0 <= length <= 1.5):
-				L = 1.34
-				self.Adjust(residue, atom2, residue, atom1, L)
-	def Mutate(self, index, AA):
-		''' Mutate an amino acid to a different amino acid '''
-		sequence_old = self.FASTA()
-		sequence = sequence_old[:index] + AA + sequence_old[index+1:]
-		self.ReBuild(sequence)
 	def ReBuild(self, sequence=None):
 		''' Fold a polypeptide using angles and bonds '''
 		if sequence == None:
@@ -980,7 +877,6 @@ class Pose():
 			'Coordinates':np.array([[0, 0, 0]])}
 		self.data = copy.deepcopy(data)
 		self.Build(sequence)
-		print(CNCa)
 		for i, (p, s, o, n, a, c, b1, b2, b3) in enumerate(zip(
 		PHIs, PSIs, OMGs, NCaC, CaCN, CNCa, bNCA, bCAC, bCN1)):
 			self.Rotate(i, p, 'PHI')
