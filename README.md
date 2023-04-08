@@ -92,16 +92,13 @@ Capital letter unicodes will build L-amino acids, small letter unicodes will bui
 
 ## For collaboration:
 If anyone is interested in collaborating and contributing to this library, these are functions that needs to be added:
-1. **Hard**: Add hydrogens to polypeptide algorithm (doi.org/10.1006/jmbi.1998.2401) (python openbabel - temporary)
-	Improve ReBuild() -> which will improve Mutate()
-2. **Easy**: Sequences alignment (BLAST & MSA)
-3. **Easy**: Structure alignment (RMSD between two poses)
-4. **Moderate**: Calculating Gasteiger Partial Charges for each atom (python openbabel - temporary)
-5. **Moderate**: Find H-bonds in pose
-6. **Moderate**: Calculate DSSP for each amino acid
-7. **Hard**: AMBER energy function
-8. **Easy** - If energy function is available: Simulated Annealing (Minimisatin/Relax protocol)
-9. **Easy**: Script to automate amino acid parametrisation
-10. **Hard**: Pocket and void calculation
-11. **Hard**: SASA calculation for each amino acid
-12. address all previous functions using libraries in a different script
+1. **Easy**: Sequences alignment (BLAST & MSA)
+2. **Easy**: Structure alignment (RMSD between two poses)
+3. **Moderate**: Calculating Gasteiger Partial Charges for each atom (python openbabel - temporary)
+4. **Moderate**: Find H-bonds in pose
+5. **Moderate**: Calculate DSSP for each amino acid
+6. **Hard**: AMBER energy function
+7. **Easy** - If energy function is available: Simulated Annealing (Minimisatin/Relax protocol)
+8. **Easy**: Script to automate amino acid parametrisation
+9. **Hard**: Pocket and void calculation
+10. **Hard**: SASA calculation for each amino acid
