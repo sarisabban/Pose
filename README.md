@@ -100,17 +100,19 @@ Capital letter unicodes will build L-amino acids, small letter unicodes will bui
 |pose.Angle(2, 'chi', 1)                          |Get the PHI, PSI, OMEGA, or CHI 1-4 angles of an amino acid. Example: second amino acid's CHI 1 angle. For the PHI, PSI, and OMEGA angles no need to include the second argument (the 1 in this example)|
 |pose.Rotate(2, 20, 'chi', 1)                     |Change an angle to reach a degrees. Example: third amino acid, change angle to become 20 degrees, the angle type is CHI 1|
 |pose.Adjust(0, 'N', 0, 'CA', 10)                 |Adjust the distance between any two atoms in any amno acid. Example: distance between first amino acid's Nitrogen and first amino acid's Carbon alpha to become 10 Å. The order of the atoms makes a difference, (0, 'N', 0, 'CA', 10) ≠ (0, 'CA', 0, 'N', 10), useful to seperate the chain behind the N|
-|pose.Mutate(1, 'V')                              |Mutate an amno acid. Example: Mutate second amino acid to become Valine|
 |pose.Rotation3Angle(1, 'N', 1, 'CA', 1, 'C', -2) |Add/Subtract any three atom backbone angle from current degrees. Example: second amino acid, subtract 2 degrees from the N-Ca-C angle|
 |pose.Import('1tqg.pdb', chain='A')               |Import a .pdb file (if no hydrogens are in the PDB they will not be added). Currently I would advise to add hydrogens to a .pdb file (using pymol or openbabel, export it as a new hydrated .pdb file) then import it to the pose|
-|pose.ReBuild()                                   |Import a polypeptide, Build() it as a primary structure then fold it using only its amino acid angles|
+|pose.Mutate(1, 'V')*                              |Mutate an amno acid. Example: Mutate second amino acid to become Valine|
+|pose.ReBuild()*                                   |Build the sequence of the polypeptide it as a primary structure then re-fold it using its amino acid angles and bond lengths|
 |pose.AddH()                                      |Add hydrogens to a pose|
+
+> __Note__
+* Needs improvements
 
 ## For collaboration:
 If anyone is interested in collaborating and contributing to this library, these are functions that needs to be added:
 1. **Hard**: Add hydrogens to polypeptide algorithm (doi.org/10.1006/jmbi.1998.2401) (python openbabel - temporary)
-	Improve AddH()
-	Improve ReBuild()
+	Improve ReBuild() -> which will improve Mutate()
 2. **Easy**: Sequences alignment (BLAST & MSA)
 3. **Easy**: Structure alignment (RMSD between two poses)
 4. **Moderate**: Calculating Gasteiger Partial Charges for each atom (python openbabel - temporary)
