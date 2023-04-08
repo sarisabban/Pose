@@ -973,14 +973,15 @@ class Pose():
 			and not (1.0 <= length <= 1.5):
 				L = 1.34
 				self.Adjust(residue, atom2, residue, atom1, L)
-	def ReBuild(self, filename):
+	def ReBuild(self):
 		''' Fold a polypeptide using angles and bonds '''
-		self.Import(filename)
 		sequence = self.data['FASTA']
 		PHIs = []
 		PSIs = []
 		OMGs = []
 		NCaC = []
+		CaCN = []
+		CNCa = []
 		CHIs = {}
 		bNCA = []
 		bCAC = []
@@ -990,6 +991,10 @@ class Pose():
 			PSIs.append(self.Angle(i, 'PSI'))
 			OMGs.append(self.Angle(i, 'OMEGA'))
 			NCaC.append(self.Atom3Angle(i, 'N', i, 'CA', i, 'C'))
+			try: CaCN.append(self.Atom3Angle(i, 'CA', i, 'C', i+1, 'N'))
+			except: pass
+			try: CNCa.append(self.Atom3Angle(i-1, 'C', i, 'N', i, 'CA'))
+			except: pass
 			chi = []
 			for number in range(1, 21):
 				try: chi.append(self.Angle(i, 'CHI', number))
@@ -997,7 +1002,7 @@ class Pose():
 			CHIs[i] = chi
 			bNCA.append(self.Distance(i, 'N', i, 'CA'))
 			bCAC.append(self.Distance(i, 'CA', i, 'C'))
-			try:bCN1.append(self.Distance(i, 'C', i+1, 'N'))
+			try: bCN1.append(self.Distance(i, 'C', i+1, 'N'))
 			except: pass
 		data ={
 			'Energy':0,
@@ -1011,15 +1016,20 @@ class Pose():
 			'Coordinates':np.array([[0, 0, 0]])}
 		self.data = copy.deepcopy(data)
 		self.Build(sequence)
-		for i, (p, s, o, n, b1, b2, b3) in enumerate(zip(
-		PHIs, PSIs, OMGs, NCaC, bNCA, bCAC, bCN1)):
+		for i, (p, s, o, n, a, c, b1, b2, b3) in enumerate(zip(
+		PHIs, PSIs, OMGs, NCaC, CaCN, CNCa, bNCA, bCAC, bCN1)):
 			self.Rotate(i, p, 'PHI')
 			self.Rotate(i, s, 'PSI')
-			N = pose.Atom3Angle(i, 'N', i, 'CA', i, 'C')
-			self.Rotation3Angle(i, 'N', i, 'CA', i, 'C', N-n)
 			self.Adjust(i, 'N', i, 'CA', b1)
 			self.Adjust(i, 'CA', i, 'C', b2)
-			if i != len(sequence) -1:
+			N = pose.Atom3Angle(i, 'N', i, 'CA', i, 'C')
+			self.Rotation3Angle(i, 'N', i, 'CA', i, 'C', N-n)
+			if i != 0:
+				C = pose.Atom3Angle(i-1, 'C', i, 'N', i, 'CA')
+				self.Rotation3Angle(i-1, 'C', i, 'N', i, 'CA', C-c)
+			if i != len(sequence):
+				A = pose.Atom3Angle(i, 'CA', i, 'C', i+1, 'N')
+				self.Rotation3Angle(i, 'CA', i, 'C', i+1, 'N', A-a)
 				self.Rotate(i, o, 'OMEGA')
 				self.Adjust(i, 'C', i+1, 'N', b3)
 		for i in range(len(sequence)):
