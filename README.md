@@ -92,12 +92,10 @@ Capital letter unicodes will build L-amino acids, small letter unicodes will bui
 
 ## For collaboration:
 If anyone is interested in collaborating and contributing to this library, these are functions that needs to be added:
-1. **Easy**: Sequences alignment (BLAST & MSA)
-2. **Easy**: Structure alignment (RMSD between two poses)
-3. **Moderate**: Calculating Gasteiger Partial Charges for each atom (python openbabel - temporary)
-4. **Moderate**: Find H-bonds in pose
-5. **Moderate**: Calculate DSSP for each amino acid
-6. **Hard**: AMBER energy function
-7. **Easy** - If energy function is available: Simulated Annealing (Minimisatin/Relax protocol)
-8. **Hard**: Pocket and void calculation
-9. **Hard**: SASA calculation for each amino acid
+1. **Easy**: Structure alignment (RMSD between two poses)
+2. **Moderate**: Calculating Gasteiger partial charges for each atom
+3. **Moderate**: Find all H-bonds
+4. **Moderate**: Calculate DSSP for each amino acid
+5. **Hard**: SASA calculation for each amino acid
+6. **Hard**: Pocket and void calculation
+7. **Hard**: AMBER energy function + Minimisation
