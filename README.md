@@ -99,6 +99,5 @@ If anyone is interested in collaborating and contributing to this library, these
 5. **Moderate**: Calculate DSSP for each amino acid
 6. **Hard**: AMBER energy function
 7. **Easy** - If energy function is available: Simulated Annealing (Minimisatin/Relax protocol)
-8. **Easy**: Script to automate amino acid parametrisation
-9. **Hard**: Pocket and void calculation
-10. **Hard**: SASA calculation for each amino acid
+8. **Hard**: Pocket and void calculation
+9. **Hard**: SASA calculation for each amino acid
