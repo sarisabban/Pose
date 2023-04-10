@@ -91,7 +91,7 @@ Capital letter unicodes will build L-amino acids, small letter unicodes will bui
 |pose.ReBuild()                                   |Build the sequence of the polypeptide it as a primary structure then re-fold it using its amino acid angles and bond lengths|
 
 ## For collaboration:
-If anyone is interested in collaborating and contributing to this library, these are functions that needs to be added:
+If anyone is interested in collaborating and contributing, these are functions that needs to be added:
 1. **Easy**: Structure alignment (RMSD between two poses)
 2. **Easy**: Sequence alignment (BLAST & MSA)
 3. **Moderate**: Calculating Gasteiger partial charges for each atom
