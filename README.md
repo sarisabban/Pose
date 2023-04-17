@@ -37,8 +37,7 @@ pip3 install git+https://github.com/sarisabban/Pose
 from pose import *
 
 pose = Pose()
-pose.Import('1yn3.pdb')
-pose.ReBuild()
+pose.Build('SaRi')
 pose.Export('output.pdb')
 ```
 
