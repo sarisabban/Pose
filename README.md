@@ -33,7 +33,7 @@ pip3 install git+https://github.com/sarisabban/Pose
 ```
 
 ## Example code:
-```
+```py
 from pose import *
 
 pose = Pose()
