@@ -100,4 +100,4 @@ If anyone is interested in collaborating and contributing, these are functions t
 5. **Moderate**: Calculate DSSP for each amino acid
 6. **Hard**: SASA calculation for each amino acid
 7. **Hard**: Pocket and void calculation
-8. **Hard**: AMBER energy function + Minimisation
+8. **Hard**: AMBER energy function + Minimisation.
