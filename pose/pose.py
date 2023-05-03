@@ -519,7 +519,7 @@ class Pose():
 				self.data['Coordinates'] = new
 	def Angle(self, AA, angle_type, chi_type=None):
 		''' Measure angle at bond '''
-		AminoAcid = self.data['Amino Acids'][AA][0]
+		AminoAcid = self.data['Amino Acids'][AA][0].upper()
 		if angle_type.upper() == 'PHI':
 			if AA == 0: return(0.0)
 			else: r1 = self.GetAtom(AA-1, 'C')
@@ -577,7 +577,7 @@ class Pose():
 		return(R)
 	def Rotate(self, AA, theta, angle_type, chi_type=None):
 		''' Rotate around a bond '''
-		AminoAcid = self.data['Amino Acids'][AA][0]
+		AminoAcid = self.data['Amino Acids'][AA][0].upper()
 		if angle_type.upper() == 'PHI':
 			ori = self.GetAtom(AA, 'CA')
 			n = 1
