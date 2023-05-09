@@ -86,7 +86,7 @@ Capital letter unicodes will build L-amino acids, small letter unicodes will bui
 |pose.GetBondAtoms(0, 1)                          |Get the atom pair that participate in a bond from their index. Example: atom index 0 and atom index 1 return ['N', 'N', 'HA', 'H'], this returns both atom's PDB name and the element's name|
 |pose.GetAtom(3, 'N')                             |Get XYZ cartesian coordinates of an atom. Example: fourth amino acid's Nitrogen atom|
 |pose.AtomList(PDB=True)                          |Get a list of all the atoms in the polypeptide, use PDB=True to get their PDB formatted names|
-|pose.Identify(3, 'atom', q=True)                 |Identify what 'atom' type belongs to a particular index in the coordinates matrix, use q=True to identify the atom's charge, use 'redisue' or 'amino acid' to instead identify the amino acid by index in the polypeptide sequence|
+|pose.Identify(3, 'atom', q=True)                 |Identify what 'atom' type belongs to a particular index in the coordinates matrix, use q=True to identify the atom's charge, use 'residue' or 'amino acid' to instead identify the amino acid by index in the polypeptide sequence|
 |pose.SecondaryStructures()                       |Get a list of each amino acid's secondary structure H:Helix, S:Sheet, L:Loop|
 |pose.Info()                                      |Print all the information about the polypeptide in an organised printout|
 |print(pose.data)                                 |Print the dictionary data structure where all the polypeptide's information reside|
