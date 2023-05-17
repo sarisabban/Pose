@@ -93,6 +93,7 @@ Capital letter unicodes will build L-amino acids, small letter unicodes will bui
 
 ## For collaboration:
 If anyone is interested in collaborating and contributing, these are functions that needs to be added:
+
 0. **Easy**: update Rebuild() to rebuild a structure but with all D-AAs. (how to modify the Phi/Psi angles)?
 1. **Easy**: Structure alignment (RMSD between two poses)
 2. **Easy**: Sequence alignment (BLAST & MSA)
