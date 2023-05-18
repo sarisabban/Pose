@@ -94,12 +94,12 @@ Capital letter unicodes will build L-amino acids, small letter unicodes will bui
 ## For collaboration:
 If anyone is interested in collaborating and contributing, these are functions that needs to be added:
 
-0. **Easy**: update Rebuild() to rebuild a structure but with all D-AAs. (how to modify the Phi/Psi angles)?
-1. **Easy**: Structure alignment (RMSD between two poses)
-2. **Easy**: Sequence alignment (BLAST & MSA)
-3. **Moderate**: Calculating Gasteiger partial charges for each atom
-4. **Moderate**: Find all H-bonds
-5. **Moderate**: Calculate DSSP for each amino acid
-6. **Hard**: SASA calculation for each amino acid
-7. **Hard**: Pocket and void calculation
-8. **Hard**: AMBER energy function + Minimisation
+1. **Easy**: update Rebuild() to rebuild a structure but with all D-AAs. (how to modify the Phi/Psi angles)?
+2. **Easy**: Structure alignment (RMSD between two poses)
+3. **Easy**: Sequence alignment (BLAST & MSA)
+4. **Moderate**: Calculating Gasteiger partial charges for each atom
+5. **Moderate**: Find all H-bonds
+6. **Moderate**: Calculate DSSP for each amino acid
+7. **Hard**: SASA calculation for each amino acid
+8. **Hard**: Pocket and void calculation
+9. **Hard**: AMBER energy function + Minimisation
