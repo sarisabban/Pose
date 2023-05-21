@@ -497,10 +497,10 @@ class Pose():
 			mut = length/mag
 			aa1 = self.data['Amino Acids'][AA1][0]
 			aa1 = atom1 in [x[0] for x \
-			in self.AminoAcids[aa1]['Sidechain Atoms']]
+			in self.AminoAcids[aa1.upper()]['Sidechain Atoms']]
 			aa2 = self.data['Amino Acids'][AA2][0]
 			aa2 = atom2 in [x[0] for x \
-			in self.AminoAcids[aa2]['Sidechain Atoms']]
+			in self.AminoAcids[aa2.upper()]['Sidechain Atoms']]
 			Aelements = (self.data['Coordinates'] == A)
 			Awhole_row = Aelements.all(axis=1)
 			Aindex = np.argwhere(Awhole_row)[0][0]
@@ -829,7 +829,7 @@ class Pose():
 		self.data['FASTA'] = self.FASTA()
 		self.data['Size'] = self.Size()
 		self.data['Rg'] = self.Rg()
-	def ReBuild(self, sequence=None):
+	def ReBuild(self, sequence=None, D_AA=False):
 		''' Fold a polypeptide using angles and bonds '''
 		if sequence == None:
 			sequence = self.data['FASTA']
@@ -872,7 +872,13 @@ class Pose():
 			'Bonds':{},
 			'Coordinates':np.array([[0, 0, 0]])}
 		self.data = copy.deepcopy(data)
-		self.Build(sequence)
+		if D_AA:
+			self.Build(sequence.lower())
+			########## for D_AA the P and S angles need to be re-calculated
+			PHIs = [x+0 for x in PHIs]
+			PSIs = [x+0 for x in PSIs]
+		else:
+			self.Build(sequence)
 		for i, (p, s, o, n, a, c, b1, b2, b3) in enumerate(zip(
 		PHIs, PSIs, OMGs, NCaC, CaCN, CNCa, bNCA, bCAC, bCN1)):
 			self.Rotate(i, p, 'PHI')
