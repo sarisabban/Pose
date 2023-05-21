@@ -872,13 +872,7 @@ class Pose():
 			'Bonds':{},
 			'Coordinates':np.array([[0, 0, 0]])}
 		self.data = copy.deepcopy(data)
-		if D_AA:
-			self.Build(sequence.lower())
-			########## for D_AA the P and S angles need to be re-calculated
-			PHIs = [(x + 0) % 360 for x in PHIs]
-			PSIs = [(x + 0) % 360 for x in PSIs]
-		else:
-			self.Build(sequence)
+		self.Build(sequence)
 		for i, (p, s, o, n, a, c, b1, b2, b3) in enumerate(zip(
 		PHIs, PSIs, OMGs, NCaC, CaCN, CNCa, bNCA, bCAC, bCN1)):
 			self.Rotate(i, p, 'PHI')
@@ -907,3 +901,5 @@ class Pose():
 		self.data['FASTA'] = self.FASTA()
 		self.data['Size'] = self.Size()
 		self.data['Rg'] = self.Rg()
+		if D_AA:
+			self.data['Coordinates'] = self.data['Coordinates'] * [1, 1, -1]
