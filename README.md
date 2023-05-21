@@ -74,7 +74,7 @@ Capital letter unicodes will build L-amino acids, small letter unicodes will bui
 |pose = Pose()                                    |Construct the Pose class|
 |pose.Build('SARI')                               |Build a polypeptide using a sequence, the polypeptide will be in primary structure. Example: the sequence 'SARI'. Capital letters for L-amino acids, small letters for D-amino acids|
 |pose.Import('1tqg.pdb', chain='A')               |Import a structure from a .pdb file specifically chain 'A' of the complex (if no hydrogens are in the PDB they will not be added). To add Hydrogens use pose.ReBuild() after pose.Import() to re-build the structure with Hydrogens (there will be slight variation in the sidechains). Cannot use structures with broken non-continuous chains|
-|pose.ReBuild()                                   |Build the sequence of the polypeptide it as a primary structure then re-fold it using its amino acid angles and bond lengths|
+|pose.ReBuild()                                   |Build the sequence of the polypeptide it as a primary structure then re-fold it using its amino acid angles and bond lengths. D_AA=True will rebuild the whole molecule in D-amino acids|
 |pose.Export('out.pdb')                           |Export the polypeptide to a .pdb file. Example: the output file's name is out.pdb|
 |pose.Mutate(1, 'V')                              |Mutate an amno acid. Example: Mutate second amino acid to become Valine|
 |pose.Angle(2, 'chi', 1)                          |Get the PHI, PSI, OMEGA, or CHI 1-4 angles of an amino acid. Example: second amino acid's CHI 1 angle. For the PHI, PSI, and OMEGA angles no need to include the second argument (the 1 in this example)|
