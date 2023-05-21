@@ -875,8 +875,8 @@ class Pose():
 		if D_AA:
 			self.Build(sequence.lower())
 			########## for D_AA the P and S angles need to be re-calculated
-			PHIs = [x+0 for x in PHIs]
-			PSIs = [x+0 for x in PSIs]
+			PHIs = [(x + 0) % 360 for x in PHIs]
+			PSIs = [(x + 0) % 360 for x in PSIs]
 		else:
 			self.Build(sequence)
 		for i, (p, s, o, n, a, c, b1, b2, b3) in enumerate(zip(
