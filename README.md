@@ -25,7 +25,7 @@ It is important to note that this library uses **zero-based array indexing**, NO
 
 ## Installation:
 
-For pip:
+For virtualenv:
 
 ```bash
 pip install git+https://github.com/sarisabban/Pose
