@@ -5,6 +5,7 @@ A bare metal Python library for building and manipulating protein molecular stru
 ![Alt Text](pose/Video2.gif)
 
 ## Video tutorial:
+This is a [Video]() tutorial on how to use this library.
 
 
 ## Description:
