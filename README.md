@@ -96,7 +96,7 @@ Capital letter unicodes will build L-amino acids, small letter unicodes will bui
 |print(pose.data)                                 |Print the dictionary data structure where all the polypeptide's information reside|
 
 ## For collaboration:
-If anyone is interested in collaborating and contributing, these are functions that needs to be added:
+If anyone is interested in collaborating, these are functions that needs to be added:
 
 1. **Easy**: Structure alignment (RMSD between two poses).
 2. **Easy**: Sequence alignment (BLAST & MSA).
