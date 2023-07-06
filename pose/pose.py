@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import os
 import math
 import json
 import copy
@@ -10,8 +11,9 @@ from collections import defaultdict
 class Pose():
 	''' Data structure that represents a protein '''
 	def __init__(self):
-		path = __file__.split('/')[:-1]
-		path = '/'.join(path)
+#		path = __file__.split('/')[:-1]
+#		path = '/'.join(path)
+		path, modulename = os.path.split(__file__)
 		with open(f'{path}/AminoAcids.json') as f: AminoAcids = json.load(f)
 		Masses = {
 			'H':1.008,    'He':4.003,   'Li':6.941,   'Be':9.012,
