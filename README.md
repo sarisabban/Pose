@@ -17,8 +17,8 @@ Using this information, the pose can build (**canonical** and **non-canonical** 
 It is important to note that this library uses **zero-based array indexing**, NOT one-based array indexing as is in the PDB. It is thus important to note that the first amino acid and the first atom is indexed as 0 and not 1.
 
 ## List of available amino acids:
-|||||
-|-|-|-|-|-|
+|       |       |       |       |       |
+|-------|-------|-------|-------|-------|
 |A - ALA|B - LYX|C - CYS|D - ASP|E - GLU|
 |F - PHE|G - GLY|H - HIS|I - ILE|J - MSE|
 |K - LYS|L - LEU|M - MET|N - ASN|O - PYL|
