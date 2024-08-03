@@ -881,13 +881,13 @@ class Pose():
 			self.Rotate(i, s, 'PSI')
 			self.Adjust(i, 'N', i, 'CA', b1)
 			self.Adjust(i, 'CA', i, 'C', b2)
-			N = pose.Atom3Angle(i, 'N', i, 'CA', i, 'C')
+			N = self.Atom3Angle(i, 'N', i, 'CA', i, 'C')
 			self.Rotation3Angle(i, 'N', i, 'CA', i, 'C', N-n)
 			if i != 0:
-				C = pose.Atom3Angle(i-1, 'C', i, 'N', i, 'CA')
+				C = self.Atom3Angle(i-1, 'C', i, 'N', i, 'CA')
 				self.Rotation3Angle(i-1, 'C', i, 'N', i, 'CA', C-c)
 			if i != len(sequence) -1:
-				A = pose.Atom3Angle(i, 'CA', i, 'C', i+1, 'N')
+				A = self.Atom3Angle(i, 'CA', i, 'C', i+1, 'N')
 				self.Rotation3Angle(i, 'CA', i, 'C', i+1, 'N', A-a)
 				self.Rotate(i, o, 'OMEGA')
 				self.Adjust(i, 'C', i+1, 'N', b3)
