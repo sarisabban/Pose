@@ -103,9 +103,10 @@ If anyone is interested in collaborating, these are functions that needs to be a
 
 1. **Easy**: Structure alignment (RMSD between two poses)
 2. **Easy**: Sequence alignment (BLAST & MSA)
-3. **Moderate**: Calculating Gasteiger partial charges for each atom
-4. **Moderate**: Find all H-bonds
-5. **Moderate**: Calculate DSSP for each amino acid
-6. **Hard**: SASA calculation for each amino acid
-7. **Hard**: Pocket and void calculation
-8. **Hard**: AMBER energy function or general input and structure Minimisation.
+3. **Easy**: Remove Proline exception and generalise to any amino acid with a restricted sidechain.
+4. **Moderate**: Calculating Gasteiger partial charges for each atom
+5. **Moderate**: Find all H-bonds
+6. **Moderate**: Calculate DSSP for each amino acid
+7. **Hard**: SASA calculation for each amino acid
+8. **Hard**: Pocket and void calculation
+9. **Hard**: AMBER energy function or general input and structure Minimisation.
