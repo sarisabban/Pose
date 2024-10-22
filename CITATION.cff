@@ -6,7 +6,7 @@ authors:
   given-names: "Sari"
   orcid: "https://orcid.org/0000-0002-9621-2395"
 
-title: "Pose: A python library for building and manipulating protein molecular structures"
+title: "Pose: A bare metal Python library for building and manipulating protein molecular structures"
 
 version: 1.0.0
 
