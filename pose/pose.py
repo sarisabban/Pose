@@ -907,6 +907,6 @@ class Pose():
 			self.data['Coordinates'] = self.data['Coordinates'] * [1, 1, -1]
 			for i in range(len(sequence)):
 				Daa = self.data['Amino Acids'][i][0].lower()
-				tri = 'D' +self.data['Amino Acids'][i][-1][1:]
+				tri = 'D' + self.data['Amino Acids'][i][-1][1:]
 				self.data['Amino Acids'][i][0] = Daa
 				self.data['Amino Acids'][i][-1] = tri
