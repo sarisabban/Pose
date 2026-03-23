@@ -56,9 +56,9 @@ class Pose():
 	def PDB_entry(self, atom, n, a, l, r, c, s, i, x, y, z, o, t, q, e):
 		''' Construct a PDB atom entry '''
 		ATOM = '{:<6}'.format(atom)
-		N = '{:>5}  '.format(n)
+		N = '{:>5} '.format(n)
 		A = '{:<4}'.format(a)
-		L = '{:>0}'.format(l)
+		L = '{:<1}'.format(l)
 		R = '{:>3}'.format(r)
 		C = '{:>2}'.format(c)
 		S = '{:>4}'.format(s)
