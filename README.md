@@ -133,6 +133,8 @@ for idx, atom in p.data['Atoms'].items():
 
 > Uppercase = L-form, lowercase = D-form. All 26 are supported in mixed L/D sequences. Additional amino acids can be added to the **AminoAcid.json** file.
 
+> The N-terminus is protonated, as expected at physiological pH (~7.4), and therefore exists as a positively charged ammonium group (–NH<sub>3</sub><sup>+</sup>)
+
 |       |       |       |       |       |
 |-------|-------|-------|-------|-------|
 |A - ALA|B - LYX|C - CYS|D - ASP|E - GLU|
@@ -214,6 +216,7 @@ for idx, atom in p.data['Atoms'].items():
 |-------------------|----------------|-----------------------|
 | `Vectors`         | List of lists  | The position of each atom relative to the N of the backbone. If the N coorinate is X, Y, Z = 0, 0, 0 you will get these vectors. To find the correct vectors position the N at coordinate X, Y, Z = 0, 0, 0, and use the corresponding coordinates of each atom|
 | `Tricode`         | String         | The three letter code for each amino acid|
+| `Fused`           | Boolian        | True = the sidechain is fused to the backbone|
 | `Atoms`           | List of lists  | The atom identity of each coordinate point, first coordinate point is the nitrogen with symbol N and PDB entry N, next atom is the hydrogen that is bonded to the nitrogen with symbol H and PDB entry 1H etc... Unlike the PDB where all hydrogens are collected after the amino acid, here each atom's hydrogens come right after it. This makes for easier matrix operations. Order is index [0] == PDB atom's name, index [1] == element, index [2] == charge, index [3] == temperature factor|
 | `Chi Angle Atoms` | List of lists  | The atoms in the sidechain that are contributing to a chi angle|
 | `Bonds`           | Dictionary     | The bond graph as an adjacency list|
@@ -226,6 +229,7 @@ Contributions are welcome! Open an issue or pull request on GitHub.
 
 These are functions that would make valuable additions to the library:
 
+0. **Easy**: Support CIF file in addition to PDB file formats
 1. **Easy**: Structure alignment (RMSD between two poses)
 2. **Easy**: Sequence alignment (BLAST & MSA)
 3. **Easy**: Remove Proline exception and generalise to any amino acid with a restricted sidechain

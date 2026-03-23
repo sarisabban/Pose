@@ -11,8 +11,6 @@ from collections import defaultdict
 class Pose():
 	''' Data structure that represents a protein '''
 	def __init__(self):
-#		path = __file__.split('/')[:-1]
-#		path = '/'.join(path)
 		path, modulename = os.path.split(__file__)
 		with open(f'{path}/AminoAcids.json') as f: AminoAcids = json.load(f)
 		Masses = {
@@ -188,8 +186,8 @@ class Pose():
 		tri = self.AminoAcids[AA.upper()]['Tricode']
 		if LD: tri = 'D' + tri[1:]
 		self.data['Amino Acids'][AA_index] = [AA, chain, BBi, SCi, 'L', tri]
-	def BondTree_PRO(self, BB, SC):
-		''' Construct proline bond graph by adding sidechain to backbone '''
+	def BondTree_fused(self, BB, SC):
+		''' Construct bond graph for when a sidechain is fused to a backbone '''
 		BBb = copy.deepcopy(self.AminoAcids[BB]['Bonds'])
 		SCb = copy.deepcopy(self.AminoAcids[SC]['Bonds'])
 		for key in list(BBb.keys()): BBb[int(key)] = BBb.pop(key)
@@ -232,9 +230,12 @@ class Pose():
 	def BondTree_AA(self, BB, SC):
 		''' Construct amino acid bond graph by adding sidechain to backbone '''
 		SC = SC.upper()
-		if SC == 'P':
-			BBb = self.BondTree_PRO(BB, SC)
-			return(BBb)
+		path, modulename = os.path.split(__file__)
+		with open(f'{path}/AminoAcids.json') as f:
+			AminoAcids = json.load(f)
+			if AminoAcids[SC]['Fused'] == True:
+				BBb = self.BondTree_fused(BB, SC)
+				return(BBb)
 		BBb = copy.deepcopy(self.AminoAcids[BB]['Bonds'])
 		SCb = copy.deepcopy(self.AminoAcids[SC]['Bonds'])
 		for key in list(BBb.keys()): BBb[int(key)] = BBb.pop(key)
