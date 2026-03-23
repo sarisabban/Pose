@@ -51,6 +51,15 @@ class Pose():
 		self.AminoAcids = AminoAcids
 		self.Masses = Masses
 		self.data = data
+	def isfused(self, SC):
+		''' Check if an amino acid's sidechain is fused to the backbone '''
+		path, modulename = os.path.split(__file__)
+		with open(f'{path}/AminoAcids.json') as f:
+			AminoAcids = json.load(f)
+			if AminoAcids[SC.upper()]['Fused'] == True:
+				return(True)
+			else:
+				return(False)
 	def PDB_entry(self, atom, n, a, l, r, c, s, i, x, y, z, o, t, q, e):
 		''' Construct a PDB atom entry '''
 		ATOM = '{:<6}'.format(atom)
@@ -163,7 +172,7 @@ class Pose():
 		AA = np.insert(BB, index, SC, axis=0)
 		if LD: AA = self.LD(AA)
 		if flip: AA = self.Flip(AA)
-		if aa == 'P': AA = np.delete(AA, [1], axis=0)
+		if self.isfused(aa): AA = np.delete(AA, [1], axis=0)
 		self.data['Coordinates'] = \
 		np.append(self.data['Coordinates'], AA, axis=0)
 		if backbone_type == 'Backbone' or backbone_type == 'Backbone start':
@@ -172,7 +181,7 @@ class Pose():
 	def Atoms(self, AA, chain, backbone_type, BB_index, AA_index, I, LD=False):
 		''' Construct, and add to pose, atom and amino acid identities '''
 		BB = backbone_type[:BB_index]
-		if AA == 'P': BB.pop(1)
+		if self.isfused(AA): BB.pop(1)
 		BB = BB + self.AminoAcids[AA.upper()]['Sidechain Atoms']
 		BB = BB + backbone_type[BB_index:]
 		BBi = []
@@ -230,12 +239,9 @@ class Pose():
 	def BondTree_AA(self, BB, SC):
 		''' Construct amino acid bond graph by adding sidechain to backbone '''
 		SC = SC.upper()
-		path, modulename = os.path.split(__file__)
-		with open(f'{path}/AminoAcids.json') as f:
-			AminoAcids = json.load(f)
-			if AminoAcids[SC]['Fused'] == True:
-				BBb = self.BondTree_fused(BB, SC)
-				return(BBb)
+		if self.isfused(SC):
+			BBb = self.BondTree_fused(BB, SC)
+			return(BBb)
 		BBb = copy.deepcopy(self.AminoAcids[BB]['Bonds'])
 		SCb = copy.deepcopy(self.AminoAcids[SC]['Bonds'])
 		for key in list(BBb.keys()): BBb[int(key)] = BBb.pop(key)
@@ -718,7 +724,7 @@ class Pose():
 			BL = np.array([Ba - Bo, Bb - Bo, Bc - Bo, Bo])
 			BL[1][2] = 1
 			BL_= np.linalg.inv(BL)
-		elif AA == 'P':
+		elif self.isfused(AA):
 			Aa, Ao, Ab, Ac = A[0], A[1], A[4], A[2]
 			Ba, Bo, Bb, Bc = B[0], B[1+n], B[3], B[-2-e]
 			AL = np.array([Aa - Ao, Ab - Ao, Ac - Ao, Ao])
@@ -897,7 +903,7 @@ class Pose():
 				chi = CHIs[i]
 				if chi == []: continue
 				for ii, c in enumerate(chi):
-					if sequence[i] == 'P': continue
+					if self.isfused(sequence[i]): continue
 					self.Rotate(i, c, 'CHI', ii+1)
 			except: continue
 		self.data['Mass'] = self.Mass()
