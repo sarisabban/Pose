@@ -279,13 +279,7 @@ Please follow the existing code style: tabs for indentation, 80 characters max l
 
 Chat with users and contributors in real time:
 
-**IRC:** `#pose` on the `irc.libera.chat` network.
+**IRC:** `#pose` channel on the `irc.libera.chat` network.
 - Or use the [Libera web chat](https://web.libera.chat/#pose), no install needed
 
 Come ask questions, share what you've built with Pose, or discuss contributions.
-
----
-
-## License
-
-This project is licensed under the [GNU General Public License v2](LICENSE).
