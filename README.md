@@ -223,6 +223,37 @@ for idx, atom in p.data['Atoms'].items():
 
 ---
 
+## Adding New Amino Acids
+
+To add a new amino acid to the library:
+
+1. Download the CIF file for the amino acid from
+   [RCSB Chemical Sketch](https://www.rcsb.org/chemical-sketch)
+2. Call `Parameterise()` with the CIF file path, a single-letter key, and the
+   three-letter residue code:
+   ```python
+   from pose import *
+
+   Parameterise('MSE.cif', 'J', 'MSE')
+   ```
+
+The function reads the CIF geometry, superimposes the amino acid onto the ALA
+backbone reference frame, detects chi angles and bond connectivity
+automatically, and writes the new entry directly into `AminoAcids.json`.
+All 26 canonical/non-canonical entries were generated this way.
+
+| Argument   | Description                                              | Example     |
+|------------|----------------------------------------------------------|-------------|
+| `filename` | Path to the downloaded CIF file                          | `'MSE.cif'` |
+| `unicode`  | Single-letter key for the amino acid (case-insensitive)  | `'J'`       |
+| `tricode`  | Three-letter residue code from RCSB (case-insensitive)   | `'MSE'`     |
+
+> **Note:** GLY is not supported (no CB atom). Use any unused character as
+> the key; all uppercase letters A–Z are already assigned (see the Supported
+> Amino Acids table above).
+
+---
+
 ## Contributing
 
 Contributions are welcome! Open an issue or pull request on GitHub.
