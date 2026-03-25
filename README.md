@@ -154,8 +154,8 @@ for idx, atom in p.data['Atoms'].items():
 |---------------------------------------------------|-------------|
 | `Pose()`                                          | Construct a new Pose object |
 | `p.Build('SYKDLEGKVKSVLESNRGI')`                  | Build a polypeptide from a one-letter sequence. Uppercase = L-amino acids, lowercase = D-amino acids |
-| `p.Import('1YN3.pdb', chain='A', filetype='CIF')` | Load a structure from a PDB or mmCIF file (specific chain). If no hydrogens are present they will not be added, use `ReBuild()` afterwards to add them. Cannot load structures with broken/non-continuous chains |
-| `p.Export('out.pdb', filetype='CIF')`             | Write the polypeptide to a PDB or mmCIF file |
+| `p.Import('1YN3.cif', chain='A', filetype='CIF')` | Load a structure from a PDB or mmCIF file (specific chain). If no hydrogens are present they will not be added, use `ReBuild()` afterwards to add them. Cannot load structures with broken/non-continuous chains |
+| `p.Export('out.pdb', filetype='PDB')`             | Write the polypeptide to a PDB or mmCIF file |
 | `p.ReBuild()`                                     | Rebuild the polypeptide as a primary structure then refold it using current angles and bond lengths. Use `D_AA=True` to rebuild entirely in D-amino acids |
 
 ### Measurements
@@ -193,6 +193,76 @@ for idx, atom in p.data['Atoms'].items():
 | `p.SecondaryStructures()` | List of secondary structure assignments: H=Helix, S=Sheet, L=Loop |
 | `print(p.data)`           | Print the full data dictionary |
 
+### Structure Alignment and Comparison
+
+The `RMSD()` function is a standalone utility (not a pose class method) that computes the Root Mean Squared Deviation between two `Pose` structures using Cα (alpha-carbon) atoms only.
+
+```python
+from pose import *
+
+p1 = Pose()
+p1.Import('1YN3.pdb', chain='A', filetype='PDB')
+
+p2 = Pose()
+p2.Import('1YN5.pdb', chain='A', filetype='PDB')
+
+print(RMSD(p1, p1))        # 0.0
+print(RMSD(p1, p2))        # 0.86355
+```
+
+| Parameter | Type   | Default   | Description                     |
+|-----------|--------|-----------|---------------------------------|
+| `pose1`   | `Pose` | —         | Reference structure             |
+| `pose2`   | `Pose` | —         | Structure to compare            |
+| `alg`     | `str`  | `'align'` | Alignment algorithm (see below) |
+
+**Returns:** `float`, RMSD in Ångströms, rounded to 5 decimal places.
+
+The following are the alignment Algorithms:
+
+| `alg`          | Method | Notes |
+|----------------|--------|-------|
+| `'align'`      | Needleman–Wunsch sequence alignment, iterative Kabsch with 2 Å outlier cutoff | Default, handles structures of different lengths |
+| `'kabsch'`     | SVD-based optimal rotation over first N Cα atoms                              | N = min(len1, len2) |
+| `'quaternion'` | Eigenvalue-based optimal rotation over first N Cα atoms                       | Equivalent to `'kabsch'` |
+| `'simple'`     | Centroid subtraction only, no rotation                                        | Upper bound on RMSD |
+
+```python
+RMSD(p1, p2, alg='align')       # 0.86355  (sequence-aligned core)
+RMSD(p1, p2, alg='kabsch')      # 8.26798  (all first-N residues)
+RMSD(p1, p2, alg='quaternion')  # 8.26798
+RMSD(p1, p2, alg='simple')      # 21.23132
+```
+
+### Adding New Amino Acids
+
+To add a new amino acid to the library use the Parameterise() function, which is a standalone utility (not a pose class method):
+
+1. Download the CIF file for the amino acid from
+   [RCSB Chemical Sketch](https://www.rcsb.org/chemical-sketch)
+2. Call `Parameterise()` with the CIF file path, a single-letter key, and the
+   three-letter residue code:
+   ```python
+   from pose import *
+
+   Parameterise('MSE.cif', 'J', 'MSE')
+   ```
+
+The function reads the CIF geometry, superimposes the amino acid onto the ALA
+backbone reference frame, detects chi angles and bond connectivity
+automatically, and writes the new entry directly into `AminoAcids.json`.
+All 26 canonical/non-canonical entries were generated this way.
+
+| Argument   | Description                                              | Example     |
+|------------|----------------------------------------------------------|-------------|
+| `filename` | Path to the downloaded CIF file                          | `'MSE.cif'` |
+| `unicode`  | Single-letter key for the amino acid (case-insensitive)  | `'J'`       |
+| `tricode`  | Three-letter residue code from RCSB (case-insensitive)   | `'MSE'`     |
+
+> **Note:** GLY is not supported (no CB atom). Use any unused character as
+> the key; all uppercase letters A–Z are already assigned (see the Supported
+> Amino Acids table above).
+
 ---
 
 ## Data Structure Reference
@@ -223,53 +293,19 @@ for idx, atom in p.data['Atoms'].items():
 
 ---
 
-## Adding New Amino Acids
-
-To add a new amino acid to the library:
-
-1. Download the CIF file for the amino acid from
-   [RCSB Chemical Sketch](https://www.rcsb.org/chemical-sketch)
-2. Call `Parameterise()` with the CIF file path, a single-letter key, and the
-   three-letter residue code:
-   ```python
-   from pose import *
-
-   Parameterise('MSE.cif', 'J', 'MSE')
-   ```
-
-The function reads the CIF geometry, superimposes the amino acid onto the ALA
-backbone reference frame, detects chi angles and bond connectivity
-automatically, and writes the new entry directly into `AminoAcids.json`.
-All 26 canonical/non-canonical entries were generated this way.
-
-| Argument   | Description                                              | Example     |
-|------------|----------------------------------------------------------|-------------|
-| `filename` | Path to the downloaded CIF file                          | `'MSE.cif'` |
-| `unicode`  | Single-letter key for the amino acid (case-insensitive)  | `'J'`       |
-| `tricode`  | Three-letter residue code from RCSB (case-insensitive)   | `'MSE'`     |
-
-> **Note:** GLY is not supported (no CB atom). Use any unused character as
-> the key; all uppercase letters A–Z are already assigned (see the Supported
-> Amino Acids table above).
-
----
-
 ## Contributing
 
 Contributions are welcome! Open an issue or pull request on GitHub.
 
 These are functions that would make valuable additions to the library:
 
-0. **Easy**: Support CIF file in addition to PDB file formats
-1. **Easy**: Structure alignment (RMSD between two poses)
-2. **Easy**: Sequence alignment (BLAST & MSA)
-3. **Easy**: Remove Proline exception and generalise to any amino acid with a restricted sidechain
-4. **Moderate**: Calculating Gasteiger partial charges for each atom
-5. **Moderate**: Find all H-bonds
-6. **Moderate**: Calculate DSSP for each amino acid
-7. **Hard**: SASA calculation for each amino acid
-8. **Hard**: Pocket and void calculation
-9. **Hard**: AMBER energy function or general input and structure minimisation
+1. **Easy**: Sequence alignment (BLAST & MSA)
+2. **Moderate**: Calculating Gasteiger partial charges for each atom
+3. **Moderate**: Find all H-bonds
+4. **Moderate**: Calculate DSSP for each amino acid
+5. **Hard**: SASA calculation for each amino acid
+6. **Hard**: Pocket and void calculation
+7. **Hard**: AMBER energy function or general input and structure minimisation
 
 Please follow the existing code style: tabs for indentation, 80 characters max line length.
 
@@ -279,7 +315,6 @@ Please follow the existing code style: tabs for indentation, 80 characters max l
 
 Chat with users and contributors in real time:
 
-**IRC:** `#pose` channel on the `irc.libera.chat` network.
-- Or use the [Libera web chat](https://web.libera.chat/#pose), no install needed
+**IRC:** `#pose` channel on the `irc.libera.chat` network, Or use the [Libera web chat](https://web.libera.chat/#pose), no install needed
 
 Come ask questions, share what you've built with Pose, or discuss contributions.

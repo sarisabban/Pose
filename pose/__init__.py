@@ -1,2 +1,3 @@
 from .pose import *
-from .parameterise import Parameterise
+from .tools import Parameterise
+from .tools import RMSD
