@@ -74,7 +74,7 @@ class Pose():
 		Y = '{:>8.3f}'.format(y)
 		Z = '{:>8.3f} '.format(z)
 		O = '{:>5.2f} '.format(o)
-		T = '{:>5.2f} '.format(t)
+		T = ('{:>5.2f} '.format(t))[:6]
 		Q = '{:>9.3f} '.format(q)
 		E = '{:<2} \n'.format(e)
 		entry = ATOM + N + A + L + R + C + S + I + X + Y + Z + O + T + Q + E
@@ -94,9 +94,9 @@ class Pose():
 			str(label_seq), r, c, a, '1'
 		]
 		return(' '.join(fields) + '\n')
-	def Export(self, filename, filetype='CIF'):
+	def Export(self, filename):
 		''' Export pose to a .pdb or .cif file '''
-		if filetype.upper() == 'PDB':
+		if filename[-3:].upper() == 'PDB':
 			with open(filename, 'w') as f:
 				DATE = datetime.date.today().strftime("%d-%b-%Y")
 				H1 = 'HEADER'+' '*44+DATE+' '*3+'XXXX'+' '*11+'\n'
@@ -146,7 +146,7 @@ class Pose():
 							continue
 				TER = 'TER'
 				f.write(TER)
-		elif filetype.upper() == 'CIF':
+		elif filename[-3:].upper() == 'CIF':
 			with open(filename, 'w') as f:
 				f.write('data_POSE\n#\n')
 				f.write('loop_\n')
@@ -832,9 +832,9 @@ class Pose():
 		sequence_old = self.FASTA()
 		sequence = sequence_old[:index] + AA + sequence_old[index+1:]
 		self.ReBuild(sequence)
-	def Import(self, filename, chain='A', filetype='CIF'):
+	def Import(self, filename, chain='A'):
 		''' Import a structure from a .pdb or .cif file '''
-		if filetype.upper() == 'PDB':
+		if filename[-3:].upper() == 'PDB':
 			ATOM, N, A, L, R, C, S, I, X, Y, Z, O, T, Q, E = \
 			[], [], [], [], [], [], [], [], [], [], [], [], [], [], []
 			with open(filename) as f:
@@ -863,7 +863,7 @@ class Pose():
 							q = 0.0
 						Q.append(q)
 						E.append(line[76:78].strip())
-		elif filetype.upper() == 'CIF':
+		elif filename[-3:].upper() == 'CIF':
 			ATOM, N, A, L, R, C, S, I, X, Y, Z, O, T, Q, E = \
 			[], [], [], [], [], [], [], [], [], [], [], [], [], [], []
 			with open(filename) as f:
