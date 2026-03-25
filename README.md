@@ -85,8 +85,8 @@ p.Build('AcEg')   # Mixed L/D sequence
 **Importing a PDB file:**
 ```python
 p2 = Pose()
-p2.Import('1tqg.pdb', chain='A')
-p2.ReBuild()     # Re-adds hydrogens if the PDB lacked them
+p2.Import('1tqg.pdb', chain='A', filetype='CIF') # filetype can also be 'PDB'
+p2.ReBuild()                 # Re-adds hydrogens if the PDB lacked them
 ```
 
 ---
@@ -150,13 +150,13 @@ for idx, atom in p.data['Atoms'].items():
 
 ### Building & I/O
 
-| Method                            | Description |
-|-----------------------------------|-------------|
-| `Pose()`                          | Construct a new Pose object |
-| `p.Build('SARI')`                 | Build a polypeptide from a one-letter sequence. Uppercase = L-amino acids, lowercase = D-amino acids |
-| `p.Import('1tqg.pdb', chain='A')` | Load a structure from a PDB file (specific chain). If no hydrogens are present they will not be added, use `ReBuild()` afterwards to add them. Cannot load structures with broken/non-continuous chains |
-| `p.Export('out.pdb')`             | Write the polypeptide to a PDB file |
-| `p.ReBuild()`                     | Rebuild the polypeptide as a primary structure then refold it using current angles and bond lengths. Use `D_AA=True` to rebuild entirely in D-amino acids |
+| Method                                            | Description |
+|---------------------------------------------------|-------------|
+| `Pose()`                                          | Construct a new Pose object |
+| `p.Build('SYKDLEGKVKSVLESNRGI')`                  | Build a polypeptide from a one-letter sequence. Uppercase = L-amino acids, lowercase = D-amino acids |
+| `p.Import('1YN3.pdb', chain='A', filetype='CIF')` | Load a structure from a PDB or mmCIF file (specific chain). If no hydrogens are present they will not be added, use `ReBuild()` afterwards to add them. Cannot load structures with broken/non-continuous chains |
+| `p.Export('out.pdb', filetype='CIF')`             | Write the polypeptide to a PDB or mmCIF file |
+| `p.ReBuild()`                                     | Rebuild the polypeptide as a primary structure then refold it using current angles and bond lengths. Use `D_AA=True` to rebuild entirely in D-amino acids |
 
 ### Measurements
 
