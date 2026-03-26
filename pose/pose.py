@@ -1067,3 +1067,110 @@ class Pose():
 				tri = 'D' + self.data['Amino Acids'][i][-1][1:]
 				self.data['Amino Acids'][i][0] = Daa
 				self.data['Amino Acids'][i][-1] = tri
+
+
+
+
+
+
+
+
+
+
+	def Gasteiger(self, iterations=6):
+		''' Assign Gasteiger-Marsili partial charges to all atoms.
+		Bonds are inferred from coordinates so this works for both
+		Build() and Import() structures (with or without H atoms).
+		Updates self.data['Atoms'][i][2] in-place. '''
+		PARAMS = {
+			'C3': (7.98,  9.18,  1.88),
+			'C2': (8.79,  9.32,  1.51),
+			'C1': (10.39, 9.45,  0.73),
+			'H':  (7.17,  6.24, -0.56),
+			'O3': (14.18, 12.92, 1.39),
+			'O2': (17.07, 13.79, 0.47),
+			'N3': (11.54, 10.82, 1.36),
+			'N2': (12.87, 11.15, 0.85),
+			'S':  (10.14,  9.13, 1.38),
+			'Se': (9.00,   8.00, 1.10),
+		}
+		ids  = sorted(self.data['Atoms'].keys())
+		crds = self.data['Coordinates']
+		els  = [self.data['Atoms'][i][1].upper() for i in ids]
+		# Build pairwise distance matrix (vectorised)
+		c = crds[np.array(ids)]             # n x 3
+		dm = np.sqrt(
+			((c[:, None, :] - c[None, :, :]) ** 2).sum(2))
+		# Bond thresholds: H-heavy 1.3 Å, S/Se 2.1 Å, else 1.9 Å
+		heavy_thresh = np.full((len(ids), len(ids)), 1.9)
+		for ii, ei in enumerate(els):
+			for jj, ej in enumerate(els):
+				if ei == 'H' or ej == 'H':
+					heavy_thresh[ii, jj] = 1.3
+				elif ei in ('S', 'SE') or ej in ('S', 'SE'):
+					heavy_thresh[ii, jj] = 2.1
+		bond_mask = (dm < heavy_thresh) & (dm > 0.0)
+		# Build neighbour lists keyed by global atom index
+		bonds = {i: [] for i in ids}
+		for ii, i in enumerate(ids):
+			for jj, j in enumerate(ids):
+				if bond_mask[ii, jj]:
+					bonds[i].append(j)
+		# Identify sp2 atoms: any heavy-heavy bond < 1.42 Å
+		sp2 = set()
+		for ii, i in enumerate(ids):
+			if els[ii] == 'H':
+				continue
+			for jj, j in enumerate(ids):
+				if jj == ii or els[jj] == 'H':
+					continue
+				if 0 < dm[ii, jj] < 1.42:
+					sp2.add(i)
+					sp2.add(j)
+		def _type(ii, i):
+			el = els[ii]
+			if el == 'H':  return 'H'
+			if el == 'S':  return 'S'
+			if el == 'SE': return 'Se'
+			nb    = len(bonds[i])
+			isp2  = i in sp2
+			if el == 'C':
+				if isp2:    return 'C2'
+				if nb <= 2: return 'C1'
+				return 'C3'
+			if el == 'N':
+				return 'N2' if isp2 else 'N3'
+			if el == 'O':
+				return 'O2' if isp2 else 'O3'
+			return 'C3'
+		charges = {i: self.data['Atoms'][i][2] for i in ids}
+		atype   = {i: PARAMS[_type(ii, i)]
+		           for ii, i in enumerate(ids)}
+		for n in range(iterations):
+			damp = 1.0 / (2 ** (n + 1))
+			chi = {}
+			for i in ids:
+				a, b, c = atype[i]
+				q = charges[i]
+				chi[i] = a + b * q + c * q * q
+			delta = {i: 0.0 for i in ids}
+			for i in ids:
+				for j in bonds[i]:
+					if j <= i:
+						continue
+					if chi[j] >= chi[i]:
+						donor, acceptor = i, j
+					else:
+						donor, acceptor = j, i
+					a, b, c = atype[donor]
+					ip = a + b + c
+					if ip == 0:
+						continue
+					dq = damp * (
+						chi[acceptor] - chi[donor]) / ip
+					delta[donor]    += dq
+					delta[acceptor] -= dq
+			for i in ids:
+				charges[i] += delta[i]
+		for i in ids:
+			self.data['Atoms'][i][2] = round(charges[i], 4)

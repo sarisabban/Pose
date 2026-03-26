@@ -373,7 +373,7 @@ All 26 canonical/non-canonical entries were generated this way.
 | `Size`        | Integer     | Number of residues |
 | `FASTA`       | String      | One-letter sequence |
 | `Amino Acids` | Dict        | `{index: [symbol, chain, bb_atom_indices, sc_atom_indices, secondary_struct, tricode]}`, **zero-based** |
-| `Atoms`       | Dict        | `{atom_index: [pdb_name, element, charge, temp_factor]}`, **zero-based** |
+| `Atoms`       | Dict        | `{atom_index: [pdb_name, element, partial charge, temp_factor]}`, **zero-based** |
 | `Bonds`       | Dict        | Bond graph as adjacency list: `{atom_index: [bonded_atom_indices]}` |
 | `Coordinates` | NumPy array | Shape `(N, 3)`, Cartesian XYZ for each atom |
 
@@ -385,7 +385,7 @@ All 26 canonical/non-canonical entries were generated this way.
 | `Vectors`         | List of lists  | The position of each atom relative to the N of the backbone. If the N coorinate is X, Y, Z = 0, 0, 0 you will get these vectors. To find the correct vectors position the N at coordinate X, Y, Z = 0, 0, 0, and use the corresponding coordinates of each atom|
 | `Tricode`         | String         | The three letter code for each amino acid|
 | `Fused`           | Boolian        | True = the sidechain is fused to the backbone|
-| `Atoms`           | List of lists  | The atom identity of each coordinate point, first coordinate point is the nitrogen with symbol N and PDB entry N, next atom is the hydrogen that is bonded to the nitrogen with symbol H and PDB entry 1H etc... Unlike the PDB where all hydrogens are collected after the amino acid, here each atom's hydrogens come right after it. This makes for easier matrix operations. Order is index [0] == PDB atom's name, index [1] == element, index [2] == charge, index [3] == temperature factor|
+| `Atoms`           | List of lists  | The atom identity of each coordinate point, first coordinate point is the nitrogen with symbol N and PDB entry N, next atom is the hydrogen that is bonded to the nitrogen with symbol H and PDB entry 1H etc... Unlike the PDB where all hydrogens are collected after the amino acid, here each atom's hydrogens come right after it. This makes for easier matrix operations. Order is index [0] == PDB atom's name, index [1] == element, index [2] == partial charge, index [3] == temperature factor|
 | `Chi Angle Atoms` | List of lists  | The atoms in the sidechain that are contributing to a chi angle|
 | `Bonds`           | Dictionary     | The bond graph as an adjacency list|
 
