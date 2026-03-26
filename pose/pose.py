@@ -930,8 +930,8 @@ class Pose():
 		N = [x-N[0] for x in N]
 		S = [x-S[0] for x in S]
 		ALL = [[a, r, c, s, x, y, z, o, t, q, e] \
-		for a, r, c, s, x, y, z, o, t, q, e in \
-		zip(A, R, C, S, X, Y, Z, O, T, Q, E)]
+			for a, r, c, s, x, y, z, o, t, q, e in \
+			zip(A, R, C, S, X, Y, Z, O, T, Q, E)]
 		Structure = defaultdict(list)
 		for atom in ALL: Structure[atom[3]].append(atom)
 		for repeat in range(2):

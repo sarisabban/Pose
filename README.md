@@ -201,10 +201,10 @@ The `RMSD()` function is a standalone utility (not a pose class method) that com
 from pose import *
 
 p1 = Pose()
-p1.Import('1YN3.pdb', chain='A', filetype='PDB')
+p1.Import('1YN3.pdb', chain='A')
 
 p2 = Pose()
-p2.Import('1YN5.pdb', chain='A', filetype='PDB')
+p2.Import('1YN5.pdb', chain='A')
 
 print(RMSD(p1, p1))        # 0.0
 print(RMSD(p1, p2))        # 0.86355
@@ -233,6 +233,104 @@ RMSD(p1, p2, alg='kabsch')      # 8.26798  (all first-N residues)
 RMSD(p1, p2, alg='quaternion')  # 8.26798
 RMSD(p1, p2, alg='simple')      # 21.23132
 ```
+
+### Pairwise Sequence Alignment (BLAST)
+
+`BLAST()` performs pairwise protein sequence alignment using the Smith-Waterman local alignment algorithm with BLOSUM62 substitution scores, affine gap penalties (open=11, extend=1), and Karlin-Altschul E-value statistics, matching the statistical model used by NCBI BLASTP.
+
+```python
+from pose import *
+
+p1 = Pose(); p1.Import('1YN3.pdb', chain='A')
+p2 = Pose(); p2.Import('8D4Q.pdb', chain='D')
+
+alignment, percent_id, e_val = BLAST(p1.data['FASTA'], p2.data['FASTA'])
+print(alignment)
+# Query length=98  Subject length=99
+# Score: 154.2 bits (393), E-value: 3.401e-45
+# Identities: 80/99 (80.81%), Positives: 88/99 (88.9%), Gaps: 1/99 (1.0%)
+# ...
+
+print(pct_id)   # 80.81
+print(e_val)    # 3.401e-45
+```
+
+| Parameter | Type  | Description |
+|-----------|-------|-------------|
+| `seq1`    | `str` | FASTA sequence of the first protein  |
+| `seq2`    | `str` | FASTA sequence of the second protein |
+
+**Returns:** `(alignment_string, percent_identity, e_value)`
+
+| Return value       | Type    | Description |
+|--------------------|---------|-------------|
+| `alignment_string` | `str`   | BLAST-style formatted alignment with match symbols (`\|` identical, `+` positive, ` ` mismatch/gap) |
+| `percent_identity` | `float` | Percentage of identical residues in the aligned region |
+| `e_value`          | `float` | Karlin-Altschul expect value (lower = more significant) |
+
+**Non-canonical amino acid handling:**
+
+BLAST handles sequences beyond the 20 canonical L-amino acids automatically:
+
+- **D-amino acids**: stored as lowercase letters in `pose.data['FASTA']` (e.g. `'a'` for D-Ala). BLAST uppercases both sequences before alignment, treating each D-amino acid as its L-counterpart for scoring purposes. This correctly reflects the chemical reality that D- and L-forms of the same residue have identical side-chain chemistry.
+
+- **Non-canonical amino acids**: any letter not in the 20-letter BLOSUM62 alphabet falls back to: `+4` for a self-match (equal to the minimum BLOSUM62 diagonal), `−1` for a mismatch. This keeps non-canonical residues visible to the aligner without inflating scores.
+
+---
+
+### Multiple Sequence Alignment (MSA)
+
+`MSA()` aligns three or more protein sequences using a ClustalW-like progressive alignment strategy: pairwise distances are computed with `BLAST()`, a UPGMA guide tree is built from those distances, and sequences are merged in guide-tree order using Needleman-Wunsch profile-profile alignment (BLOSUM62, affine gap penalties).
+
+```python
+from pose import *
+
+s1 = Pose(); p1.Import('1YN3.pdb', chain='A').data['FASTA']
+s2 = Pose(); p2.Import('8D4Q.pdb', chain='D').data['FASTA']
+s3 = Pose(); p2.Import('1YN4.pdb', chain='A').data['FASTA']
+s4 = Pose(); p2.Import('4NZL.pdb', chain='B').data['FASTA']
+s5 = Pose(); p2.Import('9ASS.pdb', chain='B').data['FASTA']
+
+alignment, sequences = MSA([s1, s2, s3, s4, s5])
+print(alignment)
+
+# Multiple Sequence Alignment (5 sequences, 99 columns)
+#
+# Seq1  GS-TVPYTITVNGTSQNILSNLTFNKNQNISYKDLEGKVKSVLESNRGITDVDLRLSKQA  59
+# Seq2  STIQIPYTITVNGTSQNILSSLTFNKNQNISYKDIENKVKSVLYFNRGISDIDLRLSKQA  60
+# ...
+#       ....:****:*:*.:. ..:...*.:*:.:.*::::.***:.*...**::...:..::.*
+```
+
+| Parameter   | Type        | Description |
+|-------------|-------------|-------------|
+| `sequences` | `list[str]` | FASTA sequences to align (minimum 2) |
+
+**Returns:** `(alignment_string, aligned_list)`
+
+| Return value       | Type        | Description |
+|--------------------|-------------|-------------|
+| `alignment_string` | `str`       | ClustalW-style formatted text with conservation symbols |
+| `aligned_list`     | `list[str]` | Gap-padded sequences in input order, all strings are the same length |
+
+**Conservation symbols** (bottom row of each alignment block):
+
+| Symbol | Meaning                                            |
+|--------|----------------------------------------------------|
+| `*`    | All sequences have the same residue in this column |
+| `:`    | All pairwise residues score positively on BLOSUM62 |
+| `.`    | Average pairwise BLOSUM62 score is positive        |
+| ` `    | Low or no conservation                             |
+
+**Non-canonical amino acid handling:** identical to `BLAST()`, D-amino acids (lowercase) are uppercased before scoring, and non-canonical letters fall back to `+4` self-match / `−1` mismatch in BLOSUM62.
+
+**Algorithm summary:**
+1. Compute all n(n−1)/2 pairwise distances via `BLAST()` (distance = 1 − identity)
+2. Build a UPGMA guide tree from those distances
+3. Align sequence groups in merge order using Needleman-Wunsch on column profiles
+4. Report conservation per column using BLOSUM62 scores
+
+---
 
 ### Adding New Amino Acids
 
@@ -299,13 +397,12 @@ Contributions are welcome! Open an issue or pull request on GitHub.
 
 These are functions that would make valuable additions to the library:
 
-1. **Easy**: Sequence alignment (BLAST & MSA)
-2. **Moderate**: Calculating Gasteiger partial charges for each atom
-3. **Moderate**: Find all H-bonds
-4. **Moderate**: Calculate DSSP for each amino acid
-5. **Hard**: SASA calculation for each amino acid
-6. **Hard**: Pocket and void calculation
-7. **Hard**: AMBER energy function or general input and structure minimisation
+1. **Moderate**: Calculating Gasteiger partial charges for each atom
+2. **Moderate**: Find all H-bonds
+3. **Moderate**: Calculate DSSP for each amino acid
+4. **Hard**: SASA calculation for each amino acid
+5. **Hard**: Pocket and void calculation
+6. **Hard**: AMBER energy function or general input and structure minimisation
 
 Please follow the existing code style: tabs for indentation, 80 characters max line length.
 

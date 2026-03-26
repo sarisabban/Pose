@@ -461,6 +461,39 @@ def RMSD(pose1, pose2, alg='align'):
 			rmsd = np.sqrt(np.mean((diff**2).sum(axis=1)))
 	return(round(float(rmsd), 5))
 
+# BLOSUM62 scoring matrix — shared by BLAST() and MSA()
+_aa  = 'ARNDCQEGHILKMFPSTWYV'
+_bm  = [
+	[ 4,-1,-2,-2, 0,-1,-1, 0,-2,-1,-1,-1,-1,-2,-1, 1, 0,-3,-2, 0],
+	[-1, 5, 0,-2,-3, 1, 0,-2, 0,-3,-2, 2,-1,-3,-2,-1,-1,-3,-2,-3],
+	[-2, 0, 6, 1,-3, 0, 0, 0, 1,-3,-3, 0,-2,-3,-2, 1, 0,-4,-2,-3],
+	[-2,-2, 1, 6,-3, 0, 2,-1,-1,-3,-4,-1,-3,-3,-1, 0,-1,-4,-3,-3],
+	[ 0,-3,-3,-3, 9,-3,-4,-3,-3,-1,-1,-3,-1,-2,-3,-1,-1,-2,-2,-1],
+	[-1, 1, 0, 0,-3, 5, 2,-2, 0,-3,-2, 1, 0,-3,-1, 0,-1,-2,-1,-2],
+	[-1, 0, 0, 2,-4, 2, 5,-2, 0,-3,-3, 1,-2,-3,-1, 0,-1,-3,-2,-2],
+	[ 0,-2, 0,-1,-3,-2,-2, 6,-2,-4,-4,-2,-3,-3,-2, 0,-2,-2,-3,-3],
+	[-2, 0, 1,-1,-3, 0, 0,-2, 8,-3,-3,-1,-2,-1,-2,-1,-2,-2, 2,-3],
+	[-1,-3,-3,-3,-1,-3,-3,-4,-3, 4, 2,-3, 1, 0,-3,-2,-1,-3,-1, 3],
+	[-1,-2,-3,-4,-1,-2,-3,-4,-3, 2, 4,-2, 2, 0,-3,-2,-1,-2,-1, 1],
+	[-1, 2, 0,-1,-3, 1, 1,-2,-1,-3,-2, 5,-1,-3,-1, 0,-1,-3,-2,-2],
+	[-1,-1,-2,-3,-1, 0,-2,-3,-2, 1, 2,-1, 5, 0,-2,-1,-1,-1,-1, 1],
+	[-2,-3,-3,-3,-2,-3,-3,-3,-1, 0, 0,-3, 0, 6,-4,-2,-2, 1, 3,-1],
+	[-1,-2,-2,-1,-3,-1,-1,-2,-2,-3,-3,-1,-2,-4, 7,-1,-1,-4,-3,-2],
+	[ 1,-1, 1, 0,-1, 0, 0, 0,-1,-2,-2, 0,-1,-2,-1, 4, 1,-3,-2,-2],
+	[ 0,-1, 0,-1,-1,-1,-1,-2,-2,-1,-1,-1,-1,-2,-1, 1, 5,-3,-2, 0],
+	[-3,-3,-4,-4,-2,-2,-3,-2,-2,-3,-2,-3,-1, 1,-4,-3,-3,11, 2,-3],
+	[-2,-2,-2,-3,-2,-1,-2,-3, 2,-1,-1,-2,-1, 3,-3,-2,-2, 2, 7,-1],
+	[ 0,-3,-3,-3,-1,-2,-2,-3,-3, 3, 1,-2, 1,-1,-2,-2, 0,-3,-1, 4],
+]
+_idx = {c: i for i, c in enumerate(_aa)}
+
+def _blosum(a, b):
+	''' BLOSUM62 score; D-AAs are pre-uppercased by callers. '''
+	ia, ib = _idx.get(a, -1), _idx.get(b, -1)
+	if ia < 0 or ib < 0:
+		return(4 if a == b else -1)
+	return(_bm[ia][ib])
+
 def BLAST(seq1, seq2):
 	'''
 	Pairwise protein sequence alignment using Smith-Waterman
@@ -469,8 +502,8 @@ def BLAST(seq1, seq2):
 
 	Parameters
 	----------
-	pose1 : Pose  First protein pose.
-	pose2 : Pose  Second protein pose.
+	seq1 : str  FASTA sequence of the first protein.
+	seq2 : str  FASTA sequence of the second protein.
 
 	Returns
 	-------
@@ -482,36 +515,6 @@ def BLAST(seq1, seq2):
 	seq1 = seq1.upper()
 	seq2 = seq2.upper()
 	m, n = len(seq1), len(seq2)
-	# BLOSUM62 rows ordered by ARNDCQEGHILKMFPSTWYV
-	_aa  = 'ARNDCQEGHILKMFPSTWYV'
-	_bm  = [
-		[ 4,-1,-2,-2, 0,-1,-1, 0,-2,-1,-1,-1,-1,-2,-1, 1, 0,-3,-2, 0],
-		[-1, 5, 0,-2,-3, 1, 0,-2, 0,-3,-2, 2,-1,-3,-2,-1,-1,-3,-2,-3],
-		[-2, 0, 6, 1,-3, 0, 0, 0, 1,-3,-3, 0,-2,-3,-2, 1, 0,-4,-2,-3],
-		[-2,-2, 1, 6,-3, 0, 2,-1,-1,-3,-4,-1,-3,-3,-1, 0,-1,-4,-3,-3],
-		[ 0,-3,-3,-3, 9,-3,-4,-3,-3,-1,-1,-3,-1,-2,-3,-1,-1,-2,-2,-1],
-		[-1, 1, 0, 0,-3, 5, 2,-2, 0,-3,-2, 1, 0,-3,-1, 0,-1,-2,-1,-2],
-		[-1, 0, 0, 2,-4, 2, 5,-2, 0,-3,-3, 1,-2,-3,-1, 0,-1,-3,-2,-2],
-		[ 0,-2, 0,-1,-3,-2,-2, 6,-2,-4,-4,-2,-3,-3,-2, 0,-2,-2,-3,-3],
-		[-2, 0, 1,-1,-3, 0, 0,-2, 8,-3,-3,-1,-2,-1,-2,-1,-2,-2, 2,-3],
-		[-1,-3,-3,-3,-1,-3,-3,-4,-3, 4, 2,-3, 1, 0,-3,-2,-1,-3,-1, 3],
-		[-1,-2,-3,-4,-1,-2,-3,-4,-3, 2, 4,-2, 2, 0,-3,-2,-1,-2,-1, 1],
-		[-1, 2, 0,-1,-3, 1, 1,-2,-1,-3,-2, 5,-1,-3,-1, 0,-1,-3,-2,-2],
-		[-1,-1,-2,-3,-1, 0,-2,-3,-2, 1, 2,-1, 5, 0,-2,-1,-1,-1,-1, 1],
-		[-2,-3,-3,-3,-2,-3,-3,-3,-1, 0, 0,-3, 0, 6,-4,-2,-2, 1, 3,-1],
-		[-1,-2,-2,-1,-3,-1,-1,-2,-2,-3,-3,-1,-2,-4, 7,-1,-1,-4,-3,-2],
-		[ 1,-1, 1, 0,-1, 0, 0, 0,-1,-2,-2, 0,-1,-2,-1, 4, 1,-3,-2,-2],
-		[ 0,-1, 0,-1,-1,-1,-1,-2,-2,-1,-1,-1,-1,-2,-1, 1, 5,-3,-2, 0],
-		[-3,-3,-4,-4,-2,-2,-3,-2,-2,-3,-2,-3,-1, 1,-4,-3,-3,11, 2,-3],
-		[-2,-2,-2,-3,-2,-1,-2,-3, 2,-1,-1,-2,-1, 3,-3,-2,-2, 2, 7,-1],
-		[ 0,-3,-3,-3,-1,-2,-2,-3,-3, 3, 1,-2, 1,-1,-2,-2, 0,-3,-1, 4],
-	]
-	_idx = {c: i for i, c in enumerate(_aa)}
-	def blosum(a, b):
-		ia, ib = _idx.get(a, -1), _idx.get(b, -1)
-		if ia < 0 or ib < 0:
-			return(0 if a == b else -1)
-		return(_bm[ia][ib])
 	# Affine gap penalties (NCBI BLASTP defaults for BLOSUM62)
 	go, ge = 11, 1
 	INF    = float('-inf')
@@ -523,7 +526,7 @@ def BLAST(seq1, seq2):
 	best, bi, bj = 0.0, 0, 0
 	for i in range(1, m+1):
 		for j in range(1, n+1):
-			s       = blosum(seq1[i-1], seq2[j-1])
+			s       = _blosum(seq1[i-1], seq2[j-1])
 			diag    = H[i-1, j-1] + s
 			E[i, j] = max(
 				H[i, j-1] - go - ge, E[i, j-1] - ge)
@@ -561,7 +564,7 @@ def BLAST(seq1, seq2):
 		1 for a, b in zip(aq, as_) if a == b and a != '-')
 	n_pos = sum(
 		1 for a, b in zip(aq, as_)
-		if a != '-' and b != '-' and blosum(a, b) > 0)
+		if a != '-' and b != '-' and _blosum(a, b) > 0)
 	n_gap   = aq.count('-') + as_.count('-')
 	pct     = round(n_id / aln_len * 100, 2)
 	# Karlin-Altschul E-value (BLOSUM62, gap_open=11, gap_extend=1)
@@ -573,7 +576,7 @@ def BLAST(seq1, seq2):
 	for a, b in zip(aq, as_):
 		if   a == '-' or b == '-': mid += ' '
 		elif a == b:               mid += '|'
-		elif blosum(a, b) > 0:    mid += '+'
+		elif _blosum(a, b) > 0:    mid += '+'
 		else:                      mid += ' '
 	pct_pos = round(n_pos / aln_len * 100, 1)
 	pct_gap = round(n_gap / aln_len * 100, 1)
@@ -602,3 +605,178 @@ def BLAST(seq1, seq2):
 		qp += qr
 		sp += sr
 	return('\n'.join(out), pct, e_value)
+
+def MSA(sequences):
+	'''
+	Progressive multiple sequence alignment (ClustalW-like).
+
+	Uses UPGMA guide tree built from pairwise BLAST distances,
+	then aligns profiles progressively with Needleman-Wunsch
+	(BLOSUM62, gap open=11, gap extend=1).  Handles L-AAs,
+	D-AAs (uppercased to L-counterpart), and non-canonical AAs.
+
+	Parameters
+	----------
+	sequences : list of str
+	    FASTA sequences to align (at least 2).
+
+	Returns
+	-------
+	tuple : (alignment_string, aligned_list)
+	    alignment_string : str        ClustalW-style formatted text
+	    aligned_list     : list[str]  gap-padded sequences, same order
+	'''
+	n = len(sequences)
+	if n < 2:
+		raise Exception('MSA requires at least 2 sequences')
+	seqs   = [s.upper() for s in sequences]
+	labels = [f'Seq{i+1}' for i in range(n)]
+	go, ge = 11, 1
+	INF    = float('-inf')
+	def col_score(p1, p2, ci, cj):
+		col_a = [s[ci] for s in p1 if s[ci] != '-']
+		col_b = [s[cj] for s in p2 if s[cj] != '-']
+		if not col_a or not col_b:
+			return(0.0)
+		total = sum(
+			_blosum(a, b) for a in col_a for b in col_b)
+		return(total / (len(col_a) * len(col_b)))
+	def align_profiles(p1, p2):
+		L1 = len(p1[0])
+		L2 = len(p2[0])
+		H  = np.zeros((L1+1, L2+1))
+		E  = np.full((L1+1, L2+1), INF)
+		F  = np.full((L1+1, L2+1), INF)
+		tb = np.zeros((L1+1, L2+1), dtype=np.int8)
+		for i in range(1, L1+1):
+			H[i, 0] = -(go + ge * i)
+			tb[i, 0] = 2
+		for j in range(1, L2+1):
+			H[0, j] = -(go + ge * j)
+			tb[0, j] = 3
+		for i in range(1, L1+1):
+			for j in range(1, L2+1):
+				s       = col_score(p1, p2, i-1, j-1)
+				diag    = H[i-1, j-1] + s
+				E[i, j] = max(
+					H[i, j-1] - go - ge, E[i, j-1] - ge)
+				F[i, j] = max(
+					H[i-1, j] - go - ge, F[i-1, j] - ge)
+				h       = max(diag, E[i, j], F[i, j])
+				H[i, j] = h
+				if   h == diag:    tb[i, j] = 1
+				elif h == F[i, j]: tb[i, j] = 2
+				else:              tb[i, j] = 3
+		np1 = [[] for _ in p1]
+		np2 = [[] for _ in p2]
+		i, j = L1, L2
+		while i > 0 or j > 0:
+			if i == 0:
+				for k in range(len(p1)): np1[k].append('-')
+				for k, s in enumerate(p2): np2[k].append(s[j-1])
+				j -= 1
+			elif j == 0:
+				for k, s in enumerate(p1): np1[k].append(s[i-1])
+				for k in range(len(p2)): np2[k].append('-')
+				i -= 1
+			else:
+				t = int(tb[i, j])
+				if t == 1:
+					for k, s in enumerate(p1):
+						np1[k].append(s[i-1])
+					for k, s in enumerate(p2):
+						np2[k].append(s[j-1])
+					i -= 1; j -= 1
+				elif t == 2:
+					for k, s in enumerate(p1):
+						np1[k].append(s[i-1])
+					for k in range(len(p2)):
+						np2[k].append('-')
+					i -= 1
+				else:
+					for k in range(len(p1)):
+						np1[k].append('-')
+					for k, s in enumerate(p2):
+						np2[k].append(s[j-1])
+					j -= 1
+		r1 = [''.join(reversed(row)) for row in np1]
+		r2 = [''.join(reversed(row)) for row in np2]
+		return(r1, r2)
+	def upgma(dist):
+		sizes  = {k: 1 for k in range(n)}
+		active = list(range(n))
+		d      = dist.copy()
+		order  = []
+		for _ in range(n - 1):
+			bi, bj, best = -1, -1, float('inf')
+			for x in range(len(active)):
+				for y in range(x+1, len(active)):
+					ii, jj = active[x], active[y]
+					if d[ii, jj] < best:
+						best, bi, bj = d[ii, jj], ii, jj
+			order.append((bi, bj))
+			ni, nj = sizes[bi], sizes[bj]
+			for k in active:
+				if k == bi or k == bj:
+					continue
+				d[bi, k] = d[k, bi] = (
+					ni * d[bi, k] + nj * d[bj, k]
+				) / (ni + nj)
+			sizes[bi] += sizes[bj]
+			active.remove(bj)
+		return(order)
+	def cons_sym(col):
+		non_gap = [c for c in col if c != '-']
+		if not non_gap:
+			return(' ')
+		if (len(non_gap) == n
+				and all(c == non_gap[0] for c in non_gap)):
+			return('*')
+		pairs = [
+			_blosum(a, b)
+			for x, a in enumerate(non_gap)
+			for b in non_gap[x+1:]]
+		if not pairs:
+			return('*' if len(non_gap) == 1 else ' ')
+		if all(s > 0 for s in pairs):
+			return(':')
+		if sum(pairs) / len(pairs) > 0:
+			return('.')
+		return(' ')
+	dist = np.zeros((n, n))
+	for i in range(n):
+		for j in range(i+1, n):
+			try:
+				_, pct, _ = BLAST(seqs[i], seqs[j])
+				d = 1.0 - pct / 100.0
+			except Exception:
+				d = 1.0
+			dist[i, j] = dist[j, i] = d
+	merge_order = upgma(dist)
+	profiles = {k: [seqs[k]] for k in range(n)}
+	for (ci, cj) in merge_order:
+		a1, a2 = align_profiles(profiles[ci], profiles[cj])
+		profiles[ci] = a1 + a2
+		del profiles[cj]
+	final = list(profiles.values())[0]
+	L   = len(final[0])
+	lw  = max(max(len(lb) for lb in labels), 4)
+	con = ''.join(
+		cons_sym([final[k][ci] for k in range(n)])
+		for ci in range(L))
+	hdr = (
+		f'Multiple Sequence Alignment '
+		f'({n} sequences, {L} columns)')
+	out = [hdr, '']
+	pos = [0] * n
+	w   = 60
+	for st in range(0, L, w):
+		for k, lb in enumerate(labels):
+			blk  = final[k][st:st+w]
+			nres = len(blk) - blk.count('-')
+			pos[k] += nres
+			out.append(
+				f'{lb:<{lw}}  {blk}  {pos[k]}')
+		out.append(f'{"":>{lw}}  {con[st:st+w]}')
+		out.append('')
+	return('\n'.join(out), final)
