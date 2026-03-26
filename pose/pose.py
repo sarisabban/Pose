@@ -1067,6 +1067,7 @@ class Pose():
 		self.data['Rg'] = self.Rg()
 		self.Gasteiger()
 		self.DSSP()
+		self.SASA()
 		if D_AA:
 			self.data['Coordinates'] = self.data['Coordinates'] * [1, 1, -1]
 			for i in range(len(sequence)):
@@ -1342,3 +1343,49 @@ class Pose():
 						ss[k] = 'P'
 		for i in range(N):
 			self.data['Amino Acids'][i][4] = ss[i]
+	def SASA(self, n_points=100, probe_radius=1.4):
+		''' Calculate Solvent Accessible Surface Area per residue '''
+		VDW = {
+			'H':  1.20, 'C':  1.70, 'N':  1.55, 'O':  1.52,
+			'S':  1.80, 'SE': 1.90, 'P':  1.80, 'F':  1.47,
+			'CL': 1.75, 'BR': 1.85, 'I':  1.98, 'FE': 1.80,
+			'ZN': 1.39, 'MG': 1.73, 'CA': 1.97, 'MN': 1.73,
+			'CU': 1.40, 'NI': 1.63}
+		DEFAULT_VDW = 2.00
+		atoms  = self.data['Atoms']
+		coords = self.data['Coordinates']
+		ids    = sorted(atoms.keys())
+		id_map = {ai: ii for ii, ai in enumerate(ids)}
+		n      = len(ids)
+		c      = coords[np.array(ids)]
+		radii  = np.array([
+			VDW.get(atoms[i][1].upper(), DEFAULT_VDW) + probe_radius
+			for i in ids])
+		golden = (1 + np.sqrt(5)) / 2
+		pts    = np.arange(n_points)
+		theta  = np.arccos(1 - 2 * (pts + 0.5) / n_points)
+		phi    = 2 * np.pi * pts / golden
+		sph    = np.column_stack([
+			np.sin(theta) * np.cos(phi),
+			np.sin(theta) * np.sin(phi),
+			np.cos(theta)])
+		dm  = np.sqrt(((c[:, None, :] - c[None, :, :])**2).sum(2))
+		atom_sasa = np.zeros(n)
+		for ii in range(n):
+			ri       = radii[ii]
+			test_pts = c[ii] + ri * sph
+			nbr_mask = (dm[ii] < ri + radii) & (dm[ii] > 0)
+			nbrs     = np.where(nbr_mask)[0]
+			if len(nbrs) == 0:
+				atom_sasa[ii] = 4 * np.pi * ri**2
+				continue
+			diff_pts = (test_pts[:, None, :] - c[nbrs][None, :, :])
+			dist_sq  = (diff_pts**2).sum(2)
+			r_sq     = radii[nbrs]**2
+			buried   = (dist_sq < r_sq[None, :]).any(axis=1)
+			n_exp    = int((~buried).sum())
+			atom_sasa[ii] = (n_exp / n_points * 4 * np.pi * ri**2)
+		for aa_idx, aa_info in self.data['Amino Acids'].items():
+			all_atoms = aa_info[2] + aa_info[3]
+			sasa = sum(atom_sasa[id_map[a]] for a in all_atoms if a in id_map)
+			self.data['Amino Acids'][aa_idx][6] = round(float(sasa), 5)

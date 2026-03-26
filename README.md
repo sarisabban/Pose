@@ -172,7 +172,8 @@ for idx, atom in p.data['Atoms'].items():
 | `p.SecondaryStructures()`               | Compile the secondary structure assignments as a list: H = α-helix, G = 3₁₀-helix, I = π-helix, E = β-strand, B = β-bridge, T = Turn, S = Bend, L = Loop |
 | `p.Rg()`                                | Compute Radius of gyration (Å) |
 | `p.Gasteiger()`                         | Compute Gasteiger-Marsili partial charges for every atom and store them in `p.data['Atoms'][i][2]`. Use `iterations=` to control convergence (default 6) |
-| `p.DSSP()`                              | Compute the secondary structure for every amino acid and store them in `p.data['Amino Acids'][i][4]`
+| `p.DSSP()`                              | Compute the secondary structure for every amino acid and store them in `p.data['Amino Acids'][i][4]` |
+| `p.SASA()`                              | Compute the Solvent Accessible Surface Area (SASA) for each amino acid, and add the value to `p.data['Amino Acids'][i][6]` |
 
 ### Manipulation
 
