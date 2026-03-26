@@ -109,7 +109,7 @@ p.Distance(0, 'N', 1, 'CA')  # N of residue 0 to CA of residue 1
 ```python
 p.data['FASTA']              # sequence string
 p.data['Size']               # number of residues (int)
-p.data['Amino Acids'][0]     # [letter, chain, bb_indices, sc_indices, secondary structure, tricode]
+p.data['Amino Acids'][0]     # [letter, chain, bb_indices, sc_indices, secondary structure, tricode, SASA]
 p.data['Atoms'][0]           # [pdb_name, element, charge, temp_factor]
 p.data['Coordinates']        # numpy array, shape (N, 3)
 p.data['Bonds']              # adjacency list: {atom_index: [bonded_atom_indices]}
@@ -118,7 +118,7 @@ p.data['Bonds']              # adjacency list: {atom_index: [bonded_atom_indices
 Iterating over residues and atoms:
 ```python
 for idx, aa in p.data['Amino Acids'].items():
-    symbol, chain, bb, sc, ss, tricode = aa
+    symbol, chain, bb, sc, ss, tricode, sasa = aa
     print(f'Residue {idx}: {tricode} ({symbol}), SS={ss}')
 
 for idx, atom in p.data['Atoms'].items():
@@ -376,7 +376,7 @@ All 26 canonical/non-canonical entries were generated this way.
 | `Mass`        | Float       | Mass in Daltons |
 | `Size`        | Integer     | Number of residues |
 | `FASTA`       | String      | One-letter sequence |
-| `Amino Acids` | Dict        | `{index: [symbol, chain, bb_atom_indices, sc_atom_indices, secondary_struct, tricode]}`, **zero-based** |
+| `Amino Acids` | Dict        | `{index: [symbol, chain, bb_atom_indices, sc_atom_indices, secondary_struct, tricode, SASA]}`, **zero-based** |
 | `Atoms`       | Dict        | `{atom_index: [pdb_name, element, partial charge, temp_factor]}`, **zero-based** |
 | `Bonds`       | Dict        | Bond graph as adjacency list: `{atom_index: [bonded_atom_indices]}` |
 | `Coordinates` | NumPy array | Shape `(N, 3)`, Cartesian XYZ for each atom |

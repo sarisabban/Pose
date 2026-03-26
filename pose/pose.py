@@ -279,7 +279,7 @@ class Pose():
 				SCi.append(atomi)
 		tri = self.AminoAcids[AA.upper()]['Tricode']
 		if LD: tri = 'D' + tri[1:]
-		self.data['Amino Acids'][AA_index] = [AA, chain, BBi, SCi, 'L', tri]
+		self.data['Amino Acids'][AA_index] = [AA, chain, BBi, SCi, 'L', tri, 0]
 	def BondTree_fused(self, BB, SC):
 		''' Construct bond graph for when a sidechain is fused to a backbone '''
 		BBb = copy.deepcopy(self.AminoAcids[BB]['Bonds'])
@@ -972,8 +972,9 @@ class Pose():
 			tricode = amino
 			amino = [k for k, v in self.AminoAcids.items() \
 			if v['Tricode'] == amino][0]
-			Aminos[k] = [amino, chain, BB, SC, 'L', tricode]
+			Aminos[k] = [amino, chain, BB, SC, 'L', tricode, 0]
 		Coordinates = np.array(Coordinates)
+		Aminos = {i: v for i, v in enumerate(Aminos.values())}
 		self.data['Coordinates'] = Coordinates
 		self.data['Amino Acids'] = Aminos
 		self.data['Atoms'] = Atoms
@@ -1070,7 +1071,7 @@ class Pose():
 			self.data['Coordinates'] = self.data['Coordinates'] * [1, 1, -1]
 			for i in range(len(sequence)):
 				Daa = self.data['Amino Acids'][i][0].lower()
-				tri = 'D' + self.data['Amino Acids'][i][-1][1:]
+				tri = 'D' + self.data['Amino Acids'][i][5][1:]
 				self.data['Amino Acids'][i][0] = Daa
 				self.data['Amino Acids'][i][-1] = tri
 	def Gasteiger(self, iterations=6):
