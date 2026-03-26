@@ -1,4 +1,4 @@
-import re, json, os
+import re, json, os, math
 import numpy as np
 from collections import defaultdict, deque
 
@@ -460,3 +460,145 @@ def RMSD(pose1, pose2, alg='align'):
 			diff = P - (Q @ R)
 			rmsd = np.sqrt(np.mean((diff**2).sum(axis=1)))
 	return(round(float(rmsd), 5))
+
+def BLAST(seq1, seq2):
+	'''
+	Pairwise protein sequence alignment using Smith-Waterman
+	(BLOSUM62, gap open=11, gap extend=1) with Karlin-Altschul
+	E-value statistics.
+
+	Parameters
+	----------
+	pose1 : Pose  First protein pose.
+	pose2 : Pose  Second protein pose.
+
+	Returns
+	-------
+	tuple : (alignment_string, percent_identity, e_value)
+	    alignment_string : str   alignment in BLAST-like format
+	    percent_identity : float percentage of identical residues
+	    e_value          : float Karlin-Altschul expect value
+	'''
+	seq1 = seq1.upper()
+	seq2 = seq2.upper()
+	m, n = len(seq1), len(seq2)
+	# BLOSUM62 rows ordered by ARNDCQEGHILKMFPSTWYV
+	_aa  = 'ARNDCQEGHILKMFPSTWYV'
+	_bm  = [
+		[ 4,-1,-2,-2, 0,-1,-1, 0,-2,-1,-1,-1,-1,-2,-1, 1, 0,-3,-2, 0],
+		[-1, 5, 0,-2,-3, 1, 0,-2, 0,-3,-2, 2,-1,-3,-2,-1,-1,-3,-2,-3],
+		[-2, 0, 6, 1,-3, 0, 0, 0, 1,-3,-3, 0,-2,-3,-2, 1, 0,-4,-2,-3],
+		[-2,-2, 1, 6,-3, 0, 2,-1,-1,-3,-4,-1,-3,-3,-1, 0,-1,-4,-3,-3],
+		[ 0,-3,-3,-3, 9,-3,-4,-3,-3,-1,-1,-3,-1,-2,-3,-1,-1,-2,-2,-1],
+		[-1, 1, 0, 0,-3, 5, 2,-2, 0,-3,-2, 1, 0,-3,-1, 0,-1,-2,-1,-2],
+		[-1, 0, 0, 2,-4, 2, 5,-2, 0,-3,-3, 1,-2,-3,-1, 0,-1,-3,-2,-2],
+		[ 0,-2, 0,-1,-3,-2,-2, 6,-2,-4,-4,-2,-3,-3,-2, 0,-2,-2,-3,-3],
+		[-2, 0, 1,-1,-3, 0, 0,-2, 8,-3,-3,-1,-2,-1,-2,-1,-2,-2, 2,-3],
+		[-1,-3,-3,-3,-1,-3,-3,-4,-3, 4, 2,-3, 1, 0,-3,-2,-1,-3,-1, 3],
+		[-1,-2,-3,-4,-1,-2,-3,-4,-3, 2, 4,-2, 2, 0,-3,-2,-1,-2,-1, 1],
+		[-1, 2, 0,-1,-3, 1, 1,-2,-1,-3,-2, 5,-1,-3,-1, 0,-1,-3,-2,-2],
+		[-1,-1,-2,-3,-1, 0,-2,-3,-2, 1, 2,-1, 5, 0,-2,-1,-1,-1,-1, 1],
+		[-2,-3,-3,-3,-2,-3,-3,-3,-1, 0, 0,-3, 0, 6,-4,-2,-2, 1, 3,-1],
+		[-1,-2,-2,-1,-3,-1,-1,-2,-2,-3,-3,-1,-2,-4, 7,-1,-1,-4,-3,-2],
+		[ 1,-1, 1, 0,-1, 0, 0, 0,-1,-2,-2, 0,-1,-2,-1, 4, 1,-3,-2,-2],
+		[ 0,-1, 0,-1,-1,-1,-1,-2,-2,-1,-1,-1,-1,-2,-1, 1, 5,-3,-2, 0],
+		[-3,-3,-4,-4,-2,-2,-3,-2,-2,-3,-2,-3,-1, 1,-4,-3,-3,11, 2,-3],
+		[-2,-2,-2,-3,-2,-1,-2,-3, 2,-1,-1,-2,-1, 3,-3,-2,-2, 2, 7,-1],
+		[ 0,-3,-3,-3,-1,-2,-2,-3,-3, 3, 1,-2, 1,-1,-2,-2, 0,-3,-1, 4],
+	]
+	_idx = {c: i for i, c in enumerate(_aa)}
+	def blosum(a, b):
+		ia, ib = _idx.get(a, -1), _idx.get(b, -1)
+		if ia < 0 or ib < 0:
+			return(0 if a == b else -1)
+		return(_bm[ia][ib])
+	# Affine gap penalties (NCBI BLASTP defaults for BLOSUM62)
+	go, ge = 11, 1
+	INF    = float('-inf')
+	# Smith-Waterman DP with affine gaps
+	H  = np.zeros((m+1, n+1))
+	E  = np.full((m+1, n+1), INF)
+	F  = np.full((m+1, n+1), INF)
+	tb = np.zeros((m+1, n+1), dtype=np.int8)
+	best, bi, bj = 0.0, 0, 0
+	for i in range(1, m+1):
+		for j in range(1, n+1):
+			s       = blosum(seq1[i-1], seq2[j-1])
+			diag    = H[i-1, j-1] + s
+			E[i, j] = max(
+				H[i, j-1] - go - ge, E[i, j-1] - ge)
+			F[i, j] = max(
+				H[i-1, j] - go - ge, F[i-1, j] - ge)
+			h       = max(0.0, diag, E[i, j], F[i, j])
+			H[i, j] = h
+			if h > best:
+				best, bi, bj = h, i, j
+			if   h == 0:       tb[i, j] = 0
+			elif h == diag:    tb[i, j] = 1
+			elif h == F[i, j]: tb[i, j] = 2
+			else:              tb[i, j] = 3
+	if best == 0:
+		raise Exception('No alignment found between the sequences')
+	# Traceback from the highest-scoring cell
+	aq, as_ = [], []
+	i, j    = bi, bj
+	while i > 0 and j > 0 and H[i, j] > 0:
+		t = int(tb[i, j])
+		if t == 1:
+			aq.append(seq1[i-1]); as_.append(seq2[j-1])
+			i -= 1; j -= 1
+		elif t == 2:
+			aq.append(seq1[i-1]); as_.append('-')
+			i -= 1
+		else:
+			aq.append('-'); as_.append(seq2[j-1])
+			j -= 1
+	aq  = ''.join(reversed(aq))
+	as_ = ''.join(reversed(as_))
+	qs, ss  = i + 1, j + 1
+	aln_len = len(aq)
+	n_id = sum(
+		1 for a, b in zip(aq, as_) if a == b and a != '-')
+	n_pos = sum(
+		1 for a, b in zip(aq, as_)
+		if a != '-' and b != '-' and blosum(a, b) > 0)
+	n_gap   = aq.count('-') + as_.count('-')
+	pct     = round(n_id / aln_len * 100, 2)
+	# Karlin-Altschul E-value (BLOSUM62, gap_open=11, gap_extend=1)
+	lam, K  = 0.270, 0.041
+	e_value = K * m * n * math.exp(-lam * best)
+	bits    = (lam * best - math.log(K)) / math.log(2)
+	# Match symbol line
+	mid = ''
+	for a, b in zip(aq, as_):
+		if   a == '-' or b == '-': mid += ' '
+		elif a == b:               mid += '|'
+		elif blosum(a, b) > 0:    mid += '+'
+		else:                      mid += ' '
+	pct_pos = round(n_pos / aln_len * 100, 1)
+	pct_gap = round(n_gap / aln_len * 100, 1)
+	out = [
+		f'Query length={m}  Subject length={n}',
+		'',
+		(f'Score: {bits:.1f} bits ({int(best)}), '
+			f'E-value: {e_value:.3e}'),
+		(f'Identities: {n_id}/{aln_len} ({pct}%), '
+			f'Positives: {n_pos}/{aln_len} ({pct_pos}%), '
+			f'Gaps: {n_gap}/{aln_len} ({pct_gap}%)'),
+		'',]
+	w = 60
+	qp, sp = qs, ss
+	for st in range(0, aln_len, w):
+		bq = aq[st:st+w]
+		bm = mid[st:st+w]
+		bs = as_[st:st+w]
+		qr = len(bq) - bq.count('-')
+		sr = len(bs) - bs.count('-')
+		out += [
+			f'Query  {qp:>6}  {bq}  {qp+qr-1}',
+			f'       {"":>6}  {bm}',
+			f'Sbjct  {sp:>6}  {bs}  {sp+sr-1}',
+			'',]
+		qp += qr
+		sp += sr
+	return('\n'.join(out), pct, e_value)
