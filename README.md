@@ -377,8 +377,8 @@ All 26 canonical/non-canonical entries were generated this way.
 | `Mass`        | Float       | Mass in Daltons |
 | `Size`        | Integer     | Number of residues |
 | `FASTA`       | String      | One-letter sequence |
-| `Amino Acids` | Dict        | `{index: [symbol, chain, bb_atom_indices, sc_atom_indices, secondary_struct, tricode, SASA]}`, **zero-based** |
-| `Atoms`       | Dict        | `{atom_index: [pdb_name, element, partial charge, temp_factor]}`, **zero-based** |
+| `Amino Acids` | Dict        | `{index: [symbol, chain, bb_atom_indices, sc_atom_indices, secondary_struct, tricode, SASA]}`, **zero-based indexing** |
+| `Atoms`       | Dict        | `{atom_index: [pdb_name, element, partial charge, temp_factor]}`, **zero-based indexing** |
 | `Bonds`       | Dict        | Bond graph as adjacency list: `{atom_index: [bonded_atom_indices]}` |
 | `Coordinates` | NumPy array | Shape `(N, 3)`, Cartesian XYZ for each atom |
 
