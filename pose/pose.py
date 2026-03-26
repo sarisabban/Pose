@@ -38,12 +38,13 @@ class Pose():
 			'At':209.987, 'Rn':222.081, 'Fr':223.020, 'Ra':226.025,
 			'Ac':227.028, 'Th':232.038, 'Pa':231.036, 'U':238.029,
 			'Np':237,     'Pu':244}
-		data ={
+		data = {
 			'Energy':0,
 			'Rg':0,
 			'Mass':0,
 			'Size':0,
 			'FASTA':None,
+			'SS':None,
 			'Amino Acids':{},
 			'Atoms':{},
 			'Bonds':{},
@@ -75,7 +76,7 @@ class Pose():
 		Z = '{:>8.3f} '.format(z)
 		O = '{:>5.2f} '.format(o)
 		T = ('{:>5.2f} '.format(t))[:6]
-		Q = '{:>9.3f} '.format(q)
+		Q = '{:>10}'.format('')
 		E = '{:<2} \n'.format(e)
 		entry = ATOM + N + A + L + R + C + S + I + X + Y + Z + O + T + Q + E
 		return(entry)
@@ -373,8 +374,7 @@ class Pose():
 		''' Return FASTA sequence of peptide as a string '''
 		AAs = self.data['Amino Acids']
 		AAs = [x[0] for x in AAs.values()]
-		FASTA = ''.join(AAs)
-		return(FASTA)
+		return(AAs)
 	def SecondaryStructures(self):
 		''' Return secondary strucutre of each amino acid of the peptide '''
 		SS = [x[4] for x in self.data['Amino Acids'].values()]
@@ -531,7 +531,8 @@ class Pose():
 					self.Atoms(aa, chain, AAs, 4, i, I, LD=LD)
 					self.BondTree('Backbone middle', aa)
 		self.data['Mass'] = self.Mass()
-		self.data['FASTA'] = self.FASTA()
+		self.data['FASTA'] = ''.join(self.FASTA())
+		self.data['SS'] = ''.join(self.SecondaryStructures())
 		self.data['Size'] = self.Size()
 		self.data['Rg'] = self.Rg()
 	def Adjust(self, AA1, atom1, AA2, atom2, length):
@@ -829,7 +830,7 @@ class Pose():
 		return(B)
 	def Mutate(self, index, AA):
 		''' Mutate an amino acid to a different amino acid '''
-		sequence_old = self.FASTA()
+		sequence_old = ''.join(self.FASTA())
 		sequence = sequence_old[:index] + AA + sequence_old[index+1:]
 		self.ReBuild(sequence)
 	def Import(self, filename, chain='A'):
@@ -976,7 +977,7 @@ class Pose():
 		self.data['Coordinates'] = Coordinates
 		self.data['Amino Acids'] = Aminos
 		self.data['Atoms'] = Atoms
-		sequence = self.FASTA()
+		sequence = ''.join(self.FASTA())
 		for i, aa in enumerate(list(sequence)):
 			if i == 0:
 				self.BondTree('Backbone start', aa)
@@ -985,7 +986,8 @@ class Pose():
 			else:
 				self.BondTree('Backbone middle', aa)
 		self.data['Mass'] = self.Mass()
-		self.data['FASTA'] = self.FASTA()
+		self.data['FASTA'] = ''.join(self.FASTA())
+		self.data['SS'] = ''.join(self.SecondaryStructures())
 		self.data['Size'] = self.Size()
 		self.data['Rg'] = self.Rg()
 	def ReBuild(self, sequence=None, D_AA=False):
@@ -1026,6 +1028,7 @@ class Pose():
 			'Mass':0,
 			'Size':0,
 			'FASTA':None,
+			'SS':None,
 			'Amino Acids':{},
 			'Atoms':{},
 			'Bonds':{},
@@ -1057,9 +1060,12 @@ class Pose():
 					self.Rotate(i, c, 'CHI', ii+1)
 			except: continue
 		self.data['Mass'] = self.Mass()
-		self.data['FASTA'] = self.FASTA()
+		self.data['FASTA'] = ''.join(self.FASTA())
+		self.data['SS'] = ''.join(self.SecondaryStructures())
 		self.data['Size'] = self.Size()
 		self.data['Rg'] = self.Rg()
+		self.Gasteiger()
+		self.DSSP()
 		if D_AA:
 			self.data['Coordinates'] = self.data['Coordinates'] * [1, 1, -1]
 			for i in range(len(sequence)):
@@ -1067,21 +1073,8 @@ class Pose():
 				tri = 'D' + self.data['Amino Acids'][i][-1][1:]
 				self.data['Amino Acids'][i][0] = Daa
 				self.data['Amino Acids'][i][-1] = tri
-
-
-
-
-
-
-
-
-
-
 	def Gasteiger(self, iterations=6):
-		''' Assign Gasteiger-Marsili partial charges to all atoms.
-		Bonds are inferred from coordinates so this works for both
-		Build() and Import() structures (with or without H atoms).
-		Updates self.data['Atoms'][i][2] in-place. '''
+		''' Calculate Gasteiger-Marsili partial charges to all atoms '''
 		PARAMS = {
 			'C3': (7.98,  9.18,  1.88),
 			'C2': (8.79,  9.32,  1.51),
@@ -1092,16 +1085,12 @@ class Pose():
 			'N3': (11.54, 10.82, 1.36),
 			'N2': (12.87, 11.15, 0.85),
 			'S':  (10.14,  9.13, 1.38),
-			'Se': (9.00,   8.00, 1.10),
-		}
+			'Se': (9.00,   8.00, 1.10)}
 		ids  = sorted(self.data['Atoms'].keys())
 		crds = self.data['Coordinates']
 		els  = [self.data['Atoms'][i][1].upper() for i in ids]
-		# Build pairwise distance matrix (vectorised)
-		c = crds[np.array(ids)]             # n x 3
-		dm = np.sqrt(
-			((c[:, None, :] - c[None, :, :]) ** 2).sum(2))
-		# Bond thresholds: H-heavy 1.3 Å, S/Se 2.1 Å, else 1.9 Å
+		c = crds[np.array(ids)]
+		dm = np.sqrt(((c[:, None, :] - c[None, :, :]) ** 2).sum(2))
 		heavy_thresh = np.full((len(ids), len(ids)), 1.9)
 		for ii, ei in enumerate(els):
 			for jj, ej in enumerate(els):
@@ -1110,13 +1099,11 @@ class Pose():
 				elif ei in ('S', 'SE') or ej in ('S', 'SE'):
 					heavy_thresh[ii, jj] = 2.1
 		bond_mask = (dm < heavy_thresh) & (dm > 0.0)
-		# Build neighbour lists keyed by global atom index
 		bonds = {i: [] for i in ids}
 		for ii, i in enumerate(ids):
 			for jj, j in enumerate(ids):
 				if bond_mask[ii, jj]:
 					bonds[i].append(j)
-		# Identify sp2 atoms: any heavy-heavy bond < 1.42 Å
 		sp2 = set()
 		for ii, i in enumerate(ids):
 			if els[ii] == 'H':
@@ -1144,8 +1131,7 @@ class Pose():
 				return 'O2' if isp2 else 'O3'
 			return 'C3'
 		charges = {i: self.data['Atoms'][i][2] for i in ids}
-		atype   = {i: PARAMS[_type(ii, i)]
-		           for ii, i in enumerate(ids)}
+		atype   = {i: PARAMS[_type(ii, i)] for ii, i in enumerate(ids)}
 		for n in range(iterations):
 			damp = 1.0 / (2 ** (n + 1))
 			chi = {}
@@ -1174,3 +1160,184 @@ class Pose():
 				charges[i] += delta[i]
 		for i in ids:
 			self.data['Atoms'][i][2] = round(charges[i], 4)
+	def DSSP(self):
+		''' Assign secondary structures using the DSSP algorithm '''
+		N = self.data['Size']
+		chains   = [
+			self.data['Amino Acids'][i][1] for i in range(N)]
+		tricodes = [
+			self.data['Amino Acids'][i][5].upper()
+			for i in range(N)]
+		H_pos = [None] * N
+		for i in range(N):
+			if 'PRO' in tricodes[i]:
+				continue
+			if i == 0 or chains[i] != chains[i - 1]:
+				continue
+			try:
+				H_pos[i] = self.GetAtom(i, '1H')
+				continue
+			except Exception:
+				pass
+			try:
+				H_pos[i] = self.GetAtom(i, 'H')
+				continue
+			except Exception:
+				pass
+			try:
+				Ni  = self.GetAtom(i, 'N')
+				Cp  = self.GetAtom(i - 1, 'C')
+				d   = Ni - Cp
+				nm  = np.linalg.norm(d)
+				if nm > 0.001:
+					H_pos[i] = Ni + (d / nm) * 1.01
+			except Exception:
+				pass
+		hbond = set()
+		for i in range(N):
+			if H_pos[i] is None:
+				continue
+			try:
+				Ni = self.GetAtom(i, 'N')
+			except Exception:
+				continue
+			Hi = H_pos[i]
+			for j in range(N):
+				if abs(i - j) <= 1:
+					continue
+				if chains[i] != chains[j]:
+					continue
+				try:
+					Cj = self.GetAtom(j, 'C')
+					Oj = self.GetAtom(j, 'O')
+				except Exception:
+					continue
+				r_ON = np.linalg.norm(Oj - Ni)
+				r_CH = np.linalg.norm(Cj - Hi)
+				r_OH = np.linalg.norm(Oj - Hi)
+				r_CN = np.linalg.norm(Cj - Ni)
+				if min(r_ON, r_CH, r_OH, r_CN) < 0.001:
+					continue
+				E = 0.084 * (
+					1/r_ON + 1/r_CH
+					- 1/r_OH - 1/r_CN) * 332
+				if E < -0.5:
+					hbond.add((i, j))
+		turn3 = [False] * N
+		turn4 = [False] * N
+		turn5 = [False] * N
+		for i in range(N):
+			if i + 3 < N and (i + 3, i) in hbond:
+				turn3[i] = True
+			if i + 4 < N and (i + 4, i) in hbond:
+				turn4[i] = True
+			if i + 5 < N and (i + 5, i) in hbond:
+				turn5[i] = True
+		ss = ['L'] * N
+		for i in range(N):
+			if turn3[i]:
+				for k in range(i, min(i + 4, N)):
+					if ss[k] == 'L':
+						ss[k] = 'T'
+			if turn4[i]:
+				for k in range(i, min(i + 5, N)):
+					if ss[k] == 'L':
+						ss[k] = 'T'
+			if turn5[i]:
+				for k in range(i, min(i + 6, N)):
+					if ss[k] == 'L':
+						ss[k] = 'T'
+		for i in range(N - 1):
+			if turn5[i] and turn5[i + 1]:
+				for k in range(i + 1, min(i + 6, N)):
+					if ss[k] not in ('H', 'E', 'B'):
+						ss[k] = 'I'
+		for i in range(N - 1):
+			if turn4[i] and turn4[i + 1]:
+				for k in range(i + 1, min(i + 5, N)):
+					if ss[k] != 'I':
+						ss[k] = 'H'
+		for i in range(N - 1):
+			if turn3[i] and turn3[i + 1]:
+				for k in range(i + 1, min(i + 4, N)):
+					if ss[k] not in ('H', 'E', 'B'):
+						ss[k] = 'G'
+		bridge = [None] * N
+		for i in range(1, N - 1):
+			for k in range(i + 2, N - 1):
+				if chains[i] != chains[k]:
+					continue
+				ap = (
+					((i, k) in hbond
+					and (k, i) in hbond)
+					or (i > 0 and k < N - 1
+					and (i - 1, k + 1) in hbond
+					and (k - 1, i + 1) in hbond))
+				pp = (
+					(i > 0 and k < N - 1
+					and (i - 1, k) in hbond
+					and (k, i + 1) in hbond)
+					or (k > 0 and i < N - 1
+					and (k - 1, i) in hbond
+					and (i, k + 1) in hbond))
+				if ap or pp:
+					if bridge[i] is None:
+						bridge[i] = k
+					if bridge[k] is None:
+						bridge[k] = i
+		for i in range(N):
+			if bridge[i] is not None:
+				if ss[i] not in ('H', 'G', 'I'):
+					ss[i] = 'B'
+		for i in range(N - 1):
+			if ss[i] == 'B' and ss[i + 1] == 'B':
+				k1 = bridge[i]
+				k2 = bridge[i + 1]
+				if k1 is not None and k2 is not None:
+					if abs(k1 - k2) == 1:
+						ss[i]  = 'E'
+						ss[i + 1] = 'E'
+						if ss[k1] not in ('H', 'G', 'I'):
+							ss[k1] = 'E'
+						if ss[k2] not in ('H', 'G', 'I'):
+							ss[k2] = 'E'
+		for i in range(2, N - 2):
+			if ss[i] != 'L':
+				continue
+			try:
+				m2 = self.GetAtom(i - 2, 'CA')
+				ci = self.GetAtom(i,     'CA')
+				p2 = self.GetAtom(i + 2, 'CA')
+			except Exception:
+				continue
+			v1   = ci - m2
+			v2   = p2 - ci
+			n1   = np.linalg.norm(v1)
+			n2   = np.linalg.norm(v2)
+			if n1 < 0.001 or n2 < 0.001:
+				continue
+			cos_k = np.dot(v1, v2) / (n1 * n2)
+			cos_k = max(-1.0, min(1.0, cos_k))
+			kappa = math.acos(cos_k) * 180.0 / math.pi
+			if kappa >= 70.0:
+				ss[i] = 'S'
+		PHI_LO, PHI_HI = -104.0, -46.0
+		PSI_LO, PSI_HI =  116.0, 174.0
+		ppii = [False] * N
+		for i in range(N):
+			if ss[i] != 'L':
+				continue
+			try:
+				phi = self.Angle(i, 'PHI')
+				psi = self.Angle(i, 'PSI')
+			except Exception:
+				continue
+			if PHI_LO <= phi <= PHI_HI and PSI_LO <= psi <= PSI_HI:
+				ppii[i] = True
+		for i in range(N - 2):
+			if ppii[i] and ppii[i + 1] and ppii[i + 2]:
+				for k in range(i, i + 3):
+					if ss[k] == 'L':
+						ss[k] = 'P'
+		for i in range(N):
+			self.data['Amino Acids'][i][4] = ss[i]

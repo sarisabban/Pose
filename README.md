@@ -154,9 +154,9 @@ for idx, atom in p.data['Atoms'].items():
 |----------------------------------|-------------|
 | `Pose()`                         | Construct a new Pose object |
 | `p.Build('SYKDLEGKVKSVLESNRGI')` | Build a polypeptide from a one-letter sequence. Uppercase = L-amino acids, lowercase = D-amino acids |
-| `p.Import('1YN3.cif', chain='A')`| Load a structure from a PDB or mmCIF file (specific chain). If no hydrogens are present they will not be added, use `ReBuild()` afterwards to add them. Cannot load structures with broken/non-continuous chains |
+| `p.Import('1YN3.cif', chain='A')`| Load a structure from a PDB or mmCIF file (specific chain). It is best to use ReBuild() after importing a structure to optimise it. Cannot load structures with broken/non-continuous chains |
+| `p.ReBuild()`                    | Rebuild the polypeptide as a primary structure then refold it using current angles and bond lengths. Best to use right after Import(). Use `D_AA=True` to rebuild entirely in D-amino acids. Will add missing hydrogens, calculate each atom's partial charge, as well as each amino acid's secondary structure |
 | `p.Export('out.pdb')`            | Write the polypeptide to a PDB or mmCIF file |
-| `p.ReBuild()`                    | Rebuild the polypeptide as a primary structure then refold it using current angles and bond lengths. Use `D_AA=True` to rebuild entirely in D-amino acids |
 
 ### Measurements
 
@@ -166,10 +166,13 @@ for idx, atom in p.data['Atoms'].items():
 | `p.Angle(2, 'PHI')`                     | Get PHI, PSI, or OMEGA angle of a residue. Example: PHI of residue 2 |
 | `p.Angle(2, 'chi', 1)`                  | Get CHI 1–4 angle. Example: CHI 1 of residue 2 |
 | `p.Atom3Angle(0, 'N', 0, 'CA', 0, 'C')` | Angle between any three atoms. Example: N–CA–C angle of residue 0 |
-| `p.Rg()`                                | Radius of gyration (Å) |
-| `p.Mass()`                              | Molecular mass (Daltons) |
-| `p.Size()`                              | Number of residues |
-| `p.FASTA()`                             | One-letter sequence string |
+| `p.Mass()`                              | Calculates the molecular mass of a peptide (Daltons) |
+| `p.Size()`                              | Calculates the number of residues in a peptide (length of peptide)|
+| `p.FASTA()`                             | Compile the FASTA sequence of a peptide as a list |
+| `p.SecondaryStructures()`               | Compile the secondary structure assignments as a list: H = α-helix, G = 3₁₀-helix, I = π-helix, E = β-strand, B = β-bridge, T = Turn, S = Bend, L = Loop |
+| `p.Rg()`                                | Compute Radius of gyration (Å) |
+| `p.Gasteiger()`                         | Compute Gasteiger-Marsili partial charges for every atom and store them in `p.data['Atoms'][i][2]`. Use `iterations=` to control convergence (default 6) |
+| `p.DSSP()`                              | Compute the secondary structure for every amino acid and store them in `p.data['Amino Acids'][i][4]`
 
 ### Manipulation
 
@@ -190,8 +193,9 @@ for idx, atom in p.data['Atoms'].items():
 | `p.AtomList(PDB=True)`    | List of all atom names. Use `PDB=True` for PDB-formatted names |
 | `p.Identify(3, 'atom')`   | Identify what type an atom index belongs to. Use `q=True` for charge. Use `'residue'` or `'amino acid'` to look up by residue index |
 | `p.GetBondAtoms(0, 1)`    | PDB name and element for both atoms of a bond by atom indices |
-| `p.SecondaryStructures()` | List of secondary structure assignments: H=Helix, S=Sheet, L=Loop |
-| `print(p.data)`           | Print the full data dictionary |
+| `print(p.data)`           | Print the full data JSON |
+
+You can also inspect the p.data JSON object and extract relevent info using `print(p.data['FASTA'])` or `p.data['Atoms']`.
 
 ### Structure Alignment and Comparison
 
@@ -397,12 +401,11 @@ Contributions are welcome! Open an issue or pull request on GitHub.
 
 These are functions that would make valuable additions to the library:
 
-1. **Moderate**: Calculating Gasteiger partial charges for each atom
-2. **Moderate**: Find all H-bonds
-3. **Moderate**: Calculate DSSP for each amino acid
-4. **Hard**: SASA calculation for each amino acid
-5. **Hard**: Pocket and void calculation
-6. **Hard**: AMBER energy function or general input and structure minimisation
+1. **Moderate**: Find all H-bonds
+2. **Moderate**: Calculate DSSP for each amino acid
+3. **Hard**: SASA calculation for each amino acid
+4. **Hard**: Pocket and void calculation
+5. **Hard**: AMBER energy function or general input and structure minimisation
 
 Please follow the existing code style: tabs for indentation, 80 characters max line length.
 
