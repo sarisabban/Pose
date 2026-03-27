@@ -54,13 +54,7 @@ class Pose():
 		self.data = data
 	def isfused(self, SC):
 		''' Check if an amino acid's sidechain is fused to the backbone '''
-		path, modulename = os.path.split(__file__)
-		with open(f'{path}/AminoAcids.json') as f:
-			AminoAcids = json.load(f)
-			if AminoAcids[SC.upper()]['Fused'] == True:
-				return(True)
-			else:
-				return(False)
+		return self.AminoAcids[SC.upper()]['Fused']
 	def PDB_entry(self, atom, n, a, l, r, c, s, i, x, y, z, o, t, q, e):
 		''' Construct a PDB atom data row '''
 		ATOM = '{:<6}'.format(atom)
@@ -79,7 +73,7 @@ class Pose():
 		Q = '{:>10}'.format('')
 		E = '{:<2} \n'.format(e)
 		entry = ATOM + N + A + L + R + C + S + I + X + Y + Z + O + T + Q + E
-		return(entry)
+		return entry
 	def CIF_entry(self, atom, n, a, l, r, c,
 		label_seq, x, y, z, o, t, q, e):
 		''' Construct a mmCIF _atom_site data row '''
@@ -92,9 +86,25 @@ class Pose():
 			'{:.3f}'.format(z),
 			'{:.2f}'.format(o), '{:.2f}'.format(t),
 			charge,
-			str(label_seq), r, c, a, '1'
-		]
-		return(' '.join(fields) + '\n')
+			str(label_seq), r, c, a, '1']
+		return ' '.join(fields) + '\n'
+	def atom_residue_iter(self):
+		''' Yield (atom_item, coordinate, AAindex) for every atom '''
+		AAs    = self.data['Amino Acids']
+		AAidx  = 0
+		length = len(AAs[AAidx][2]) + len(AAs[AAidx][3]) - 1
+		for atom, coord in zip(
+				self.data['Atoms'].items(),
+				self.data['Coordinates']):
+			yield atom, coord, AAidx
+			if length:
+				length -= 1
+			else:
+				AAidx += 1
+				try:
+					length = (len(AAs[AAidx][2]) + len(AAs[AAidx][3]) - 1)
+				except (KeyError, IndexError):
+					pass
 	def Export(self, filename):
 		''' Export pose to a .pdb or .cif file '''
 		if filename[-3:].upper() == 'PDB':
@@ -108,45 +118,16 @@ class Pose():
 				f.write(H1)
 				f.write(H2)
 				f.write(H3)
-				atoms = self.data['Atoms'].items()
-				aminoacids = self.data['Amino Acids']
-				coordinates = self.data['Coordinates']
-				AAindex = 0
-				BBlen = len(self.data['Amino Acids'][AAindex][2])
-				SClen = len(self.data['Amino Acids'][AAindex][3])
-				length = BBlen + SClen - 1
-				for atom, coordinate in zip(atoms, coordinates):
-					A = 'ATOM'
-					n = atom[0] + 1
-					a = atom[1][0]
-					l = ''
-					r = self.data['Amino Acids'][AAindex][5]
-					c = self.data['Amino Acids'][AAindex][1]
-					s = AAindex + 1
-					i = ''
-					x = coordinate[0]
-					y = coordinate[1]
-					z = coordinate[2]
-					o = 1.0
-					t = atom[1][3]
-					q = atom[1][2]
-					e = atom[1][1]
-					line = self.PDB_entry(A,n,a,l,r,c,s,i,x,y,z,o,t,q,e)
+				AAs = self.data['Amino Acids']
+				for atom, coord, AAidx in self.atom_residue_iter():
+					line = self.PDB_entry(
+						'ATOM', atom[0]+1, atom[1][0], '',
+						AAs[AAidx][5], AAs[AAidx][1],
+						AAidx+1, '',
+						coord[0], coord[1], coord[2],
+						1.0, atom[1][3], atom[1][2], atom[1][1])
 					f.write(line)
-					if length != 0:
-						length -= 1
-					elif length == 0:
-						AAindex += 1
-						try:
-							BBlen = len(
-								self.data['Amino Acids'][AAindex][2])
-							SClen = len(
-								self.data['Amino Acids'][AAindex][3])
-							length = BBlen + SClen - 1
-						except:
-							continue
-				TER = 'TER'
-				f.write(TER)
+				f.write('TER')
 		elif filename[-3:].upper() == 'CIF':
 			with open(filename, 'w') as f:
 				f.write('data_POSE\n#\n')
@@ -174,42 +155,15 @@ class Pose():
 					'_atom_site.auth_atom_id',
 					'_atom_site.pdbx_PDB_model_num']
 				for col in cols: f.write(col + '\n')
-				atoms = self.data['Atoms'].items()
-				coordinates = self.data['Coordinates']
-				AAindex = 0
-				BBlen = len(self.data['Amino Acids'][AAindex][2])
-				SClen = len(self.data['Amino Acids'][AAindex][3])
-				length = BBlen + SClen - 1
-				for atom, coordinate in zip(atoms, coordinates):
-					A = 'ATOM'
-					n = atom[0] + 1
-					a = atom[1][0]
-					l = ''
-					r = self.data['Amino Acids'][AAindex][5]
-					c = self.data['Amino Acids'][AAindex][1]
-					x = coordinate[0]
-					y = coordinate[1]
-					z = coordinate[2]
-					o = 1.0
-					t = atom[1][3]
-					q = atom[1][2]
-					e = atom[1][1]
+				AAs = self.data['Amino Acids']
+				for atom, coord, AAidx in self.atom_residue_iter():
 					line = self.CIF_entry(
-						A, n, a, l, r, c,
-						AAindex+1, x, y, z, o, t, q, e)
+						'ATOM', atom[0]+1, atom[1][0], '',
+						AAs[AAidx][5], AAs[AAidx][1],
+						AAidx+1,
+						coord[0], coord[1], coord[2],
+						1.0, atom[1][3], atom[1][2], atom[1][1])
 					f.write(line)
-					if length != 0:
-						length -= 1
-					elif length == 0:
-						AAindex += 1
-						try:
-							BBlen = len(
-								self.data['Amino Acids'][AAindex][2])
-							SClen = len(
-								self.data['Amino Acids'][AAindex][3])
-							length = BBlen + SClen - 1
-						except:
-							continue
 				f.write('#\n')
 	def GetAtom(self, AA, atom):
 		''' Get specific atom coordinates '''
@@ -223,13 +177,13 @@ class Pose():
 			A = self.data['Atoms'][i][0]
 			if A == atom:
 				coordinates = self.data['Coordinates'][i]
-				return(coordinates)
+				return coordinates
 		raise Exception(f'Amino acid does not have the {atom} atom')
 	def Insert(self, AA, X, Y, Z):
 		''' Inser a backbone or sidechain given its initial coordinates '''
 		if len(AA) == 1: AA = AA.upper()
 		atoms = np.array(self.AminoAcids[AA]['Vectors']) + np.array([X, Y, Z])
-		return(atoms)
+		return atoms
 	def Flip(self, AA):
 		''' Flip an amino acid 180 degrees on CA's H1 H2 axis'''
 		p = AA[2]
@@ -245,11 +199,11 @@ class Pose():
 		[2*u[0]*u[2], 2*u[2]*u[2], 2*u[2]**2-1]])
 		AA = np.matmul(AA, TM)
 		AA = AA + p
-		return(AA)
+		return AA
 	def LD(self, AA):
 		''' Convert an amino acid between L and D chirality '''
 		AA = AA * [1, 1, -1]
-		return(AA)
+		return AA
 	def Amino(self, backbone_type, X, Y, Z, aa, index, flip=False, LD=False):
 		''' Construct an amino acid and add its coordinates to the data '''
 		BB = self.Insert(backbone_type, X, Y, Z)
@@ -282,10 +236,10 @@ class Pose():
 		self.data['Amino Acids'][AA_index] = [AA, chain, BBi, SCi, 'L', tri, 0]
 	def BondTree_fused(self, BB, SC):
 		''' Construct bond graph for when a sidechain is fused to a backbone '''
-		BBb = copy.deepcopy(self.AminoAcids[BB]['Bonds'])
-		SCb = copy.deepcopy(self.AminoAcids[SC]['Bonds'])
-		for key in list(BBb.keys()): BBb[int(key)] = BBb.pop(key)
-		for key in list(SCb.keys()): SCb[int(key)] = SCb.pop(key)
+		BBb = {int(k): v for k, v in
+			copy.deepcopy(self.AminoAcids[BB]['Bonds']).items()}
+		SCb = {int(k): v for k, v in
+			copy.deepcopy(self.AminoAcids[SC]['Bonds']).items()}
 		length = len(SCb)
 		BBb.pop(1)
 		nBBb = {}
@@ -320,17 +274,17 @@ class Pose():
 			if i == n+2: v.append(n)
 			BBb[k] = v
 			BBb[k] = sorted(BBb[k])
-		return(BBb)
+		return BBb
 	def BondTree_AA(self, BB, SC):
 		''' Construct amino acid bond graph by adding sidechain to backbone '''
 		SC = SC.upper()
 		if self.isfused(SC):
 			BBb = self.BondTree_fused(BB, SC)
-			return(BBb)
-		BBb = copy.deepcopy(self.AminoAcids[BB]['Bonds'])
-		SCb = copy.deepcopy(self.AminoAcids[SC]['Bonds'])
-		for key in list(BBb.keys()): BBb[int(key)] = BBb.pop(key)
-		for key in list(SCb.keys()): SCb[int(key)] = SCb.pop(key)
+			return BBb
+		BBb = {int(k): v for k, v in
+			copy.deepcopy(self.AminoAcids[BB]['Bonds']).items()}
+		SCb = {int(k): v for k, v in
+			copy.deepcopy(self.AminoAcids[SC]['Bonds']).items()}
 		length = len(SCb)
 		if BB == 'Backbone' or BB == 'Backbone start':
 			n = 4
@@ -347,12 +301,14 @@ class Pose():
 		BBb[n].append(n + 2 + length)
 		for i, (k, v) in enumerate(zip(SCb.keys(), SCb.values()), start=n+2):
 			k = i
-			if length != 1: v = [x+n+2 for x in v]
-			if length == 1: v = [x+n+1 for x in v]
-			if i == n+2 and length != 1: v.append(n)
+			if length != 1:
+				v = [x+n+2 for x in v]
+				if i == n+2: v.append(n)
+			else:
+				v = [x+n+1 for x in v]
 			BBb[k] = v
 			BBb[k] = sorted(BBb[k])
-		return(BBb)
+		return BBb
 	def BondTree(self, BB, AA):
 		''' Update the pose bond graph when adding a new amino acid '''
 		BBb = self.BondTree_AA(BB, AA)
@@ -370,64 +326,58 @@ class Pose():
 			if i == 0: V.append(i_max-1)
 			BT[K] = V
 		self.data['Bonds'] = BT
+	def update_data(self):
+		''' Update cached properties after structural changes '''
+		self.data['Mass']  = self.Mass()
+		self.data['FASTA'] = ''.join(self.FASTA())
+		self.data['SS']    = ''.join(self.SecondaryStructures())
+		self.data['Size']  = self.Size()
+		self.data['Rg']    = self.Rg()
 	def FASTA(self):
 		''' Return FASTA sequence of peptide as a string '''
-		AAs = self.data['Amino Acids']
-		AAs = [x[0] for x in AAs.values()]
-		return(AAs)
+		return [x[0] for x in self.data['Amino Acids'].values()]
 	def SecondaryStructures(self):
 		''' Return secondary strucutre of each amino acid of the peptide '''
-		SS = [x[4] for x in self.data['Amino Acids'].values()]
-		return(SS)
+		return [x[4] for x in self.data['Amino Acids'].values()]
 	def Distance(self, AA1, atom1, AA2, atom2):
 		''' Measure distance between any two atoms '''
 		A = self.GetAtom(AA1, atom1)
 		B = self.GetAtom(AA2, atom2)
 		mag = np.linalg.norm(B - A)
-		return(mag)
+		return mag
 	def Size(self):
 		''' Calculate length of peptide '''
-		AAs = self.data['Amino Acids']
-		AAs = [x[0] for x in AAs.values()]
-		length = len(AAs)
-		return(length)
+		return len(self.data['Amino Acids'])
 	def AtomList(self, PDB=False):
 		''' Return list of all the atoms '''
-		As = self.data['Atoms']
-		if PDB:
-			As = [x[0] for x in As.values()]
-		else:
-			As = [x[1] for x in As.values()]
-		return(As)
+		idx = 0 if PDB else 1
+		return [x[idx] for x in self.data['Atoms'].values()]
 	def Identify(self, index, item, q=False):
 		''' Identify an atom, atom charge, or amino acid given its index '''
 		if item.upper() == 'ATOM':
 			Atom = self.data['Atoms'][index]
-			if q: return(Atom[-1])
-			else: return(Atom[0])
+			if q: return Atom[-1]
+			else: return Atom[0]
 		elif item.upper() == 'RESIDUE' or item.upper() == 'AMINO ACID':
 			AminoAcid = self.data['Amino Acids'][index][0]
-			return(AminoAcid)
+			return AminoAcid
 		else:
 			raise Exception('Incorrect item')
 	def Mass(self):
 		''' Calculate mass of peptide in Da'''
 		atoms = self.AtomList()
-		masses = [self.Masses[x] for x in atoms]
-		mass = sum(masses)
-		mass = round(mass, 3)
-		return(mass)
+		mass = sum(self.Masses[x] for x in atoms)
+		return round(mass, 3)
 	def Rg(self):
 		''' Calculate the radius of gyration of a peptide '''
-		coord = self.data['Coordinates'].tolist()
-		atoms = self.AtomList()
-		mass = [self.Masses[x] for x in atoms]
-		xm = [(m*i, m*j, m*k) for (i, j, k), m in zip(coord, mass)]
-		tmass = sum(mass)
-		rr = sum(mi*i + mj*j + mk*k for (i,j,k), (mi,mj,mk) in zip(coord, xm))
-		mm = sum((sum(i) / tmass)**2 for i in zip(*xm))
-		rg = math.sqrt(rr / tmass-mm)
-		return(round(rg, 3))
+		mass  = np.array([self.Masses[e] for e in self.AtomList()])
+		tmass = mass.sum()
+		if tmass == 0: raise ZeroDivisionError('No atoms in pose')
+		coord = self.data['Coordinates']
+		xm    = coord * mass[:, np.newaxis]
+		rr    = np.sum(coord * xm)
+		mm    = np.sum((xm.sum(0) / tmass) ** 2)
+		return round(math.sqrt(rr / tmass - mm), 3)
 	def Atom3Angle(self, AA1, atom1, AA2, atom2, AA3, atom3):
 		''' Measure the angle between three atoms '''
 		atom1 = self.GetAtom(AA1, atom1)
@@ -435,12 +385,8 @@ class Pose():
 		atom3 = self.GetAtom(AA3, atom3)
 		A = atom2 - atom1
 		B = atom2 - atom3
-		magA = math.sqrt(A[0]**2 + A[1]**2 + A[2]**2)
-		magB = math.sqrt(B[0]**2 + B[1]**2 + B[2]**2)
-		cos_theta = np.dot(A, B) / (magA * magB)
-		theta = math.acos(cos_theta)
-		theta = theta * 180 / math.pi
-		return(theta)
+		cos_theta = np.dot(A, B) / (np.linalg.norm(A) * np.linalg.norm(B))
+		return math.degrees(math.acos(cos_theta))
 	def GetBondAtoms(self, index1, index2):
 		''' Get the atom pair that participate in a bond from their index '''
 		bonds = self.data['Bonds'][index1]
@@ -451,7 +397,7 @@ class Pose():
 		elementA = self.data['Atoms'][index1][1]
 		atomB = self.data['Atoms'][index2][0]
 		elementB = self.data['Atoms'][index2][1]
-		return([atomA, elementA, atomB, elementB])
+		return [atomA, elementA, atomB, elementB]
 	def Info(self):
 		''' Print all basic info about a peptide '''
 		print('Sequence:\t{}'.format(self.data['FASTA']))
@@ -463,78 +409,33 @@ class Pose():
 	def Build(self, sequence, chain='A'):
 		''' Build a polypeptide primary structure from sequence '''
 		X, Y, Z = 0, 0, 0
-		Ex_adjust, Ey_adjust, Ez_adjust = 0.400, 1.472, 0
-		Ox_adjust, Oy_adjust, Oz_adjust = 0.812, 0.940, 0
+		Eadj = (0.400, 1.472, 0)
+		Oadj = (0.812, 0.940, 0)
+		n    = len(sequence)
 		for i, aa in enumerate(list(sequence)):
-			if len(sequence) == 1:
-				I = len(self.data['Coordinates']) - 1
-				if aa.isupper():   LD = False
-				elif aa.islower(): LD = True
-				self.Amino('Backbone', X, Y, Z, aa, [6], LD=LD)
-				AAs = self.AminoAcids['Backbone']['Backbone Atoms']
-				self.Atoms(aa, chain, AAs, 6, i, I, LD= LD)
-				self.BondTree('Backbone', aa)
-			elif i == 0:
-				I = len(self.data['Coordinates']) - 1
-				if aa.isupper():   LD = False
-				elif aa.islower(): LD = True
-				self.Amino('Backbone start', X, Y, Z, aa, [6], LD=LD)
-				AAs = self.AminoAcids['Backbone start']['Backbone Atoms']
-				self.Atoms(aa, chain, AAs, 6, i, I, LD=LD)
-				self.BondTree('Backbone start', aa)
-			elif i == len(sequence)-1:
-				if (i % 2) != 0:
-					X = self.data['Coordinates'][-2][0] + Ex_adjust
-					Y = self.data['Coordinates'][-2][1] + Ey_adjust
-					Z = self.data['Coordinates'][-2][2] + Ez_adjust
-					I = len(self.data['Coordinates']) - 0
-					if aa.isupper():   LD = False
-					elif aa.islower(): LD = True
-					self.Amino('Backbone end', X, Y, Z, aa, [4],
-					flip=True, LD=LD)
-					AAs = self.AminoAcids['Backbone end']['Backbone Atoms']
-					self.Atoms(aa, chain, AAs, 4, i, I, LD=LD)
-					self.BondTree('Backbone end', aa)
-				elif (i % 2) == 0:
-					X = self.data['Coordinates'][-2][0] + Ox_adjust
-					Y = self.data['Coordinates'][-2][1] + Oy_adjust
-					Z = self.data['Coordinates'][-2][2] + Oz_adjust
-					I = len(self.data['Coordinates']) - 0
-					if aa.isupper():   LD = False
-					elif aa.islower(): LD = True
-					self.Amino('Backbone end', X, Y, Z, aa, [4], LD=LD)
-					AAs = self.AminoAcids['Backbone end']['Backbone Atoms']
-					self.Atoms(aa, chain, AAs, 4, i, I, LD=LD)
-					self.BondTree('Backbone end', aa)
+			LD   = aa.islower()
+			last = i == n - 1
+			odd  = (i % 2) != 0
+			if n == 1 or i == 0:
+				bb  = 'Backbone' if n == 1 else 'Backbone start'
+				idx = [6]
+				I   = len(self.data['Coordinates']) - 1
+				flip = False
 			else:
-				if (i % 2) != 0:
-					X = self.data['Coordinates'][-2][0] + Ex_adjust
-					Y = self.data['Coordinates'][-2][1] + Ey_adjust
-					Z = self.data['Coordinates'][-2][2] + Ez_adjust
-					I = len(self.data['Coordinates']) - 0
-					if aa.isupper():   LD = False
-					elif aa.islower(): LD = True
-					self.Amino('Backbone middle', X, Y, Z, aa, [4],
-					flip=True, LD=LD)
-					AAs = self.AminoAcids['Backbone middle']['Backbone Atoms']
-					self.Atoms(aa, chain, AAs, 4, i, I, LD=LD)
-					self.BondTree('Backbone middle', aa)
-				elif (i % 2) == 0:
-					X = self.data['Coordinates'][-2][0] + Ox_adjust
-					Y = self.data['Coordinates'][-2][1] + Oy_adjust
-					Z = self.data['Coordinates'][-2][2] + Oz_adjust
-					I = len(self.data['Coordinates']) - 0
-					if aa.isupper():   LD = False
-					elif aa.islower(): LD = True
-					self.Amino('Backbone middle', X, Y, Z, aa, [4], LD=LD)
-					AAs = self.AminoAcids['Backbone middle']['Backbone Atoms']
-					self.Atoms(aa, chain, AAs, 4, i, I, LD=LD)
-					self.BondTree('Backbone middle', aa)
-		self.data['Mass'] = self.Mass()
-		self.data['FASTA'] = ''.join(self.FASTA())
-		self.data['SS'] = ''.join(self.SecondaryStructures())
-		self.data['Size'] = self.Size()
-		self.data['Rg'] = self.Rg()
+				bb   = 'Backbone end' if last else 'Backbone middle'
+				adj  = Eadj if odd else Oadj
+				prev = self.data['Coordinates'][-2]
+				X    = prev[0] + adj[0]
+				Y    = prev[1] + adj[1]
+				Z    = prev[2] + adj[2]
+				idx  = [4]
+				I    = len(self.data['Coordinates'])
+				flip = odd
+			self.Amino(bb, X, Y, Z, aa, idx, flip=flip, LD=LD)
+			AAs = self.AminoAcids[bb]['Backbone Atoms']
+			self.Atoms(aa, chain, AAs, idx[0], i, I, LD=LD)
+			self.BondTree(bb, aa)
+		self.update_data()
 	def Adjust(self, AA1, atom1, AA2, atom2, length):
 		''' Change the distance between any two atoms '''
 		BB_ATOMS = ['N', 'CA', 'C', 'O']
@@ -556,8 +457,7 @@ class Pose():
 					Bi = idx
 			coordinates = self.data['Coordinates']
 			vectors = {}
-			for k, v in zip(self.data['Bonds'].keys(), \
-			self.data['Bonds'].values()):
+			for k, v in self.data['Bonds'].items():
 				vbonds = [coordinates[x] - coordinates[k] for x in v]
 				vectors[k] = vbonds
 			Bidx = None
@@ -578,7 +478,7 @@ class Pose():
 				for b, v  in zip(bonds, vs):
 					Bond_Coord[b] = v
 			coordinates = [0 for x in range(len(temp))]
-			for k, vs in zip(temp.keys(), temp.values()):
+			for k, vs in temp.items():
 				bonds = self.data['Bonds'][k]
 				for b, v in zip(bonds, vs):
 					coordinates[b] = v
@@ -615,7 +515,7 @@ class Pose():
 		''' Measure angle at bond '''
 		AminoAcid = self.data['Amino Acids'][AA][0].upper()
 		if angle_type.upper() == 'PHI':
-			if AA == 0: return(0.0)
+			if AA == 0: return 0.0
 			else: r1 = self.GetAtom(AA-1, 'C')
 			r2 = self.GetAtom(AA, 'N')
 			r3 = self.GetAtom(AA, 'CA')
@@ -627,14 +527,14 @@ class Pose():
 			try:
 				r4 = self.GetAtom(AA+1, 'N')
 			except:
-				return(0.0)
+				return 0.0
 		if angle_type.upper() == 'OMEGA':
 			r1 = self.GetAtom(AA, 'CA')
 			r2 = self.GetAtom(AA, 'C')
 			try:
 				r3 = self.GetAtom(AA+1, 'N')
 				r4 = self.GetAtom(AA+1, 'CA')
-			except: return(180.0)
+			except: return 180.0
 		if angle_type.upper() == 'CHI':
 			assert type(chi_type) is int, 'Incorrect Chi angle type'
 			number_of_chis = len(self.AminoAcids[AminoAcid]['Chi Angle Atoms'])
@@ -658,7 +558,16 @@ class Pose():
 		a = np.dot(u2, u1u2Cu2u3)
 		b = mag_u2 * u1u2Du2u3
 		theta = math.atan2(a, b) * 180 / math.pi
-		return(theta)
+		return theta
+	def rotate_backbone(self, split, ori, A, B, current, theta):
+		''' Apply zero-then-rotate to coordinates from split onward '''
+		before = self.data['Coordinates'][:split]
+		after  = self.data['Coordinates'][split:] - ori
+		u = B - A
+		u = u / np.linalg.norm(u)
+		after = np.matmul(after, self.Rotation_Matrix(-current, u))
+		after = np.matmul(after, self.Rotation_Matrix(theta, u))
+		self.data['Coordinates'] = np.append(before, after + ori, axis=0)
 	def Rotation_Matrix(self, theta, u):
 		''' Rotate a matrix around axis u by theta angle '''
 		ux, uy, uz = u[0], u[1], u[2]
@@ -668,75 +577,30 @@ class Pose():
 		[C+ux**2*(1-C)   , ux*uy*(1-C)-uz*S, ux*uz*(1-C)+uy*S],
 		[uy*ux*(1-C)+uz*S, C+uy**2*(1-C)   , uy*uz*(1-C)-ux*S],
 		[uz*ux*(1-C)-uy*S, uz*uy*(1-C)+ux*S, C+uz**2*(1-C)   ]])
-		return(R)
+		return R
 	def Rotate(self, AA, theta, angle_type, chi_type=None):
 		''' Rotate around a bond '''
 		AminoAcid = self.data['Amino Acids'][AA][0].upper()
 		if angle_type.upper() == 'PHI':
-			ori = self.GetAtom(AA, 'CA')
-			n = 1
-			if AA == 0: n = 3
-			index = self.data['Amino Acids'][AA][2][2]
-			before = self.data['Coordinates'][:index + n]
-			after = self.data['Coordinates'][index + n:]
-			after = after - ori
-			A = self.GetAtom(AA, 'CA')
-			B = self.GetAtom(AA, 'N')
-			u = B - A
-			lu = np.linalg.norm(u)
-			u = u / lu
-			current = self.Angle(AA, 'phi')
-			zeroing = 0 - current
-			RM = self.Rotation_Matrix(zeroing, u)
-			after = np.matmul(after, RM)
-			RM = self.Rotation_Matrix(theta, u)
-			after = np.matmul(after, RM)
-			after = after + ori
-			combine = np.append(before, after, axis=0)
-			self.data['Coordinates'] = combine
+			n = 3 if AA == 0 else 1
+			split = self.data['Amino Acids'][AA][2][2] + n
+			ori   = self.GetAtom(AA, 'CA')
+			self.rotate_backbone(split, ori,
+				self.GetAtom(AA, 'CA'), self.GetAtom(AA, 'N'),
+				self.Angle(AA, 'phi'), theta)
 		if angle_type.upper() == 'PSI':
-			ori = self.GetAtom(AA, 'C')
-			n = 1
-			if AA == 0: n = 3
-			index = self.data['Amino Acids'][AA][2][4]
-			before = self.data['Coordinates'][:index + n]
-			after = self.data['Coordinates'][index + n:]
-			after = after - ori
-			A = self.GetAtom(AA, 'C')
-			B = self.GetAtom(AA, 'CA')
-			u = B - A
-			lu = np.linalg.norm(u)
-			u = u / lu
-			current = self.Angle(AA, 'psi')
-			zeroing = 0 - current
-			RM = self.Rotation_Matrix(zeroing, u)
-			after = np.matmul(after, RM)
-			RM = self.Rotation_Matrix(theta, u)
-			after = np.matmul(after, RM)
-			after = after + ori
-			combine = np.append(before, after, axis=0)
-			self.data['Coordinates'] = combine
+			n = 3 if AA == 0 else 1
+			split = self.data['Amino Acids'][AA][2][4] + n
+			ori   = self.GetAtom(AA, 'C')
+			self.rotate_backbone(split, ori,
+				self.GetAtom(AA, 'C'), self.GetAtom(AA, 'CA'),
+				self.Angle(AA, 'psi'), theta)
 		if angle_type.upper() == 'OMEGA':
-			ori = self.GetAtom(AA + 1, 'N')
-			n = 0
-			index = self.data['Amino Acids'][AA + 1][2][0]
-			before = self.data['Coordinates'][:index + n]
-			after = self.data['Coordinates'][index + n:]
-			after = after - ori
-			A = self.GetAtom(AA + 1, 'N')
-			B = self.GetAtom(AA, 'C')
-			u = B - A
-			lu = np.linalg.norm(u)
-			u = u / lu
-			current = self.Angle(AA, 'omega')
-			zeroing = 0 - current
-			RM = self.Rotation_Matrix(zeroing, u)
-			after = np.matmul(after, RM)
-			RM = self.Rotation_Matrix(theta, u)
-			after = np.matmul(after, RM)
-			after = after + ori
-			combine = np.append(before, after, axis=0)
-			self.data['Coordinates'] = combine
+			split = self.data['Amino Acids'][AA + 1][2][0]
+			ori   = self.GetAtom(AA + 1, 'N')
+			self.rotate_backbone(split, ori,
+				self.GetAtom(AA + 1, 'N'), self.GetAtom(AA, 'C'),
+				self.Angle(AA, 'omega'), theta)
 		if angle_type.upper() == 'CHI':
 			assert type(chi_type) is int, 'Incorrect Chi angle type'
 			number_of_chis = len(self.AminoAcids[AminoAcid]['Chi Angle Atoms'])
@@ -827,7 +691,7 @@ class Pose():
 		B = np.array(B)
 		Aoxy = A[3][:3]
 		B[-1] = Aoxy
-		return(B)
+		return B
 	def Mutate(self, index, AA):
 		''' Mutate an amino acid to a different amino acid '''
 		sequence_old = ''.join(self.FASTA())
@@ -936,7 +800,7 @@ class Pose():
 		Structure = defaultdict(list)
 		for atom in ALL: Structure[atom[3]].append(atom)
 		for repeat in range(2):
-			for k, v in zip(Structure.keys(), Structure.values()):
+			for k, v in Structure.items():
 				atom = None
 				for i, entry in enumerate(v):
 					if atom == entry[0]:
@@ -947,7 +811,7 @@ class Pose():
 		Aminos = {}
 		Coordinates = []
 		backbone = ['N', 'CA', 'C', 'O', 'OXT']
-		for k, v in zip(Structure.keys(), Structure.values()):
+		for k, v in Structure.items():
 			BB = []
 			SC = []
 			for info in v:
@@ -986,25 +850,14 @@ class Pose():
 				self.BondTree('Backbone end', aa)
 			else:
 				self.BondTree('Backbone middle', aa)
-		self.data['Mass'] = self.Mass()
-		self.data['FASTA'] = ''.join(self.FASTA())
-		self.data['SS'] = ''.join(self.SecondaryStructures())
-		self.data['Size'] = self.Size()
-		self.data['Rg'] = self.Rg()
+		self.update_data()
 	def ReBuild(self, sequence=None, D_AA=False):
 		''' Fold a polypeptide using angles and bonds '''
 		if sequence == None:
 			sequence = self.data['FASTA']
-		PHIs = []
-		PSIs = []
-		OMGs = []
-		NCaC = []
-		CaCN = []
-		CNCa = [0]
-		CHIs = {}
-		bNCA = []
-		bCAC = []
-		bCN1 = []
+		PHIs, PSIs, OMGs = [], [], []
+		NCaC, CaCN, CNCa, CHIs = [], [], [0], {}
+		bNCA, bCAC, bCN1 = [], [], []
 		for i in range(len(sequence)):
 			PHIs.append(self.Angle(i, 'PHI'))
 			PSIs.append(self.Angle(i, 'PSI'))
@@ -1060,11 +913,7 @@ class Pose():
 					if self.isfused(sequence[i]): continue
 					self.Rotate(i, c, 'CHI', ii+1)
 			except: continue
-		self.data['Mass'] = self.Mass()
-		self.data['FASTA'] = ''.join(self.FASTA())
-		self.data['SS'] = ''.join(self.SecondaryStructures())
-		self.data['Size'] = self.Size()
-		self.data['Rg'] = self.Rg()
+		self.update_data()
 		self.Gasteiger()
 		self.DSSP()
 		self.SASA()
@@ -1093,30 +942,22 @@ class Pose():
 		els  = [self.data['Atoms'][i][1].upper() for i in ids]
 		c = crds[np.array(ids)]
 		dm = np.sqrt(((c[:, None, :] - c[None, :, :]) ** 2).sum(2))
+		is_H = np.array([e == 'H'         for e in els])
+		is_S = np.array([e in ('S', 'SE') for e in els])
 		heavy_thresh = np.full((len(ids), len(ids)), 1.9)
-		for ii, ei in enumerate(els):
-			for jj, ej in enumerate(els):
-				if ei == 'H' or ej == 'H':
-					heavy_thresh[ii, jj] = 1.3
-				elif ei in ('S', 'SE') or ej in ('S', 'SE'):
-					heavy_thresh[ii, jj] = 2.1
+		h_mask = is_H[:, None] | is_H[None, :]
+		s_mask = is_S[:, None] | is_S[None, :]
+		heavy_thresh[h_mask] = 1.3
+		heavy_thresh[s_mask] = 2.1
 		bond_mask = (dm < heavy_thresh) & (dm > 0.0)
 		bonds = {i: [] for i in ids}
-		for ii, i in enumerate(ids):
-			for jj, j in enumerate(ids):
-				if bond_mask[ii, jj]:
-					bonds[i].append(j)
-		sp2 = set()
-		for ii, i in enumerate(ids):
-			if els[ii] == 'H':
-				continue
-			for jj, j in enumerate(ids):
-				if jj == ii or els[jj] == 'H':
-					continue
-				if 0 < dm[ii, jj] < 1.42:
-					sp2.add(i)
-					sp2.add(j)
-		def _type(ii, i):
+		for ii, jj in np.argwhere(bond_mask):
+			bonds[ids[ii]].append(ids[jj])
+		heavy = ~is_H
+		short = (dm < 1.42) & (dm > 0)
+		sp2_mask = short & heavy[:, None] & heavy[None, :]
+		sp2 = {ids[ii] for ii in np.where(sp2_mask.any(axis=1))[0]}
+		def types(ii, i):
 			el = els[ii]
 			if el == 'H':  return 'H'
 			if el == 'S':  return 'S'
@@ -1133,7 +974,7 @@ class Pose():
 				return 'O2' if isp2 else 'O3'
 			return 'C3'
 		charges = {i: self.data['Atoms'][i][2] for i in ids}
-		atype   = {i: PARAMS[_type(ii, i)] for ii, i in enumerate(ids)}
+		atype   = {i: PARAMS[types(ii, i)] for ii, i in enumerate(ids)}
 		for n in range(iterations):
 			damp = 1.0 / (2 ** (n + 1))
 			chi = {}
