@@ -15,8 +15,9 @@ A bare-metal Python library for building and manipulating protein molecular stru
 ![NumPy](https://img.shields.io/badge/dependency-NumPy-orange)
 ![License: GPL v2](https://img.shields.io/badge/license-GPL%20v2-green)
 
+<div align="center">
 <img src="pose/Video1.gif" width="25%"/><img src="pose/Video2.gif" width="25%"/><img src="pose/Video3.gif" width="25%"/><img src="pose/Video4.gif" width="25%"/>
-
+</div>
 ---
 
 ## Video Tutorial
