@@ -11,11 +11,9 @@
 # Pose
 A bare-metal Python library for building and manipulating protein molecular structures
 
-<div align="center">
 ![Python >= 3](https://img.shields.io/badge/python-%3E%3D3-blue)
 ![NumPy](https://img.shields.io/badge/dependency-NumPy-orange)
 ![License: GPL v2](https://img.shields.io/badge/license-GPL%20v2-green)
-</div>
 
 <img src="pose/Video1.gif" width="25%"/><img src="pose/Video2.gif" width="25%"/><img src="pose/Video3.gif" width="25%"/><img src="pose/Video4.gif" width="25%"/>
 ---
