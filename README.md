@@ -1,3 +1,10 @@
+██████╗  ██████╗ ███████╗███████╗
+██╔══██╗██╔═══██╗██╔════╝██╔════╝
+██████╔╝██║   ██║███████╗█████╗  
+██╔═══╝ ██║   ██║╚════██║██╔══╝  
+██║     ╚██████╔╝███████║███████╗
+╚═╝      ╚═════╝ ╚══════╝╚══════╝
+
 # Pose
 A bare-metal Python library for building and manipulating protein molecular structures
 
@@ -420,11 +427,9 @@ Contributions are welcome! Open an issue or pull request on GitHub.
 
 These are functions that would make valuable additions to the library:
 
-1. **Moderate**: Find all H-bonds
-2. **Moderate**: Calculate DSSP for each amino acid
-3. **Hard**: SASA calculation for each amino acid
-4. **Hard**: Pocket and void calculation
-5. **Hard**: AMBER energy function or general input and structure minimisation
+1. **pose.py**: Add organic molecule suppport
+2. **tools.py**: Pocket and void calculation
+3. **tools.py**: AMBER energy function or general input and structure minimisation
 
 Please follow the existing code style: tabs for indentation, 80 characters max line length.
 
