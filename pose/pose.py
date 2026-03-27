@@ -8,6 +8,8 @@ import datetime
 import numpy as np
 from collections import defaultdict
 
+np.seterr(all='ignore')
+
 class Pose():
 	''' Data structure that represents a protein '''
 	def __init__(self):
@@ -913,10 +915,10 @@ class Pose():
 					if self.isfused(sequence[i]): continue
 					self.Rotate(i, c, 'CHI', ii+1)
 			except: continue
-		self.update_data()
 		self.Gasteiger()
 		self.DSSP()
 		self.SASA()
+		self.update_data()
 		if D_AA:
 			self.data['Coordinates'] = self.data['Coordinates'] * [1, 1, -1]
 			for i in range(len(sequence)):

@@ -84,9 +84,27 @@ p.Build('AcEg')   # Mixed L/D sequence
 
 **Importing a PDB file:**
 ```python
-p2 = Pose()
-p2.Import('1tqg.pdb', chain='A', filetype='CIF') # filetype can also be 'PDB'
-p2.ReBuild()                 # Re-adds hydrogens if the PDB lacked them
+p = Pose()
+p.Import('1TQG.pdb', chain='A')
+p.ReBuild()     # Adds missing hydrogens, and calculates SASA, atomic partial charge, and amino acid secondary structures
+```
+
+It is advised that you always run p.ReBuild() after Import().
+
+If you want to use a protein complex with multiple chains, then add each chain as a seperate pose:
+
+```python
+pA = Pose()
+pA.Import('9ATK.pdb', chain='A')
+pA.ReBuild()
+
+pB = Pose()
+pB.Import('9ATK.pdb', chain='B')
+pB.ReBuild()
+
+pC = Pose()
+pC.Import('9ATK.pdb', chain='C')
+pC.ReBuild()
 ```
 
 ---
