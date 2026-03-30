@@ -12,12 +12,10 @@ np.seterr(all='ignore')
 
 class Pose():
 	''' Data structure that represents a protein '''
-	BB_ATOMS = {
-		'N', '1H', '2H', '3H',
-		'CA', 'HA', 'C', 'O', 'OXT'}
 	def __init__(self):
 		path, modulename = os.path.split(__file__)
 		with open(f'{path}/AminoAcids.json') as f: AminoAcids = json.load(f)
+		self.BB_ATOMS = {'N', '1H', '2H', '3H', 'CA', 'HA', 'C', 'O', 'OXT'}
 		Masses = {
 			'H':1.008,    'He':4.003,   'Li':6.941,   'Be':9.012,
 			'B':10.811,   'C':12.011,   'N':14.007,   'O':15.999,
