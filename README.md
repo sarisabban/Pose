@@ -177,13 +177,13 @@ for idx, atom in p.data['Atoms'].items():
 
 ### Building & I/O
 
-| Method                           | Description |
-|----------------------------------|-------------|
-| `Pose()`                         | Construct a new Pose object |
-| `p.Build('SYKDLEGKVKSVLESNRGI')` | Build a polypeptide from a one-letter sequence. Uppercase = L-amino acids, lowercase = D-amino acids |
-| `p.Import('1YN3.cif', chain='A')`| Load a structure from a PDB or mmCIF file (specific chain). It is best to use ReBuild() after importing a structure to optimise it. Cannot load structures with broken/non-continuous chains |
-| `p.ReBuild()`                    | Rebuild the polypeptide as a primary structure then refold it using current angles and bond lengths. Best to use right after Import(). Use `D_AA=True` to rebuild entirely in D-amino acids. Will add missing hydrogens, calculate each atom's partial charge, as well as each amino acid's secondary structure |
-| `p.Export('out.pdb')`            | Write the polypeptide to a PDB or mmCIF file |
+| Method                                     | Description |
+|--------------------------------------------|-------------|
+| `Pose()`                                   | Construct a new Pose object |
+| `p.Build('SYKDLEGKVKSVLESNRGI')`           | Build a polypeptide from a one-letter sequence. Uppercase = L-amino acids, lowercase = D-amino acids |
+| `p.Import('1YN3.cif', chain='A', model=1)` | Load a structure from a PDB or mmCIF file (specific chain). It is best to use ReBuild() after importing a structure to optimise it. Cannot load structures with broken/non-continuous chains or missing backbone atoms. Choose a model `model=1` or `model=2` if an ensemble of models is found |
+| `p.ReBuild()`                              | Rebuild the polypeptide as a primary structure then refold it using current angles and bond lengths. Best to use right after Import(). Use `D_AA=True` to rebuild entirely in D-amino acids. Will add missing hydrogens, calculate each atom's partial charge, as well as each amino acid's secondary structure |
+| `p.Export('out.pdb')`                      | Write the polypeptide to a PDB or mmCIF file |
 
 ### Measurements
 

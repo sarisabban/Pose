@@ -699,16 +699,35 @@ class Pose():
 		sequence_old = ''.join(self.FASTA())
 		sequence = sequence_old[:index] + AA + sequence_old[index+1:]
 		self.ReBuild(sequence)
-	def Import(self, filename, chain='A'):
+	def Import(self, filename, chain='A', model=1):
 		''' Import a structure from a .pdb or .cif file '''
 		if filename[-3:].upper() == 'PDB':
 			ATOM, N, A, L, R, C, S, I, X, Y, Z, O, T, Q, E = \
 			[], [], [], [], [], [], [], [], [], [], [], [], [], [], []
+			has_models   = False
+			in_target    = False
+			found_models = []
 			with open(filename) as f:
 				for line in f:
 					line = line.strip()
-					if line.split()[0] == 'ATOM' \
-					and line.split()[4] == chain:
+					if not line:
+						continue
+					record = line.split()[0]
+					if record == 'MODEL':
+						has_models = True
+						try:
+							mnum = int(line.split()[1])
+						except (IndexError, ValueError):
+							mnum = len(found_models) + 1
+						found_models.append(mnum)
+						in_target = (mnum == model)
+					elif record == 'ENDMDL':
+						if in_target:
+							break
+						in_target = False
+					elif record == 'ATOM' \
+					and line.split()[4] == chain \
+					and (not has_models or in_target):
 						ATOM.append(line[:4].strip())
 						N.append(int(line[6:11].strip()))
 						A.append(line[12:16].strip())
@@ -730,6 +749,11 @@ class Pose():
 							q = 0.0
 						Q.append(q)
 						E.append(line[76:78].strip())
+			if has_models and model not in found_models:
+				raise Exception(
+					f'Model {model} not found in '
+					f'{filename}. '
+					f'Available models: {found_models}')
 		elif filename[-3:].upper() == 'CIF':
 			ATOM, N, A, L, R, C, S, I, X, Y, Z, O, T, Q, E = \
 			[], [], [], [], [], [], [], [], [], [], [], [], [], [], []
@@ -766,7 +790,9 @@ class Pose():
 			i_atom   = col['auth_atom_id']
 			i_resn   = col['auth_comp_id']
 			i_seqid  = col['auth_seq_id']
-			i_serial = col['id']
+			i_serial     = col['id']
+			i_model_num  = col.get('pdbx_PDB_model_num', None)
+			found_models = []
 			for line in lines[data_start:]:
 				ln = line.strip()
 				if not ln or ln == '#':
@@ -776,6 +802,12 @@ class Pose():
 					continue
 				if fields[i_chain] != chain:
 					continue
+				if i_model_num is not None:
+					mnum = int(fields[i_model_num])
+					if mnum not in found_models:
+						found_models.append(mnum)
+					if mnum != model:
+						continue
 				ATOM.append(fields[i_group])
 				N.append(int(fields[i_serial]))
 				A.append(fields[i_atom])
@@ -794,6 +826,13 @@ class Pose():
 				Q.append(0.0 if raw_q == '?' \
 				else float(raw_q))
 				E.append(fields[i_type])
+			if i_model_num is not None \
+			and found_models \
+			and model not in found_models:
+				raise Exception(
+					f'Model {model} not found in '
+					f'{filename}. '
+					f'Available models: {found_models}')
 		N = [x-N[0] for x in N]
 		S_first = S[0]
 		S = [x-S[0] for x in S]
