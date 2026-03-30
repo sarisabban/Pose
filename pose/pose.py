@@ -127,7 +127,7 @@ class Pose():
 						AAs[AAidx][5], AAs[AAidx][1],
 						AAidx+1, '',
 						coord[0], coord[1], coord[2],
-						1.0, atom[1][3], atom[1][2], atom[1][1])
+						atom[1][3], atom[1][4], atom[1][2], atom[1][1])
 					f.write(line)
 				f.write('TER')
 		elif filename[-3:].upper() == 'CIF':
@@ -164,7 +164,7 @@ class Pose():
 						AAs[AAidx][5], AAs[AAidx][1],
 						AAidx+1,
 						coord[0], coord[1], coord[2],
-						1.0, atom[1][3], atom[1][2], atom[1][1])
+						atom[1][3], atom[1][4], atom[1][2], atom[1][1])
 					f.write(line)
 				f.write('#\n')
 	def GetAtom(self, AA, atom):
@@ -228,7 +228,7 @@ class Pose():
 		BBi = []
 		SCi = []
 		for atomi, v in enumerate(BB, I):
-			self.data['Atoms'][atomi] = v
+			self.data['Atoms'][atomi] = [v[0], v[1], v[2], 1.0, v[3]]
 			if v[0] in ['N', '1H', '2H', '3H', 'CA', 'HA', 'C', 'O', 'OXT']:
 				BBi.append(atomi)
 			else:
@@ -744,7 +744,6 @@ class Pose():
 						q = line[70:76].strip()
 						if q != '':
 							q = float(q)
-							Q.append(q)
 						else:
 							q = 0.0
 						Q.append(q)
@@ -833,21 +832,42 @@ class Pose():
 					f'Model {model} not found in '
 					f'{filename}. '
 					f'Available models: {found_models}')
+		if not N: raise Exception(f'No ATOM in chain {chain} for {filename}')
 		N = [x-N[0] for x in N]
 		S_first = S[0]
 		S = [x-S[0] for x in S]
+		best = {}
+		for i in range(len(A)):
+			key = (S[i], A[i])
+			if key not in best:
+				best[key] = i
+			elif O[i] > O[best[key]]:
+				best[key] = i
+		keep = sorted(best.values())
+		A = [A[i] for i in keep]
+		R = [R[i] for i in keep]
+		C = [C[i] for i in keep]
+		S = [S[i] for i in keep]
+		X = [X[i] for i in keep]
+		Y = [Y[i] for i in keep]
+		Z = [Z[i] for i in keep]
+		O = [O[i] for i in keep]
+		T = [T[i] for i in keep]
+		Q = [Q[i] for i in keep]
+		E = [E[i] for i in keep]
 		ALL = [[a, r, c, s, x, y, z, o, t, q, e] \
 			for a, r, c, s, x, y, z, o, t, q, e in \
 			zip(A, R, C, S, X, Y, Z, O, T, Q, E)]
 		Structure = defaultdict(list)
 		for atom in ALL: Structure[atom[3]].append(atom)
-		for repeat in range(2):
-			for k, v in Structure.items():
-				atom = None
-				for i, entry in enumerate(v):
-					if atom == entry[0]:
-						Structure[k].pop(i)
-					atom = entry[0]
+		for k, v in Structure.items():
+			seen = set()
+			deduped = []
+			for entry in v:
+				if entry[0] not in seen:
+					seen.add(entry[0])
+					deduped.append(entry)
+			Structure[k] = deduped
 		count = 0
 		Atoms = {}
 		Aminos = {}
@@ -869,7 +889,7 @@ class Pose():
 				c = info[9]
 				e = info[10]
 				Coordinates.append([x, y, z])
-				Atoms[count] = [atom, e, c, t]
+				Atoms[count] = [atom, e, c, o, t]
 				if atom in backbone:
 					BB.append(count)
 				else:

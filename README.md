@@ -98,7 +98,7 @@ p.Import('1TQG.pdb', chain='A')
 p.ReBuild()     # Adds missing hydrogens, and calculates SASA, atomic partial charge, and amino acid secondary structures
 ```
 
-It is advised that you always run p.ReBuild() after Import().
+It is advised that you always run p.ReBuild() after Import(). But understand that a new synthetic structure will be built, therefore you will lose the original occupancy and temperature-factor for each atom (replaces with 1.0 and 0.0).
 
 If you want to use a protein complex with multiple chains, then add each chain as a seperate pose:
 
@@ -181,7 +181,7 @@ for idx, atom in p.data['Atoms'].items():
 |--------------------------------------------|-------------|
 | `Pose()`                                   | Construct a new Pose object |
 | `p.Build('SYKDLEGKVKSVLESNRGI')`           | Build a polypeptide from a one-letter sequence. Uppercase = L-amino acids, lowercase = D-amino acids |
-| `p.Import('1YN3.cif', chain='A', model=1)` | Load a structure from a PDB or mmCIF file (specific chain). It is best to use ReBuild() after importing a structure to optimise it. Cannot load structures with broken/non-continuous chains or missing backbone atoms. Choose a model `model=1` or `model=2` if an ensemble of models is found |
+| `p.Import('1YN3.cif', chain='A', model=1)` | Load a structure from a PDB or mmCIF file (specific chain). It is best to use ReBuild() after importing a structure to optimise it. Cannot load structures with broken/non-continuous chains or missing backbone atoms. Choose a model `model=1` or `model=2` if an ensemble of models is found. If the same atom is found with multiple occupancies, Import() will only import that atom with the highest occupancy, if they are exactly 0.5, then the function will import that first record only |
 | `p.ReBuild()`                              | Rebuild the polypeptide as a primary structure then refold it using current angles and bond lengths. Best to use right after Import(). Use `D_AA=True` to rebuild entirely in D-amino acids. Will add missing hydrogens, calculate each atom's partial charge, as well as each amino acid's secondary structure |
 | `p.Export('out.pdb')`                      | Write the polypeptide to a PDB or mmCIF file |
 
