@@ -353,8 +353,7 @@ class Pose():
 			raise Exception('Incorrect item')
 	def Mass(self):
 		''' Calculate mass of peptide in Da'''
-		atoms = self.AtomList()
-		mass = sum(self.Masses[x] for x in atoms)
+		mass = sum(self.Masses[x] for x in self.AtomList())
 		return round(mass, 3)
 	def Rg(self):
 		''' Calculate the radius of gyration of a peptide '''
@@ -400,10 +399,8 @@ class Pose():
 		Eadj = (0.400, 1.472, 0)
 		Oadj = (0.812, 0.940, 0)
 		n    = len(sequence)
-		for i, aa in enumerate(list(sequence)):
-			LD   = aa.islower()
-			last = i == n - 1
-			odd  = (i % 2) != 0
+		for i, aa in enumerate(sequence):
+			LD, last, odd = aa.islower(), i == n-1, (i%2) != 0
 			if n == 1 or i == 0:
 				bb  = 'Backbone' if n == 1 else 'Backbone start'
 				idx = [6]
@@ -436,8 +433,7 @@ class Pose():
 			coordinates = self.data['Coordinates']
 			vectors = {}
 			for k, v in self.data['Bonds'].items():
-				vbonds = [coordinates[x] - coordinates[k] for x in v]
-				vectors[k] = vbonds
+				vectors[k] = [coordinates[x] - coordinates[k] for x in v]
 			Bidx = next(
 				i for i, b in enumerate(self.data['Bonds'][Ai])
 				if b == Bi)
@@ -448,15 +444,12 @@ class Pose():
 			temp = {}
 			Bond_Coord = {0: self.data['Coordinates'][0]}
 			for i in range(len(vectors)):
-				vs = [Bond_Coord[i] + x for x in vectors[i]]
-				temp[i] = vs
-				bonds = self.data['Bonds'][i]
-				for b, v  in zip(bonds, vs):
+				temp[i] = vs = [Bond_Coord[i] + x for x in vectors[i]]
+				for b, v in zip(self.data['Bonds'][i], vs):
 					Bond_Coord[b] = v
-			coordinates = [0 for x in range(len(temp))]
+			coordinates = [0] * len(temp)
 			for k, vs in temp.items():
-				bonds = self.data['Bonds'][k]
-				for b, v in zip(bonds, vs):
+				for b, v in zip(self.data['Bonds'][k], vs):
 					coordinates[b] = v
 			coordinates = np.array(coordinates)
 			self.data['Coordinates'] = coordinates
@@ -474,14 +467,11 @@ class Pose():
 			if atom1 in sc1 or atom2 in sc2:
 				raise Exception(
 					'Distance adjustments allowed only for backbone')
-			Aelements = (self.data['Coordinates'] == A)
-			Awhole_row = Aelements.all(axis=1)
-			Aindex = np.argwhere(Awhole_row)[0][0]
-			Belements = (self.data['Coordinates'] == B)
-			Bwhole_row = Belements.all(axis=1)
-			Bindex = np.argwhere(Bwhole_row)[0][0]
-			before = self.data['Coordinates'][:Bindex]
-			after = self.data['Coordinates'][Bindex:]
+			crds = self.data['Coordinates']
+			Aindex = np.argwhere((crds == A).all(axis=1))[0][0]
+			Bindex = np.argwhere((crds == B).all(axis=1))[0][0]
+			before = crds[:Bindex]
+			after  = crds[Bindex:]
 			nB = (B-A) * mut
 			after = after - (B-A) + nB
 			self.data['Coordinates'] = np.concatenate((before, after))
@@ -638,10 +628,8 @@ class Pose():
 		n, e = 0, 0
 		if BB == 'Backbone start': n = 2
 		if BB == 'Backbone end': e = 1
-		A1s = np.ones(len(A))
-		B1s = np.ones(len(B))
-		A = np.c_[A, A1s]
-		B = np.c_[B, B1s]
+		A = np.c_[A, np.ones(len(A))]
+		B = np.c_[B, np.ones(len(B))]
 		if AA == 'G':
 			Aa, Ao, Ab, Ac = A[0], A[1], A[3], A[2]
 			Ba, Bo, Bb, Bc = B[0], B[2+n], B[-1], B[-2-e]
@@ -670,9 +658,8 @@ class Pose():
 		return B
 	def Mutate(self, index, AA):
 		''' Mutate an amino acid to a different amino acid '''
-		sequence_old = ''.join(self.FASTA())
-		sequence = sequence_old[:index] + AA + sequence_old[index+1:]
-		self.ReBuild(sequence)
+		seq = ''.join(self.FASTA())
+		self.ReBuild(seq[:index] + AA + seq[index+1:])
 	def Import(self, filename, chain='A', model=1):
 		''' Import a structure from a .pdb or .cif file '''
 		if filename[-3:].upper() == 'PDB':
@@ -733,8 +720,7 @@ class Pose():
 			data_start = 0
 			for idx, line in enumerate(lines):
 				if line.strip() == 'loop_':
-					nxt = lines[idx+1].strip() \
-					if idx+1 < len(lines) else ''
+					nxt = lines[idx+1].strip() if idx+1 < len(lines) else ''
 					if nxt.startswith('_atom_site.'):
 						i = idx + 1
 						while i < len(lines) and \
@@ -780,8 +766,7 @@ class Pose():
 				ATOM.append(fields[i_group])
 				N.append(int(fields[i_serial]))
 				A.append(fields[i_atom])
-				alt = fields[i_altloc]
-				L.append('' if alt == '.' else alt)
+				L.append('' if (alt:=fields[i_altloc]) == '.' else alt)
 				R.append(fields[i_resn])
 				C.append(fields[i_chain])
 				S.append(int(fields[i_seqid]))
@@ -804,8 +789,7 @@ class Pose():
 					f'Available models: {found_models}')
 		if not N: raise Exception(f'No ATOM in chain {chain} for {filename}')
 		N = [x-N[0] for x in N]
-		S_first = S[0]
-		S = [x-S[0] for x in S]
+		S_first, S = S[0], [x-S[0] for x in S]
 		best = {}
 		for i in range(len(A)):
 			key = (S[i], A[i])
@@ -814,9 +798,8 @@ class Pose():
 			elif O[i] > O[best[key]]:
 				best[key] = i
 		keep = sorted(best.values())
-		lists = [A, R, C, S, X, Y, Z, O, T, Q, E]
-		A, R, C, S, X, Y, Z, O, T, Q, E = \
-			[[lst[i] for i in keep] for lst in lists]
+		A, R, C, S, X, Y, Z, O, T, Q, E = [[l[i] for i in keep]
+			for l in [A, R, C, S, X, Y, Z, O, T, Q, E]]
 		ALL = [list(row) for row in zip(A, R, C, S, X, Y, Z, O, T, Q, E)]
 		Structure = defaultdict(list)
 		for atom in ALL: Structure[atom[3]].append(atom)
@@ -887,13 +870,11 @@ class Pose():
 		self.data['Amino Acids'] = Aminos
 		self.data['Atoms'] = Atoms
 		sequence = ''.join(self.FASTA())
-		for i, aa in enumerate(list(sequence)):
-			if i == 0:
-				self.BondTree('Backbone start', aa)
-			elif i == len(sequence)-1:
-				self.BondTree('Backbone end', aa)
-			else:
-				self.BondTree('Backbone middle', aa)
+		for i, aa in enumerate(sequence):
+			bb = ('Backbone start' if i == 0 else
+			      'Backbone end'   if i == len(sequence)-1 else
+			      'Backbone middle')
+			self.BondTree(bb, aa)
 		self.update_data()
 	def ReBuild(self, sequence=None, D_AA=False):
 		''' Fold a polypeptide using angles and bonds '''
@@ -920,18 +901,11 @@ class Pose():
 			bCAC.append(self.Distance(i, 'CA', i, 'C'))
 			try: bCN1.append(self.Distance(i, 'C', i+1, 'N'))
 			except: pass
-		data ={
-			'Energy':0,
-			'Rg':0,
-			'Mass':0,
-			'Size':0,
-			'FASTA':None,
-			'SS':None,
-			'Amino Acids':{},
-			'Atoms':{},
-			'Bonds':{},
-			'Coordinates':np.array([[0, 0, 0]])}
-		self.data = copy.deepcopy(data)
+		self.data = copy.deepcopy({
+			'Energy':0, 'Rg':0, 'Mass':0, 'Size':0,
+			'FASTA':None, 'SS':None,
+			'Amino Acids':{}, 'Atoms':{}, 'Bonds':{},
+			'Coordinates':np.array([[0, 0, 0]])})
 		self.Build(sequence)
 		for i, (p, s, o, n, a, c, b1, b2, b3) in enumerate(zip(
 		PHIs, PSIs, OMGs, NCaC, CaCN, CNCa, bNCA, bCAC, bCN1)):
@@ -1021,11 +995,8 @@ class Pose():
 		atype   = {i: PARAMS[types(ii, i)] for ii, i in enumerate(ids)}
 		for n in range(iterations):
 			damp = 1.0 / (2 ** (n + 1))
-			chi = {}
-			for i in ids:
-				a, b, c = atype[i]
-				q = charges[i]
-				chi[i] = a + b * q + c * q * q
+			chi = {i: a + q*(b + c*q) for i in ids
+				for a, b, c in [atype[i]] for q in [charges[i]]}
 			delta = {i: 0.0 for i in ids}
 			for i in ids:
 				for j in bonds[i]:
@@ -1050,36 +1021,31 @@ class Pose():
 	def DSSP(self):
 		''' Assign secondary structures using the DSSP algorithm '''
 		N = self.data['Size']
-		chains   = [
-			self.data['Amino Acids'][i][1] for i in range(N)]
-		tricodes = [
-			self.data['Amino Acids'][i][5].upper()
-			for i in range(N)]
+		AAs      = self.data['Amino Acids']
+		chains   = [AAs[i][1]         for i in range(N)]
+		tricodes = [AAs[i][5].upper() for i in range(N)]
 		H_pos = [None] * N
 		for i in range(N):
 			if 'PRO' in tricodes[i]:
 				continue
 			if i == 0 or chains[i] != chains[i - 1]:
 				continue
-			try:
-				H_pos[i] = self.GetAtom(i, '1H')
-				continue
-			except Exception:
-				pass
-			try:
-				H_pos[i] = self.GetAtom(i, 'H')
-				continue
-			except Exception:
-				pass
-			try:
-				Ni  = self.GetAtom(i, 'N')
-				Cp  = self.GetAtom(i - 1, 'C')
-				d   = Ni - Cp
-				nm  = np.linalg.norm(d)
-				if nm > 0.001:
-					H_pos[i] = Ni + (d / nm) * 1.01
-			except Exception:
-				pass
+			for hname in ('1H', 'H'):
+				try:
+					H_pos[i] = self.GetAtom(i, hname)
+					break
+				except Exception:
+					pass
+			else:
+				try:
+					Ni = self.GetAtom(i, 'N')
+					Cp = self.GetAtom(i - 1, 'C')
+					d  = Ni - Cp
+					nm = np.linalg.norm(d)
+					if nm > 0.001:
+						H_pos[i] = Ni + (d / nm) * 1.01
+				except Exception:
+					pass
 		hbond = set()
 		for i in range(N):
 			if H_pos[i] is None:
@@ -1115,18 +1081,10 @@ class Pose():
 		turn5 = [i+5 < N and (i+5, i) in hbond for i in range(N)]
 		ss = ['L'] * N
 		for i in range(N):
-			if turn3[i]:
-				for k in range(i, min(i + 4, N)):
-					if ss[k] == 'L':
-						ss[k] = 'T'
-			if turn4[i]:
-				for k in range(i, min(i + 5, N)):
-					if ss[k] == 'L':
-						ss[k] = 'T'
-			if turn5[i]:
-				for k in range(i, min(i + 6, N)):
-					if ss[k] == 'L':
-						ss[k] = 'T'
+			for turn, span in [(turn3,4),(turn4,5),(turn5,6)]:
+				if turn[i]:
+					for k in range(i, min(i+span, N)):
+						if ss[k] == 'L': ss[k] = 'T'
 		for i in range(N - 1):
 			if turn5[i] and turn5[i + 1]:
 				for k in range(i + 1, min(i + 6, N)):
@@ -1218,8 +1176,7 @@ class Pose():
 				for k in range(i, i + 3):
 					if ss[k] == 'L':
 						ss[k] = 'P'
-		for i in range(N):
-			self.data['Amino Acids'][i][4] = ss[i]
+		for i in range(N): AAs[i][4] = ss[i]
 	def SASA(self, n_points=100, probe_radius=1.4):
 		''' Calculate Solvent Accessible Surface Area per residue '''
 		VDW = {
@@ -1235,17 +1192,14 @@ class Pose():
 		id_map = {ai: ii for ii, ai in enumerate(ids)}
 		n      = len(ids)
 		c      = coords[np.array(ids)]
-		radii  = np.array([
-			VDW.get(atoms[i][1].upper(), DEFAULT_VDW) + probe_radius
-			for i in ids])
+		radii = np.array([
+			VDW.get(atoms[i][1].upper(),DEFAULT_VDW)+probe_radius for i in ids])
 		golden = (1 + np.sqrt(5)) / 2
 		pts    = np.arange(n_points)
 		theta  = np.arccos(1 - 2 * (pts + 0.5) / n_points)
 		phi    = 2 * np.pi * pts / golden
-		sph    = np.column_stack([
-			np.sin(theta) * np.cos(phi),
-			np.sin(theta) * np.sin(phi),
-			np.cos(theta)])
+		st  = np.sin(theta)
+		sph = np.column_stack([st*np.cos(phi), st*np.sin(phi), np.cos(theta)])
 		dm  = np.sqrt(((c[:, None, :] - c[None, :, :])**2).sum(2))
 		atom_sasa = np.zeros(n)
 		for ii in range(n):
