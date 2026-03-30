@@ -795,6 +795,7 @@ class Pose():
 				else float(raw_q))
 				E.append(fields[i_type])
 		N = [x-N[0] for x in N]
+		S_first = S[0]
 		S = [x-S[0] for x in S]
 		ALL = [[a, r, c, s, x, y, z, o, t, q, e] \
 			for a, r, c, s, x, y, z, o, t, q, e in \
@@ -840,6 +841,47 @@ class Pose():
 			if v['Tricode'] == amino][0]
 			Aminos[k] = [amino, chain, BB, SC, 'L', tricode, 0]
 		Coordinates = np.array(Coordinates)
+		errors = []
+		required_bb = {'N', 'CA', 'C'}
+		sorted_keys = sorted(Aminos.keys())
+		for k in sorted_keys:
+			present = {Atoms[ai][0] for ai in Aminos[k][2]}
+			missing = required_bb - present
+			if missing:
+				orig = k + S_first
+				tri  = Aminos[k][5]
+				errors.append(
+					f'  residue {orig} ({tri}): '
+					f'missing atom(s) {sorted(missing)}')
+		for ki, kj in zip(sorted_keys[:-1], sorted_keys[1:]):
+			C_idx = next(
+				(ai for ai in Aminos[ki][2]
+				if Atoms[ai][0] == 'C'), None)
+			N_idx = next(
+				(ai for ai in Aminos[kj][2]
+				if Atoms[ai][0] == 'N'), None)
+			if C_idx is None or N_idx is None:
+				continue
+			dist = np.linalg.norm(
+				Coordinates[C_idx] - Coordinates[N_idx])
+			if dist > 2.0:
+				orig_i  = ki + S_first
+				orig_j  = kj + S_first
+				gap     = kj - ki - 1
+				tri_i   = Aminos[ki][5]
+				tri_j   = Aminos[kj][5]
+				gap_str = (
+					f', {gap} residue(s) missing'
+					if gap > 0 else '')
+				errors.append(
+					f'  residue {orig_i} ({tri_i}) \u2192 '
+					f'{orig_j} ({tri_j}): '
+					f'C-N = {dist:.2f} \u00c5{gap_str}')
+		if errors:
+			raise Exception(
+				f'Broken chain in {filename} '
+				f'chain {chain}:\n'
+				+ '\n'.join(errors))
 		Aminos = {i: v for i, v in enumerate(Aminos.values())}
 		self.data['Coordinates'] = Coordinates
 		self.data['Amino Acids'] = Aminos
