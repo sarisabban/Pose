@@ -14,9 +14,9 @@ class Pose():
 	''' Data structure that represents a protein '''
 	def __init__(self):
 		path, modulename = os.path.split(__file__)
-		with open(f'{path}/AminoAcids.json') as f: AminoAcids = json.load(f)
+		with open(f'{path}/AminoAcids.json') as f: self.AminoAcids=json.load(f)
 		self.BB_ATOMS = {'N', '1H', '2H', '3H', 'CA', 'HA', 'C', 'O', 'OXT'}
-		Masses = {
+		self.Masses = {
 			'H':1.008,    'He':4.003,   'Li':6.941,   'Be':9.012,
 			'B':10.811,   'C':12.011,   'N':14.007,   'O':15.999,
 			'F':18.998,   'Ne':20.180,  'Na':22.990,  'Mg':24.305,
@@ -41,7 +41,7 @@ class Pose():
 			'At':209.987, 'Rn':222.081, 'Fr':223.020, 'Ra':226.025,
 			'Ac':227.028, 'Th':232.038, 'Pa':231.036, 'U':238.029,
 			'Np':237,     'Pu':244}
-		data = {
+		self.data = {
 			'Energy':0,
 			'Rg':0,
 			'Mass':0,
@@ -52,9 +52,6 @@ class Pose():
 			'Atoms':{},
 			'Bonds':{},
 			'Coordinates':np.array([[0, 0, 0]])}
-		self.AminoAcids = AminoAcids
-		self.Masses = Masses
-		self.data = data
 	def isfused(self, SC):
 		''' Check if an amino acid's sidechain is fused to the backbone '''
 		return self.AminoAcids[SC.upper()]['Fused']
