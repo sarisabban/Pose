@@ -66,16 +66,16 @@ from pose import *
 # Build a peptide
 p = Pose()
 p.Build('GAL')       # Gly-Ala-Leu (uppercase = L-amino acids)
-p.Info()             # Print structured summary
+p.GetInfo()          # Print structured summary
 
 # Inspect properties
-print('Sequence:', p.FASTA())
-print('Mass:', p.Mass(), 'Da')
-print('Rg:', p.Rg(), 'Å')
+print('Sequence:', p.GetFASTA())
+print('Mass:', p.GetMass(), 'Da')
+print('Rg:', p.GetRg(), 'Å')
 
 # Rotate backbone angles (indices are zero-based)
-p.Rotate(1, -60, 'PHI')
-p.Rotate(1, -45, 'PSI')
+p.RotateDihedral(1, -60, 'PHI')
+p.RotateDihedral(1, -45, 'PSI')
 
 # Mutate and export
 p.Mutate(2, 'V')        # Change residue at index 2 (Leu) → Val
@@ -126,9 +126,9 @@ All residue and atom indices start at 0, not 1. Residue 0 is the N-terminal amin
 
 ```python
 p.Build('GAL')
-p.Angle(0, 'PHI')            # PHI of first residue (index 0)
-p.Angle(2, 'chi', 1)         # CHI 1 of third residue (index 2)
-p.Distance(0, 'N', 1, 'CA')  # N of residue 0 to CA of residue 1
+p.GetDihedral(0, 'PHI')            # PHI of first residue (index 0)
+p.GetDihedral(2, 'chi', 1)         # CHI 1 of third residue (index 2)
+p.GetDistance(0, 'N', 1, 'CA')     # N of residue 0 to CA of residue 1
 ```
 
 ### Accessing the data structure directly
@@ -189,210 +189,57 @@ for idx, atom in p.data['Atoms'].items():
 
 | Method                                  | Description |
 |-----------------------------------------|-------------|
-| `p.Distance(0, 'N', 1, 'CA')`           | Distance (Å) between any two atoms. Example: N of residue 0 to CA of residue 1 |
-| `p.Angle(2, 'PHI')`                     | Get PHI, PSI, or OMEGA angle of a residue. Example: PHI of residue 2 |
-| `p.Angle(2, 'chi', 1)`                  | Get CHI 1–4 angle. Example: CHI 1 of residue 2 |
-| `p.Atom3Angle(0, 'N', 0, 'CA', 0, 'C')` | Angle between any three atoms. Example: N–CA–C angle of residue 0 |
-| `p.Mass()`                              | Calculates the molecular mass of a peptide (Daltons) |
-| `p.Size()`                              | Calculates the number of residues in a peptide (length of peptide)|
-| `p.FASTA()`                             | Compile the FASTA sequence of a peptide as a list |
-| `p.SecondaryStructures()`               | Compile the secondary structure assignments as a list: H = α-helix, G = 3₁₀-helix, I = π-helix, E = β-strand, B = β-bridge, T = Turn, S = Bend, L = Loop |
-| `p.Rg()`                                | Compute Radius of gyration (Å) |
-| `p.Gasteiger()`                         | Compute Gasteiger-Marsili partial charges for every atom and store them in `p.data['Atoms'][i][2]`. Use `iterations=` to control convergence (default 6) |
-| `p.DSSP()`                              | Compute the secondary structure for every amino acid and store them in `p.data['Amino Acids'][i][4]` |
-| `p.SASA()`                              | Compute the Solvent Accessible Surface Area (SASA) for each amino acid, and add the value to `p.data['Amino Acids'][i][6]` |
+| `p.GetDistance(0, 'N', 1, 'CA')`        | Get the distance (Å) between any two atoms. Example: N of residue 0 to CA of residue 1 |
+| `p.GetDihedral(2, 'PHI')`               | Get the PHI, PSI, or OMEGA angle of a residue. Example: PHI of residue 2 |
+| `p.GetDihedral(2, 'chi', 1)`            | Get the CHI 1–4 angle. Example: CHI 1 of residue 2 (Note: dihedrals are not case sensitive) |
+| `p.GetAngle(0, 'N', 0, 'CA', 0, 'C')`   | Get the angle between any three atoms. Example: N–CA–C angle of residue 0 |
+| `p.GetMass()`                           | Get the molecular mass of a peptide (Daltons) |
+| `p.GetSize()`                           | Get the number of residues in a peptide (length of peptide)|
+| `p.GetFASTA()`                          | Get the FASTA sequence of a peptide as a list |
+| `p.GetSS()`                             | Get the secondary structure assignments for each amino acid as a list: H = α-helix, G = 3₁₀-helix, I = π-helix, E = β-strand, B = β-bridge, T = Turn, S = Bend, L = Loop. `GetDSSP()` needs to be called first to compute the secondary structures otherwise the default assignment is L for loops |
+| `p.GetRg()`                             | Get the radius of gyration (Å) for the whole structure |
+| `p.GetCharge()`                         | Get the Gasteiger-Marsili partial charges for every atom and store them in `p.data['Atoms'][i][2]`. Use `iterations=` to control convergence (default 6) |
+| `p.GetDSSP()`                           | Get the secondary structure for every amino acid and store them in `p.data['Amino Acids'][i][4]` |
+| `p.GetSASA()`                           | Get the Solvent Accessible Surface Area (SASA) for each amino acid, and add the values to `p.data['Amino Acids'][i][6]` |
+| `p.GetInfo()`                           | Print a formatted summary of the polypeptide information |
+| `p.GetAtomCoord(3, 'N')`                | Get the XYZ coordinates of an atom of a residue. Example: N of residue 3 |
+| `p.GetAtomList(PDB=True)`               | Get a list of all atom element names for the entire structure. Use `PDB=True` for PDB-formatted names |
+| `p.GetAtomBonds(0, 1)`                  | Get the PDB name and element name `[atom 1 element name, atom 1 PDB name, atom 2 PDB name, atom 2 element name]` for two atoms (if they are bonded together). Use the atom indeces |
+| `p.GetIdentity(3, 'atom')`              | Identify an index. what type atom/residue/amino acid an index belongs to. Use `q=True` for charge |
+| `print(p.data)`                         | Print the full data JSON object |
+
+You can also inspect the p.data JSON object and extract relevent info using `print(p.data['FASTA'])` or `p.data['Atoms']`.
 
 ### Manipulation
 
 | Method                                          | Description |
 |-------------------------------------------------|-------------|
-| `p.Rotate(2, 20, 'chi', 1)`                     | Rotate an angle to a target value (degrees). Example: CHI 1 of residue 2 → 20° |
-| `p.Rotate(1, -60, 'PHI')`                       | Rotate a backbone angle. Example: PHI of residue 1 → -60° |
-| `p.Mutate(1, 'V')`                              | Mutate a residue. Example: residue 1 → L-Valine |
-| `p.Adjust(0, 'N', 0, 'CA', 1.46)`               | Set the distance between two atoms (Å). Example: N–CA bond of residue 0 → 1.46 Å. Order matters: `(0,'N',0,'CA',d)` ≠ `(0,'CA',0,'N',d)` |
-| `p.Rotation3Angle(1, 'N', 1, 'CA', 1, 'C', -2)` | Add/subtract degrees from a three-atom angle. Example: subtract 2° from N–CA–C angle of residue 1 |
-| `p.RotatePose(5, [18, 10, 5], 6, [0, 0, 0])`    | Rotate and/or translate a pose. Example: rotate `5`° degrees around axis `[18, 10, 5]` and move `6`Å towards point `[0, 0, 0]` |
+| `p.RotateDihedral(1, -60, 'PHI')`               | Rotate a backbone dihedral angle. Example: PHI of residue 1 → -60° |
+| `p.RotateDihedral(2, 20, 'chi', 1)`             | Rotate a sidechain dihedral angle. Example: CHI 1 of residue 2 → 20° |
+| `p.MovePose(5, [18, 10, 5], 6, [0, 0, 0])`      | Rotate and/or translate the whole structure. Example: rotate `5`° degrees around axis `[18, 10, 5]` and move `6`Å towards point `[0, 0, 0]` |
+| `p.MovePose(5, [18, 10, 5], None, None)`        | Rotate without translating |
+| `p.AdjustAngle(1, 'N', 1, 'CA', 1, 'C', -2)`    | Add/subtract degrees from a three-atom angle. Example: subtract 2° from N–CA–C angle of residue 1 |
+| `p.Mutate(1, 'V')`                              | Mutate a residue. Example: residue 1 → L-Valine. `v` = 1 → D-Valine |
+| `p.AdjustDistance(0, 'N', 0, 'CA', 1.46)`       | Set the distance between two atoms (Å). Example: N–CA bond of residue 0 → 1.46 Å. Order matters: `(0,'N',0,'CA',d)` ≠ `(0,'CA',0,'N',d)` |
 
-### Inspection & Utilities
+### Tools
 
-| Method                    | Description |
-|---------------------------|-------------|
-| `p.Info()`                | Print a formatted summary of all polypeptide information |
-| `p.GetAtom(3, 'N')`       | XYZ coordinates of a named atom in a residue. Example: N of residue 3 |
-| `p.AtomList(PDB=True)`    | List of all atom names. Use `PDB=True` for PDB-formatted names |
-| `p.Identify(3, 'atom')`   | Identify what type an atom index belongs to. Use `q=True` for charge. Use `'residue'` or `'amino acid'` to look up by residue index |
-| `p.GetBondAtoms(0, 1)`    | PDB name and element for both atoms of a bond by atom indices |
-| `print(p.data)`           | Print the full data JSON |
+These are standalone tools (not Pose() class methods) and thus are called on their own
 
-You can also inspect the p.data JSON object and extract relevent info using `print(p.data['FASTA'])` or `p.data['Atoms']`.
+| Function                                        | Description |
+|-------------------------------------------------|-------------|
+| `RMSD(pose1, pose2, alg='align')`               | Computes the Root Mean Squared Deviation between two `Pose` structures using Cα (alpha-carbon) atoms only. Returns the  RMSD in (Å). Supported algorithms: `'align'`, `'kabsch'`, `'quaternion'`, or `'simple'` |
+| `BLAST(FASTA1, FASTA2)`                         | Perform pairwise protein sequence alignment using the Smith-Waterman local alignment algorithm with BLOSUM62 substitution scores, matching the statistical model used by NCBI BLASTP. Returns: `(alignment_string, percent_identity, e_value)` |
+| `MSA([FASTA1, FASTA2, FASTA3....])`             | Aligns three or more protein sequences using a ClustalW-like progressive alignment strategy, pairwise distances are computed with `BLAST()`. Returns: `(alignment_string, aligned_list)` |
+| `Parameterise('MSE.cif', 'J', 'MSE')`           | To add a new amino acid to the `AminoAcids.json` library. Takes `filename`, single letter unicode, three letter tricode |
 
-### Structure Alignment and Comparison
+> BLAST handles sequences beyond the 20 canonical L-amino acids automatically: **D-amino acids**: stored as lowercase letters in `pose.data['FASTA']`. BLAST uppercases both sequences before alignment, treating each D-amino acid as its L-counterpart for scoring purposes. This correctly reflects the chemical reality that D- and L-forms of the same residue have identical side-chain chemistry. **Non-canonical amino acids**: any letter not in the 20-letter BLOSUM62 alphabet falls back to: `+4` for a self-match (equal to the minimum BLOSUM62 diagonal), `−1` for a mismatch. This keeps non-canonical residues visible to the aligner without inflating scores.
+> MSA handles sequences beyond the 20 canonical L-amino acids, identical to `BLAST()`
 
-The `RMSD()` function is a standalone utility (not a pose class method) that computes the Root Mean Squared Deviation between two `Pose` structures using Cα (alpha-carbon) atoms only.
+For Parameterise() this is the workflow:
 
-```python
-from pose import *
-
-p1 = Pose()
-p1.Import('1YN3.pdb', chain='A')
-
-p2 = Pose()
-p2.Import('1YN5.pdb', chain='A')
-
-print(RMSD(p1, p1))        # 0.0
-print(RMSD(p1, p2))        # 0.86355
-```
-
-| Parameter | Type   | Default   | Description                     |
-|-----------|--------|-----------|---------------------------------|
-| `pose1`   | `Pose` | —         | Reference structure             |
-| `pose2`   | `Pose` | —         | Structure to compare            |
-| `alg`     | `str`  | `'align'` | Alignment algorithm (see below) |
-
-**Returns:** `float`, RMSD in Ångströms, rounded to 5 decimal places.
-
-The following are the alignment Algorithms:
-
-| `alg`          | Method | Notes |
-|----------------|--------|-------|
-| `'align'`      | Needleman–Wunsch sequence alignment, iterative Kabsch with 2 Å outlier cutoff | Default, handles structures of different lengths |
-| `'kabsch'`     | SVD-based optimal rotation over first N Cα atoms                              | N = min(len1, len2) |
-| `'quaternion'` | Eigenvalue-based optimal rotation over first N Cα atoms                       | Equivalent to `'kabsch'` |
-| `'simple'`     | Centroid subtraction only, no rotation                                        | Upper bound on RMSD |
-
-```python
-RMSD(p1, p2, alg='align')       # 0.86355  (sequence-aligned core)
-RMSD(p1, p2, alg='kabsch')      # 8.26798  (all first-N residues)
-RMSD(p1, p2, alg='quaternion')  # 8.26798
-RMSD(p1, p2, alg='simple')      # 21.23132
-```
-
-### Pairwise Sequence Alignment (BLAST)
-
-`BLAST()` performs pairwise protein sequence alignment using the Smith-Waterman local alignment algorithm with BLOSUM62 substitution scores, affine gap penalties (open=11, extend=1), and Karlin-Altschul E-value statistics, matching the statistical model used by NCBI BLASTP.
-
-```python
-from pose import *
-
-p1 = Pose(); p1.Import('1YN3.pdb', chain='A')
-p2 = Pose(); p2.Import('8D4Q.pdb', chain='D')
-
-alignment, percent_id, e_val = BLAST(p1.data['FASTA'], p2.data['FASTA'])
-print(alignment)
-# Query length=98  Subject length=99
-# Score: 154.2 bits (393), E-value: 3.401e-45
-# Identities: 80/99 (80.81%), Positives: 88/99 (88.9%), Gaps: 1/99 (1.0%)
-# ...
-
-print(pct_id)   # 80.81
-print(e_val)    # 3.401e-45
-```
-
-| Parameter | Type  | Description |
-|-----------|-------|-------------|
-| `seq1`    | `str` | FASTA sequence of the first protein  |
-| `seq2`    | `str` | FASTA sequence of the second protein |
-
-**Returns:** `(alignment_string, percent_identity, e_value)`
-
-| Return value       | Type    | Description |
-|--------------------|---------|-------------|
-| `alignment_string` | `str`   | BLAST-style formatted alignment with match symbols (`\|` identical, `+` positive, ` ` mismatch/gap) |
-| `percent_identity` | `float` | Percentage of identical residues in the aligned region |
-| `e_value`          | `float` | Karlin-Altschul expect value (lower = more significant) |
-
-**Non-canonical amino acid handling:**
-
-BLAST handles sequences beyond the 20 canonical L-amino acids automatically:
-
-- **D-amino acids**: stored as lowercase letters in `pose.data['FASTA']` (e.g. `'a'` for D-Ala). BLAST uppercases both sequences before alignment, treating each D-amino acid as its L-counterpart for scoring purposes. This correctly reflects the chemical reality that D- and L-forms of the same residue have identical side-chain chemistry.
-
-- **Non-canonical amino acids**: any letter not in the 20-letter BLOSUM62 alphabet falls back to: `+4` for a self-match (equal to the minimum BLOSUM62 diagonal), `−1` for a mismatch. This keeps non-canonical residues visible to the aligner without inflating scores.
-
----
-
-### Multiple Sequence Alignment (MSA)
-
-`MSA()` aligns three or more protein sequences using a ClustalW-like progressive alignment strategy: pairwise distances are computed with `BLAST()`, a UPGMA guide tree is built from those distances, and sequences are merged in guide-tree order using Needleman-Wunsch profile-profile alignment (BLOSUM62, affine gap penalties).
-
-```python
-from pose import *
-
-s1 = Pose(); p1.Import('1YN3.pdb', chain='A').data['FASTA']
-s2 = Pose(); p2.Import('8D4Q.pdb', chain='D').data['FASTA']
-s3 = Pose(); p2.Import('1YN4.pdb', chain='A').data['FASTA']
-s4 = Pose(); p2.Import('4NZL.pdb', chain='B').data['FASTA']
-s5 = Pose(); p2.Import('9ASS.pdb', chain='B').data['FASTA']
-
-alignment, sequences = MSA([s1, s2, s3, s4, s5])
-print(alignment)
-
-# Multiple Sequence Alignment (5 sequences, 99 columns)
-#
-# Seq1  GS-TVPYTITVNGTSQNILSNLTFNKNQNISYKDLEGKVKSVLESNRGITDVDLRLSKQA  59
-# Seq2  STIQIPYTITVNGTSQNILSSLTFNKNQNISYKDIENKVKSVLYFNRGISDIDLRLSKQA  60
-# ...
-#       ....:****:*:*.:. ..:...*.:*:.:.*::::.***:.*...**::...:..::.*
-```
-
-| Parameter   | Type        | Description |
-|-------------|-------------|-------------|
-| `sequences` | `list[str]` | FASTA sequences to align (minimum 2) |
-
-**Returns:** `(alignment_string, aligned_list)`
-
-| Return value       | Type        | Description |
-|--------------------|-------------|-------------|
-| `alignment_string` | `str`       | ClustalW-style formatted text with conservation symbols |
-| `aligned_list`     | `list[str]` | Gap-padded sequences in input order, all strings are the same length |
-
-**Conservation symbols** (bottom row of each alignment block):
-
-| Symbol | Meaning                                            |
-|--------|----------------------------------------------------|
-| `*`    | All sequences have the same residue in this column |
-| `:`    | All pairwise residues score positively on BLOSUM62 |
-| `.`    | Average pairwise BLOSUM62 score is positive        |
-| ` `    | Low or no conservation                             |
-
-**Non-canonical amino acid handling:** identical to `BLAST()`, D-amino acids (lowercase) are uppercased before scoring, and non-canonical letters fall back to `+4` self-match / `−1` mismatch in BLOSUM62.
-
-**Algorithm summary:**
-1. Compute all n(n−1)/2 pairwise distances via `BLAST()` (distance = 1 − identity)
-2. Build a UPGMA guide tree from those distances
-3. Align sequence groups in merge order using Needleman-Wunsch on column profiles
-4. Report conservation per column using BLOSUM62 scores
-
----
-
-### Adding New Amino Acids
-
-To add a new amino acid to the library use the Parameterise() function, which is a standalone utility (not a pose class method):
-
-1. Download the CIF file for the amino acid from
-   [RCSB Chemical Sketch](https://www.rcsb.org/chemical-sketch)
-2. Call `Parameterise()` with the CIF file path, a single-letter key, and the
-   three-letter residue code:
-   ```python
-   from pose import *
-
-   Parameterise('MSE.cif', 'J', 'MSE')
-   ```
-
-The function reads the CIF geometry, superimposes the amino acid onto the ALA
-backbone reference frame, detects chi angles and bond connectivity
-automatically, and writes the new entry directly into `AminoAcids.json`.
-All 26 canonical/non-canonical entries were generated this way.
-
-| Argument   | Description                                              | Example     |
-|------------|----------------------------------------------------------|-------------|
-| `filename` | Path to the downloaded CIF file                          | `'MSE.cif'` |
-| `unicode`  | Single-letter key for the amino acid (case-insensitive)  | `'J'`       |
-| `tricode`  | Three-letter residue code from RCSB (case-insensitive)   | `'MSE'`     |
-
-> **Note:** GLY is not supported (no CB atom). Use any unused character as
-> the key; all uppercase letters A–Z are already assigned (see the Supported
-> Amino Acids table above).
+1. Download the CIF file for the amino acid from [RCSB Chemical Sketch](https://www.rcsb.org/chemical-sketch)
+2. Call `Parameterise()` with the CIF file path, a single-letter key, and the three-letter residue code.
 
 ---
 
@@ -405,6 +252,7 @@ All 26 canonical/non-canonical entries were generated this way.
 | `Mass`        | Float       | Mass in Daltons |
 | `Size`        | Integer     | Number of residues |
 | `FASTA`       | String      | One-letter sequence |
+| `SS`          | String      | One-letter amino acid secondary structure asignments |
 | `Amino Acids` | Dict        | `{index: [symbol, chain, bb_atom_indices, sc_atom_indices, secondary_struct, tricode, SASA]}`, **zero-based indexing** |
 | `Atoms`       | Dict        | `{atom_index: [pdb_name, element, partial charge, occupancy, temp_factor]}`, **zero-based indexing** |
 | `Bonds`       | Dict        | Bond graph as adjacency list: `{atom_index: [bonded_atom_indices]}` |
@@ -426,15 +274,7 @@ All 26 canonical/non-canonical entries were generated this way.
 
 ## Contributing
 
-Contributions are welcome! Open an issue or pull request on GitHub.
-
-These are functions that would make valuable additions to the library:
-
-1. **pose.py**: Add organic molecule suppport
-2. **tools.py**: Pocket and void calculation
-3. **tools.py**: AMBER energy function or general input and structure minimisation
-
-Please follow the existing code style: tabs for indentation, 80 characters max line length.
+Contributions are welcome! Open an issue or pull request on GitHub, or just email me.
 
 ---
 
