@@ -542,16 +542,18 @@ class Pose():
 		''' Rotate around a bond '''
 		AminoAcid = self.data['Amino Acids'][AA][0].upper()
 		at = angle_type.upper()
+		BB    = self.data['Amino Acids'][AA][2]
+		atoms = self.data['Atoms']
 		if at == 'PHI':
-			n = 3 if AA == 0 else 1
-			split = self.data['Amino Acids'][AA][2][2] + n
-			ori   = self.GetAtom(AA, 'CA')
+			ca_idx = next(i for i in BB if atoms[i][0] == 'CA')
+			split  = ca_idx + 1
+			ori    = self.GetAtom(AA, 'CA')
 			self.rotate_backbone(split, ori,
 				self.GetAtom(AA, 'CA'), self.GetAtom(AA, 'N'),
 				self.Angle(AA, 'phi'), theta)
 		elif at == 'PSI':
-			n = 3 if AA == 0 else 1
-			split = self.data['Amino Acids'][AA][2][4] + n
+			c_idx = next(i for i in BB if atoms[i][0] == 'C')
+			split = c_idx + 1
 			ori   = self.GetAtom(AA, 'C')
 			self.rotate_backbone(split, ori,
 				self.GetAtom(AA, 'C'), self.GetAtom(AA, 'CA'),
