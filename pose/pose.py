@@ -14,7 +14,7 @@ class Pose():
 	''' Data structure that represents a protein '''
 	def __init__(self):
 		path, modulename = os.path.split(__file__)
-		with open(f'{path}/AminoAcids.json') as f: self.AminoAcids=json.load(f)
+		with open(f'{path}/AminoAcids_N.json') as f: self.AminoAcids=json.load(f)
 		self.BB_ATOMS = {'N', '1H', '2H', '3H', 'CA', 'HA', 'C', 'O', 'OXT'}
 		self.Masses = {
 			'H':1.008,    'He':4.003,   'Li':6.941,   'Be':9.012,
@@ -214,7 +214,7 @@ class Pose():
 		BB = BB + backbone_type[BB_index:]
 		BBi, SCi = [], []
 		for atomi, v in enumerate(BB, I):
-			self.data['Atoms'][atomi] = [v[0], v[1], v[2], 1.0, v[3]]
+			self.data['Atoms'][atomi] = [v[0], v[1], v[2], v[3], v[4]]
 			(BBi if v[0] in self.BB_ATOMS else SCi).append(atomi)
 		tri = self.AminoAcids[AA.upper()]['Tricode']
 		if LD: tri = 'D' + tri[1:]

@@ -100,8 +100,8 @@ def Parameterise(filename, unicode, tricode):
 		x, y, z = round(v[0], 3), round(v[1], 3), round(v[2], 3)
 		return f'[{x:6.3f},{y:7.3f},{z:7.3f}]'
 	def fmt_atom(a):
-		name, el, q, t = a
-		return f'["{name}", "{el}", {float(q):.1f}, {float(t):.1f}]'
+		name, el, q, o, t = a
+		return f'["{name}", "{el}", {float(q):.1f}, {float(o):.1f}, {float(t):.1f}]'
 	def fmt_chi(c):
 		return '[' + ', '.join(f'"{x}"' for x in c) + ']'
 	def format_entry(key, e, is_last):
@@ -258,7 +258,7 @@ def Parameterise(filename, unicode, tricode):
 	# 9. Assemble output arrays
 	id_to_i   = {cid: i for i, cid in enumerate(CIF_IDS)}
 	coord_out = [COORD[id_to_i[n]].tolist() for n in ordered]
-	atoms_out = [[name_map[n], elem[n], 0, 0] for n in ordered]
+	atoms_out = [[name_map[n], elem[n], 0, 1.0, 0] for n in ordered]
 	# 10. Build entry
 	entry = {
 		'Vectors':         coord_out,
