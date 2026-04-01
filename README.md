@@ -33,9 +33,9 @@ Using this data structure, Pose can build and manipulate polypeptides: construct
 **Key features:**
 - Zero external dependencies beyond NumPy
 - 26 amino acids supported by default (20 canonical + 6 non-canonical: LYX, MSE, PYL, SEC, TRF, TSO), can be extended to 100+
-- Both L-amino acids and D-amino acids (mixed sequences fully supported)
-- Full bond graph with partial charges, torsion angles (PHI, PSI, OMEGA, CHI 1–4)
-- PDB import and export
+- Support for both L-amino acids and D-amino acids (mixed sequences fully supported)
+- Full bond graph with partial charges, torsion angles (PHI, PSI, OMEGA, CHI)
+- PDB/mmCIF file import and export
 - Zero-based indexing throughout (unlike PDB's one-based convention)
 
 ---

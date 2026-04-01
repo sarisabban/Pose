@@ -14,7 +14,7 @@ class Pose():
 	''' Data structure that represents a protein '''
 	def __init__(self):
 		path, modulename = os.path.split(__file__)
-		with open(f'{path}/AminoAcids_N.json') as f: self.AminoAcids=json.load(f)
+		with open(f'{path}/AminoAcids.json') as f: self.AminoAcids=json.load(f)
 		self.BB_ATOMS = {'N', '1H', '2H', '3H', 'CA', 'HA', 'C', 'O', 'OXT'}
 		self.Masses = {
 			'H':1.008,    'He':4.003,   'Li':6.941,   'Be':9.012,
@@ -384,7 +384,7 @@ class Pose():
 		''' Print all basic info about a peptide '''
 		print('Sequence:\t{}'.format(self.data['FASTA']))
 		print('SS:\t\t{}'.format(''.join(self.SecondaryStructures())))
-		print('Mass:\t\t{} Da'.format(self.data['Mass']))
+		print('Mass:\t\t{:,} Da'.format(self.data['Mass']))
 		print('Size:\t\t{} residues'.format(self.data['Size']))
 		print('Rg:\t\t{} Å'.format(self.data['Rg']))
 		print('Energy:\t\t{}'.format(self.data['Energy']))
