@@ -3,25 +3,21 @@
 import os
 import math
 import json
+import copy
 import datetime
 import numpy as np
 from collections import defaultdict
 
 np.seterr(all='ignore')
 
-
 class PoseN():
 	'''Data structure that represents a nucleic acid'''
 	def __init__(self):
-		path, _ = os.path.split(__file__)
-		with open(f'{path}/NucleotidesDB.json') as f:
-			self.NucleotidesDB = json.load(f)
+		path, modulename = os.path.split(__file__)
+		with open(f'{path}/Nucleotides.json') as f:self.Nucleotides=json.load(f)
 		self.BB_ATOMS = {
-			'P', 'OP1', 'OP2',
-			"O5'", "C5'", "H5'", "H5''",
-			"C4'", "H4'", "O4'",
-			"C3'", "H3'", "C2'", "H2'", "H2''",
-			"C1'", "H1'", "O3'",
+			'P', 'OP1', 'OP2', "O5'", "C5'", "H5'", "H5''", "C4'", "H4'", "O4'",
+			"C3'", "H3'", "C2'", "H2'", "H2''", "C1'", "H1'", "O3'",
 			"O2'", "HO2'"}
 		self.Masses = {
 			'H':1.008,    'He':4.003,   'Li':6.941,   'Be':9.012,
@@ -48,16 +44,19 @@ class PoseN():
 			'At':209.987, 'Rn':222.081, 'Fr':223.020, 'Ra':226.025,
 			'Ac':227.028, 'Th':232.038, 'Pa':231.036, 'U':238.029,
 			'Np':237,     'Pu':244}
-		self.data = {
-			'Energy':0, 'Rg':0, 'Mass':0, 'Size':0,
-			'FASTA':None, 'Type':None,
-			'Nucleotides':{}, 'Atoms':{}, 'Bonds':{},
-			'Coordinates':np.zeros((0, 3))}
-
-	# ── Formatting helpers ────────────────────────────────────────────────────
-
-	def PDB_entry(self, atom, n, a, l, r, c, s, i, x, y, z, o, t, q, e):
-		'''Construct a PDB atom data row'''
+		self.data = {'Energy':0, 'Rg':0, 'Mass':0, 'Size':0, 'FASTA':None,
+			'Type':None, 'Nucleotides':{}, 'Atoms':{}, 'Bonds':{},
+			'Coordinates':np.array([[0, 0, 0]])}
+	def _atomaaiter(self):
+		''' Yield (atom_item, coordinate, nt_index) for every atom '''
+		nts    = self.data['Nucleotides']
+		atoms  = self.data['Atoms']
+		coords = self.data['Coordinates']
+		for nt_idx, nt_info in nts.items():
+			for ai in nt_info[2] + nt_info[3]:
+				yield (ai, atoms[ai]), coords[ai], nt_idx
+	def _pdbentry(self, atom, n, a, l, r, c, s, i, x, y, z, o, t, q, e):
+		''' Construct a PDB atom data rowc'''
 		ATOM = '{:<6}'.format(atom)
 		N    = '{:>5} '.format(n)
 		A    = '{:<4}'.format(a)
@@ -74,11 +73,8 @@ class PoseN():
 		Q    = '{:>10}'.format('')
 		E    = '{:<2} \n'.format(e)
 		return ATOM+N+A+L+R+C+S+I+X+Y+Z+O+T+Q+E
-
-	def CIF_entry(
-			self, atom, n, a, l, r, c, label_seq,
-			x, y, z, o, t, q, e):
-		'''Construct a mmCIF _atom_site data row'''
+	def _cifentry(self, atom, n, a, l, r, c, label_seq, x, y, z, o, t, q, e):
+		''' Construct a mmCIF _atom_site data row '''
 		alt    = '.' if l == '' else l
 		charge = '?' if q == 0.0 else '{:.3f}'.format(q)
 		fields = [
@@ -89,11 +85,22 @@ class PoseN():
 			'{:.2f}'.format(o), '{:.2f}'.format(t),
 			charge, str(label_seq), r, c, a, '1']
 		return ' '.join(fields) + '\n'
-
-	# ── Math utilities ────────────────────────────────────────────────────────
-
-	def Rotation_Matrix(self, theta, u):
-		'''Rodrigues rotation matrix: rotate theta degrees around axis u'''
+	def _prevnt(self, nt):
+		''' Index of previous nucleotide on same chain, or None '''
+		nts   = self.data['Nucleotides']
+		chain = nts[nt][1]
+		if nt-1 in nts and nts[nt-1][1] == chain:
+			return nt - 1
+		return None
+	def _nextnt(self, nt):
+		''' Index of next nucleotide on same chain, or None '''
+		nts   = self.data['Nucleotides']
+		chain = nts[nt][1]
+		if nt+1 in nts and nts[nt+1][1] == chain:
+			return nt + 1
+		return None
+	def _rotmat(self, theta, u):
+		''' Rotate a matrix around axis u by theta angle '''
 		ux, uy, uz = u[0], u[1], u[2]
 		S = math.sin(math.radians(theta))
 		C = math.cos(math.radians(theta))
@@ -101,9 +108,8 @@ class PoseN():
 			[C+ux**2*(1-C),    ux*uy*(1-C)-uz*S, ux*uz*(1-C)+uy*S],
 			[uy*ux*(1-C)+uz*S, C+uy**2*(1-C),    uy*uz*(1-C)-ux*S],
 			[uz*ux*(1-C)-uy*S, uz*uy*(1-C)+ux*S, C+uz**2*(1-C)  ]])
-
-	def _downstream_atoms(self, pivot_a_idx, pivot_b_idx):
-		'''BFS from pivot_b without crossing pivot_a; returns atom idx set'''
+	def _downstreamatoms(self, pivot_a_idx, pivot_b_idx):
+		''' Breadth First Search from pivot_b without crossing pivot_a '''
 		visited = {pivot_a_idx}
 		queue   = [pivot_b_idx]
 		result  = set()
@@ -118,331 +124,24 @@ class PoseN():
 				if nb not in visited:
 					queue.append(nb)
 		return result
-
-	def _get_atom_idx(self, nt, atom):
-		'''Global atom index for named atom in nucleotide nt'''
+	def _atomidx(self, nt, atom):
+		''' Get atom index for its name in a nucleotide '''
 		info = self.data['Nucleotides'][nt]
 		for i in info[2] + info[3]:
 			if self.data['Atoms'][i][0] == atom:
 				return i
 		raise Exception(f'Atom {atom} not found in nucleotide {nt}')
-
-	def _prev_nt(self, nt):
-		'''Index of previous nucleotide on same chain, or None'''
-		nts   = self.data['Nucleotides']
-		chain = nts[nt][1]
-		if nt-1 in nts and nts[nt-1][1] == chain:
-			return nt - 1
-		return None
-
-	def _next_nt(self, nt):
-		'''Index of next nucleotide on same chain, or None'''
-		nts   = self.data['Nucleotides']
-		chain = nts[nt][1]
-		if nt+1 in nts and nts[nt+1][1] == chain:
-			return nt + 1
-		return None
-
-	# ── Atom access ───────────────────────────────────────────────────────────
-
-	def AtomList(self, PDB=False):
-		'''List of all atom names (PDB=True) or elements (PDB=False)'''
-		idx = 0 if PDB else 1
-		return [x[idx] for x in self.data['Atoms'].values()]
-
-	def GetAtom(self, nt, atom):
-		'''XYZ coordinates for named atom in nucleotide nt'''
-		info    = self.data['Nucleotides'][nt]
-		indices = info[2] if atom in self.BB_ATOMS else info[3]
-		for i in indices:
-			if self.data['Atoms'][i][0] == atom:
-				return self.data['Coordinates'][i]
-		raise Exception(f'Nucleotide {nt} does not have atom {atom}')
-
-	def GetBondAtoms(self, index1, index2):
-		'''Names and elements of two bonded atoms by global index'''
-		if index2 not in self.data['Bonds'].get(index1, []):
-			raise Exception('Requested atoms are not bonded')
-		return [
-			self.data['Atoms'][index1][0],
-			self.data['Atoms'][index1][1],
-			self.data['Atoms'][index2][0],
-			self.data['Atoms'][index2][1]]
-
-	def Identify(self, atom_index):
-		'''Classify atom as Phosphate, Sugar, Base, or Hydrogen'''
-		name = self.data['Atoms'][atom_index][0]
-		elem = self.data['Atoms'][atom_index][1].upper()
-		if elem == 'H':
-			return 'Hydrogen'
-		if name in {'P', 'OP1', 'OP2'}:
-			return 'Phosphate'
-		if name in self.BB_ATOMS:
-			return 'Sugar'
-		return 'Base'
-
-	# ── Scalar properties ─────────────────────────────────────────────────────
-
-	def Distance(self, nt1, atom1, nt2, atom2):
-		'''Distance in Angstrom between two named atoms'''
-		A = self.GetAtom(nt1, atom1)
-		B = self.GetAtom(nt2, atom2)
-		return float(np.linalg.norm(B - A))
-
-	def Atom3Angle(self, nt1, atom1, nt2, atom2, nt3, atom3):
-		'''Bond angle (degrees) at atom2'''
-		a1    = self.GetAtom(nt1, atom1)
-		a2    = self.GetAtom(nt2, atom2)
-		a3    = self.GetAtom(nt3, atom3)
-		A     = a2 - a1
-		B     = a2 - a3
-		cos_t = np.dot(A, B) / (np.linalg.norm(A) * np.linalg.norm(B))
-		return math.degrees(math.acos(max(-1.0, min(1.0, cos_t))))
-
-	def Mass(self):
-		'''Total mass in Da'''
-		return round(sum(self.Masses[e] for e in self.AtomList()), 3)
-
-	def Rg(self):
-		'''Radius of gyration in Angstrom'''
-		mass  = np.array([self.Masses[e] for e in self.AtomList()])
-		tmass = mass.sum()
-		if tmass == 0:
-			raise ZeroDivisionError('No atoms in pose')
-		coord = self.data['Coordinates']
-		xm    = coord * mass[:, np.newaxis]
-		rr    = np.sum(coord * xm)
-		mm    = np.sum((xm.sum(0) / tmass) ** 2)
-		return round(math.sqrt(rr / tmass - mm), 3)
-
-	def FASTA(self):
-		'''5\'->3\' one-letter sequence of strand A'''
-		nts = self.data['Nucleotides']
-		return ''.join(v[0] for v in nts.values() if v[1] == 'A')
-
-	def Size(self):
-		'''Number of base pairs (length of strand A)'''
-		nts = self.data['Nucleotides']
-		return sum(1 for v in nts.values() if v[1] == 'A')
-
-	def update_data(self):
-		'''Refresh cached scalar properties'''
-		self.data['Mass']  = self.Mass()
-		self.data['FASTA'] = self.FASTA()
-		self.data['Size']  = self.Size()
-		self.data['Rg']    = self.Rg()
-
-	def Info(self):
-		'''Print a summary of the nucleic acid pose'''
-		print('Type:\t\t{}'.format(self.data['Type']))
-		print('Sequence:\t{}'.format(self.data['FASTA']))
-		print('Mass:\t\t{} Da'.format(self.data['Mass']))
-		print('Size:\t\t{} bp'.format(self.data['Size']))
-		print('Rg:\t\t{} Å'.format(self.data['Rg']))
-		print('Energy:\t\t{}'.format(self.data['Energy']))
-
-	# ── I/O ───────────────────────────────────────────────────────────────────
-
-	def atom_residue_iter(self):
-		'''Yield (atom_item, coordinate, nt_index) for every atom'''
-		nts    = self.data['Nucleotides']
-		atoms  = self.data['Atoms']
-		coords = self.data['Coordinates']
-		for nt_idx, nt_info in nts.items():
-			for ai in nt_info[2] + nt_info[3]:
-				yield (ai, atoms[ai]), coords[ai], nt_idx
-
-	def Export(self, filename):
-		'''Export pose to a .pdb or .cif file'''
-		ext = filename[-3:].upper()
-		nts = self.data['Nucleotides']
-		if ext == 'PDB':
-			with open(filename, 'w') as f:
-				DATE = datetime.date.today().strftime('%d-%b-%Y')
-				f.write('HEADER' + ' '*44 + DATE
-				        + ' '*3 + 'XXXX' + ' '*11 + '\n')
-				f.write('EXPDTA    THEORETICAL MODEL'
-				        + ' '*52 + '\n')
-				f.write('REMARK 220 REMARK: MODEL GENERATED BY '
-				        'SARI SABBAN' + ' '*30 + '\n')
-				for atom, coord, nt_idx in self.atom_residue_iter():
-					nt = nts[nt_idx]
-					f.write(self.PDB_entry(
-						'ATOM', atom[0]+1, atom[1][0], '',
-						nt[4], nt[1], nt_idx+1, '',
-						coord[0], coord[1], coord[2],
-						atom[1][3], atom[1][4],
-						atom[1][2], atom[1][1]))
-				f.write('TER')
-		elif ext == 'CIF':
-			with open(filename, 'w') as f:
-				f.write('data_POSE\n#\n')
-				f.write('loop_\n')
-				cols = [
-					'_atom_site.group_PDB',
-					'_atom_site.id',
-					'_atom_site.type_symbol',
-					'_atom_site.label_atom_id',
-					'_atom_site.label_alt_id',
-					'_atom_site.label_comp_id',
-					'_atom_site.label_asym_id',
-					'_atom_site.label_entity_id',
-					'_atom_site.label_seq_id',
-					'_atom_site.pdbx_PDB_ins_code',
-					'_atom_site.Cartn_x',
-					'_atom_site.Cartn_y',
-					'_atom_site.Cartn_z',
-					'_atom_site.occupancy',
-					'_atom_site.B_iso_or_equiv',
-					'_atom_site.pdbx_formal_charge',
-					'_atom_site.auth_seq_id',
-					'_atom_site.auth_comp_id',
-					'_atom_site.auth_asym_id',
-					'_atom_site.auth_atom_id',
-					'_atom_site.pdbx_PDB_model_num']
-				for col in cols:
-					f.write(col + '\n')
-				for atom, coord, nt_idx in self.atom_residue_iter():
-					nt = nts[nt_idx]
-					f.write(self.CIF_entry(
-						'ATOM', atom[0]+1, atom[1][0], '',
-						nt[4], nt[1], nt_idx+1,
-						coord[0], coord[1], coord[2],
-						atom[1][3], atom[1][4],
-						atom[1][2], atom[1][1]))
-				f.write('#\n')
-
-	# ── Build ─────────────────────────────────────────────────────────────────
-
-	def Build(self, sequence, fmt='DNA'):
-		'''Build a canonical double-stranded B-DNA or A-RNA helix'''
-		sequence = sequence.upper()
-		N = len(sequence)
-		if fmt == 'DNA':
-			comp_map    = {'A':'T','T':'A','G':'C','C':'G'}
-			tri_map     = {'A':'DA','T':'DT','G':'DG','C':'DC'}
-			rise, twist = 3.4,  36.0
-		else:
-			comp_map    = {'A':'U','U':'A','G':'C','C':'G'}
-			tri_map     = {'A':'A','U':'U','G':'G','C':'C'}
-			rise, twist = 2.81, 32.7
-
-		def Rz(deg):
-			t = math.radians(deg)
-			c, s = math.cos(t), math.sin(t)
-			return np.array([[c,-s,0.],[s,c,0.],[0.,0.,1.]])
-
-		Rflip = np.diag([-1.0, 1.0, -1.0])
-
-		self.data = {
-			'Energy':0, 'Rg':0, 'Mass':0, 'Size':0,
-			'FASTA':None, 'Type':fmt,
-			'Nucleotides':{}, 'Atoms':{}, 'Bonds':{},
-			'Coordinates':np.zeros((0,3))}
-
-		coords_list = []
-		atom_idx    = 0
-		nt_idx      = 0
-
-		def add_nt(tricode, chain, k, flip, is_5prime):
-			nonlocal atom_idx, nt_idx
-			db       = self.NucleotidesDB[tricode]
-			vecs     = np.array(db['Vectors'])
-			bb_meta  = db['Backbone Atoms']
-			bas_meta = db['Base Atoms']
-			bonds_db = db['Bonds']
-			n_bb     = len(bb_meta)
-			skip     = 3 if is_5prime else 0   # skip P,OP1,OP2
-
-			R = Rz(k * twist)
-			T = np.array([0.0, 0.0, k * rise])
-			if flip:
-				transformed = (vecs @ Rflip.T) @ R.T + T
-			else:
-				transformed = vecs @ R.T + T
-
-			local_to_global = {}
-			bb_indices  = []
-			bas_indices = []
-
-			for li in range(n_bb):
-				if li < skip:
-					local_to_global[li] = -1
-					continue
-				am = bb_meta[li]
-				self.data['Atoms'][atom_idx] = [
-					am[0], am[1], am[2], 1.0, 0.0]
-				coords_list.append(transformed[li])
-				local_to_global[li] = atom_idx
-				bb_indices.append(atom_idx)
-				atom_idx += 1
-
-			for li2, am in enumerate(bas_meta):
-				li = n_bb + li2
-				self.data['Atoms'][atom_idx] = [
-					am[0], am[1], am[2], 1.0, 0.0]
-				coords_list.append(transformed[li])
-				local_to_global[li] = atom_idx
-				bas_indices.append(atom_idx)
-				atom_idx += 1
-
-			bonds = self.data['Bonds']
-			for k_str, v_list in bonds_db.items():
-				li = int(k_str)
-				gi = local_to_global.get(li, -1)
-				if gi == -1:
-					continue
-				bonds.setdefault(gi, [])
-				for lj in v_list:
-					gj = local_to_global.get(lj, -1)
-					if gj != -1 and gj not in bonds[gi]:
-						bonds[gi].append(gj)
-
-			sym = tricode[-1]
-			self.data['Nucleotides'][nt_idx] = [
-				sym, chain, bb_indices, bas_indices, tricode]
-			nt_idx += 1
-
-		for i, base in enumerate(sequence):
-			add_nt(tri_map[base], 'A', i, False, i == 0)
-
-		comp_seq = ''.join(comp_map[b] for b in reversed(sequence))
-		for j, base in enumerate(comp_seq):
-			add_nt(tri_map[base], 'B', N-1-j, True, j == 0)
-
-		self.data['Coordinates'] = np.array(coords_list)
-
-		nts   = self.data['Nucleotides']
-		atoms = self.data['Atoms']
-		bonds = self.data['Bonds']
-		for strand_ids in [list(range(N)), list(range(N, 2*N))]:
-			for i in range(len(strand_ids)-1):
-				nt_i = nts[strand_ids[i]]
-				nt_j = nts[strand_ids[i+1]]
-				o3 = next(
-					(a for a in nt_i[2]
-					 if atoms[a][0] == "O3'"), None)
-				p  = next(
-					(a for a in nt_j[2]
-					 if atoms[a][0] == 'P'), None)
-				if o3 is None or p is None:
-					continue
-				bonds.setdefault(o3, [])
-				bonds.setdefault(p,  [])
-				if p  not in bonds[o3]: bonds[o3].append(p)
-				if o3 not in bonds[p]:  bonds[p].append(o3)
-
-		self.update_data()
-
-	# ── Import ────────────────────────────────────────────────────────────────
-
-	def Import(
-			self, filename, chainA='A', chainB='B', model=1):
-		'''Import nucleic acid from a .pdb or .cif file'''
+	def _update(self):
+		''' Update cached properties after structural changes '''
+		self.data['Mass']  = self.GetMass()
+		self.data['FASTA'] = self.GetFASTA()
+		self.data['Size']  = self.GetSize()
+		self.data['Rg']    = self.GetRg()
+	def Import(self, filename, chainA='A', chainB='B', model=1):
+		''' Import a structure from a .pdb or .cif file '''
 		ext            = filename[-3:].upper()
 		chains_to_load = [c for c in [chainA, chainB] if c]
 		rows           = []
-
 		if ext == 'PDB':
 			has_models = False; in_target = False; found_models = []
 			with open(filename) as f:
@@ -478,14 +177,12 @@ class PoseN():
 							elem = aname.lstrip('0123456789')[0]
 						rows.append(
 							(aname,resn,ch,resnum,x,y,z,occ,bfac,elem))
-
 		elif ext == 'CIF':
 			with open(filename) as f: lines = f.readlines()
 			col = {}; col_idx = 0; data_start = 0
 			for idx, line in enumerate(lines):
 				if line.strip() == 'loop_':
-					nxt = (lines[idx+1].strip()
-					       if idx+1 < len(lines) else '')
+					nxt = (lines[idx+1].strip() if idx+1 < len(lines) else '')
 					if nxt.startswith('_atom_site.'):
 						i = idx + 1
 						while (i < len(lines) and
@@ -527,77 +224,61 @@ class PoseN():
 					float(flds[i_z]),
 					float(flds[i_occ]), float(flds[i_bfac]),
 					flds[i_type]))
-
 		if not rows:
 			raise Exception(
 				f'No ATOM records for chains '
 				f'{chains_to_load} in {filename}')
-
-		# De-duplicate alternates: keep highest occupancy
 		best = {}
 		for idx, row in enumerate(rows):
 			key = (row[2], row[3], row[0])
 			if key not in best or row[7] > rows[best[key]][7]:
 				best[key] = idx
 		rows = [rows[i] for i in sorted(best.values())]
-
-		# Group by (chain, resnum)
 		residues = defaultdict(list)
 		for row in rows:
 			residues[(row[2], row[3])].append(row)
-
-		# Detect DNA vs RNA
-		all_resnames = {atom_rows[0][1]
-		                for atom_rows in residues.values()}
+		all_resnames = {atom_rows[0][1] for atom_rows in residues.values()}
 		if any(rn in ('DT','T') for rn in all_resnames):
 			fmt = 'DNA'
 		elif any(rn == 'U' for rn in all_resnames):
 			fmt = 'RNA'
 		else:
-			fmt = 'DNA'   # default
-
+			fmt = 'DNA'
 		self.data = {
 			'Energy':0, 'Rg':0, 'Mass':0, 'Size':0,
 			'FASTA':None, 'Type':fmt,
 			'Nucleotides':{}, 'Atoms':{}, 'Bonds':{},
 			'Coordinates':np.zeros((0,3))}
-
 		coords_list = []
 		atom_idx    = 0
 		nt_idx      = 0
 		nt_range_by_chain = defaultdict(list)
-
 		chain_order = chains_to_load
 		sorted_keys = sorted(
 			residues.keys(),
 			key=lambda k: (
 				chain_order.index(k[0])
 				if k[0] in chain_order else 99, k[1]))
-
 		for (chain, resnum) in sorted_keys:
 			atom_rows   = residues[(chain, resnum)]
 			resn_raw    = atom_rows[0][1]
-			# Normalise residue name to NucleotidesDB key
 			if fmt == 'DNA' and resn_raw in ('A','G','C'):
 				tricode = 'D' + resn_raw
 			elif resn_raw == 'T':
 				tricode = 'DT'
 			else:
 				tricode = resn_raw
-			if tricode not in self.NucleotidesDB:
+			if tricode not in self.Nucleotides:
 				continue
-
-			db       = self.NucleotidesDB[tricode]
+			db       = self.Nucleotides[tricode]
 			bb_meta  = db['Backbone Atoms']
 			bas_meta = db['Base Atoms']
 			bonds_db = db['Bonds']
 			n_bb     = len(bb_meta)
-
 			name_row = {r[0]: r for r in atom_rows}
 			bb_indices  = []
 			bas_indices = []
 			local_to_global = {}
-
 			for li, am in enumerate(bb_meta):
 				row = name_row.get(am[0])
 				if row is None:
@@ -608,7 +289,6 @@ class PoseN():
 				local_to_global[li] = atom_idx
 				bb_indices.append(atom_idx)
 				atom_idx += 1
-
 			for li2, am in enumerate(bas_meta):
 				li  = n_bb + li2
 				row = name_row.get(am[0])
@@ -620,10 +300,7 @@ class PoseN():
 				local_to_global[li] = atom_idx
 				bas_indices.append(atom_idx)
 				atom_idx += 1
-
-			# Any extra atoms in PDB not in DB template
-			db_names = ({am[0] for am in bb_meta}
-			            | {am[0] for am in bas_meta})
+			db_names = ({am[0] for am in bb_meta} | {am[0] for am in bas_meta})
 			for aname, row in name_row.items():
 				if aname in db_names: continue
 				el = row[9] if row[9] else aname[0]
@@ -635,7 +312,6 @@ class PoseN():
 				else:
 					bas_indices.append(atom_idx)
 				atom_idx += 1
-
 			bonds = self.data['Bonds']
 			for k_str, v_list in bonds_db.items():
 				li = int(k_str)
@@ -646,17 +322,14 @@ class PoseN():
 					gj = local_to_global.get(lj, -1)
 					if gj != -1 and gj not in bonds[gi]:
 						bonds[gi].append(gj)
-
 			sym = tricode[-1]
 			self.data['Nucleotides'][nt_idx] = [
 				sym, chain, bb_indices, bas_indices, tricode]
 			nt_range_by_chain[chain].append(nt_idx)
 			nt_idx += 1
-
 		self.data['Coordinates'] = (
 			np.array(coords_list) if coords_list
 			else np.zeros((0,3)))
-
 		atoms = self.data['Atoms']
 		bonds = self.data['Bonds']
 		nts   = self.data['Nucleotides']
@@ -664,71 +337,129 @@ class PoseN():
 			for i in range(len(chain_nt_ids)-1):
 				nt_i = nts[chain_nt_ids[i]]
 				nt_j = nts[chain_nt_ids[i+1]]
-				o3 = next(
-					(a for a in nt_i[2]
-					 if atoms[a][0] == "O3'"), None)
-				p  = next(
-					(a for a in nt_j[2]
-					 if atoms[a][0] == 'P'), None)
+				o3 = next((a for a in nt_i[2] if atoms[a][0] == "O3'"), None)
+				p  = next((a for a in nt_j[2] if atoms[a][0] == 'P'), None)
 				if o3 is None or p is None: continue
 				bonds.setdefault(o3, [])
 				bonds.setdefault(p,  [])
 				if p  not in bonds[o3]: bonds[o3].append(p)
 				if o3 not in bonds[p]:  bonds[p].append(o3)
-
-		self.update_data()
-
-	# ── Angle measurement ─────────────────────────────────────────────────────
-
-	def Angle(self, nt, angle_type):
-		'''Measure a backbone (alpha/beta/gamma/delta/epsilon/zeta) or
-		chi dihedral angle in degrees'''
+		self._update()
+	def Export(self, filename):
+		''' Export pose to a .pdb or .cif file '''
+		ext = filename[-3:].upper()
 		nts = self.data['Nucleotides']
-		at  = angle_type.lower()
-		prv = self._prev_nt(nt)
-		nxt = self._next_nt(nt)
+		if ext == 'PDB':
+			with open(filename, 'w') as f:
+				DATE = datetime.date.today().strftime('%d-%b-%Y')
+				f.write('HEADER' + ' '*44 + DATE
+				+ ' '*3 + 'XXXX' + ' '*11 + '\n')
+				f.write('EXPDTA    THEORETICAL MODEL'
+				+ ' '*52 + '\n')
+				f.write('REMARK 220 REMARK: MODEL GENERATED BY '
+				'SARI SABBAN' + ' '*30 + '\n')
+				for atom, coord, nt_idx in self._atomaaiter():
+					nt = nts[nt_idx]
+					f.write(self._pdbentry(
+						'ATOM', atom[0]+1, atom[1][0], '',
+						nt[4], nt[1], nt_idx+1, '',
+						coord[0], coord[1], coord[2],
+						atom[1][3], atom[1][4],
+						atom[1][2], atom[1][1]))
+				f.write('TER')
+		elif ext == 'CIF':
+			with open(filename, 'w') as f:
+				f.write(f'data_{filename[:-4]}\n#\n')
+				f.write(f'_entry.id   {filename[:-4]}\n#\n')
+				f.write('_exptl.method   \'THEORETICAL MODEL\'\n#\n')
+				f.write('_audit_author.name          \'SARI SABBAN\'\n')
+				f.write('_audit_author.pdbx_ordinal  1\n#\n')
+				f.write('loop_\n')
+				cols = [
+					'_atom_site.group_PDB',
+					'_atom_site.id',
+					'_atom_site.type_symbol',
+					'_atom_site.label_atom_id',
+					'_atom_site.label_alt_id',
+					'_atom_site.label_comp_id',
+					'_atom_site.label_asym_id',
+					'_atom_site.label_entity_id',
+					'_atom_site.label_seq_id',
+					'_atom_site.pdbx_PDB_ins_code',
+					'_atom_site.Cartn_x',
+					'_atom_site.Cartn_y',
+					'_atom_site.Cartn_z',
+					'_atom_site.occupancy',
+					'_atom_site.B_iso_or_equiv',
+					'_atom_site.pdbx_formal_charge',
+					'_atom_site.auth_seq_id',
+					'_atom_site.auth_comp_id',
+					'_atom_site.auth_asym_id',
+					'_atom_site.auth_atom_id',
+					'_atom_site.pdbx_PDB_model_num']
+				for col in cols:
+					f.write(col + '\n')
+				for atom, coord, nt_idx in self._atomaaiter():
+					nt = nts[nt_idx]
+					f.write(self._cifentry(
+						'ATOM', atom[0]+1, atom[1][0], '',
+						nt[4], nt[1], nt_idx+1,
+						coord[0], coord[1], coord[2],
+						atom[1][3], atom[1][4],
+						atom[1][2], atom[1][1]))
+				f.write('#\n')
+	def GetDistance(self, nt1, atom1, nt2, atom2):
+		''' Measure distance between any two atoms '''
+		A = self.GetAtomCoord(nt1, atom1)
+		B = self.GetAtomCoord(nt2, atom2)
+		return float(np.linalg.norm(B - A))
+	def GetDihedral(self, nt, angle_type):
+		''' Measure α/β/γ/δ/ε/ζ/χ angle at bond '''
+		nts = self.data['Nucleotides']
+		at  = angle_type.upper()
+		prv = self._prevnt(nt)
+		nxt = self._nextnt(nt)
 		try:
-			if at == 'alpha':
+			if at == 'ALPHA':
 				if prv is None: return 0.0
-				r1 = self.GetAtom(prv, "O3'")
-				r2 = self.GetAtom(nt,  'P')
-				r3 = self.GetAtom(nt,  "O5'")
-				r4 = self.GetAtom(nt,  "C5'")
-			elif at == 'beta':
-				r1 = self.GetAtom(nt, 'P')
-				r2 = self.GetAtom(nt, "O5'")
-				r3 = self.GetAtom(nt, "C5'")
-				r4 = self.GetAtom(nt, "C4'")
-			elif at == 'gamma':
-				r1 = self.GetAtom(nt, "O5'")
-				r2 = self.GetAtom(nt, "C5'")
-				r3 = self.GetAtom(nt, "C4'")
-				r4 = self.GetAtom(nt, "C3'")
-			elif at == 'delta':
-				r1 = self.GetAtom(nt, "C5'")
-				r2 = self.GetAtom(nt, "C4'")
-				r3 = self.GetAtom(nt, "C3'")
-				r4 = self.GetAtom(nt, "O3'")
-			elif at == 'epsilon':
+				r1 = self.GetAtomCoord(prv, "O3'")
+				r2 = self.GetAtomCoord(nt,  'P')
+				r3 = self.GetAtomCoord(nt,  "O5'")
+				r4 = self.GetAtomCoord(nt,  "C5'")
+			elif at == 'BETA':
+				r1 = self.GetAtomCoord(nt, 'P')
+				r2 = self.GetAtomCoord(nt, "O5'")
+				r3 = self.GetAtomCoord(nt, "C5'")
+				r4 = self.GetAtomCoord(nt, "C4'")
+			elif at == 'GAMMA':
+				r1 = self.GetAtomCoord(nt, "O5'")
+				r2 = self.GetAtomCoord(nt, "C5'")
+				r3 = self.GetAtomCoord(nt, "C4'")
+				r4 = self.GetAtomCoord(nt, "C3'")
+			elif at == 'DELTA':
+				r1 = self.GetAtomCoord(nt, "C5'")
+				r2 = self.GetAtomCoord(nt, "C4'")
+				r3 = self.GetAtomCoord(nt, "C3'")
+				r4 = self.GetAtomCoord(nt, "O3'")
+			elif at == 'EPSILON':
 				if nxt is None: return 0.0
-				r1 = self.GetAtom(nt,  "C4'")
-				r2 = self.GetAtom(nt,  "C3'")
-				r3 = self.GetAtom(nt,  "O3'")
-				r4 = self.GetAtom(nxt, 'P')
-			elif at == 'zeta':
+				r1 = self.GetAtomCoord(nt,  "C4'")
+				r2 = self.GetAtomCoord(nt,  "C3'")
+				r3 = self.GetAtomCoord(nt,  "O3'")
+				r4 = self.GetAtomCoord(nxt, 'P')
+			elif at == 'ZETA':
 				if nxt is None: return 0.0
-				r1 = self.GetAtom(nt,  "C3'")
-				r2 = self.GetAtom(nt,  "O3'")
-				r3 = self.GetAtom(nxt, 'P')
-				r4 = self.GetAtom(nxt, "O5'")
-			elif at == 'chi':
+				r1 = self.GetAtomCoord(nt,  "C3'")
+				r2 = self.GetAtomCoord(nt,  "O3'")
+				r3 = self.GetAtomCoord(nxt, 'P')
+				r4 = self.GetAtomCoord(nxt, "O5'")
+			elif at == 'CHI':
 				tricode = nts[nt][4]
-				catoms  = (
-					self.NucleotidesDB[tricode]['Chi Angle Atoms'])
-				r1 = self.GetAtom(nt, catoms[0])
-				r2 = self.GetAtom(nt, catoms[1])
-				r3 = self.GetAtom(nt, catoms[2])
-				r4 = self.GetAtom(nt, catoms[3])
+				catoms  = (self.Nucleotides[tricode]['Chi Angle Atoms'])
+				r1 = self.GetAtomCoord(nt, catoms[0])
+				r2 = self.GetAtomCoord(nt, catoms[1])
+				r3 = self.GetAtomCoord(nt, catoms[2])
+				r4 = self.GetAtomCoord(nt, catoms[3])
 			else:
 				raise Exception(f'Unknown angle type: {angle_type}')
 		except Exception:
@@ -741,11 +472,42 @@ class PoseN():
 		a = np.dot(u2, u1u2Cu2u3)
 		b = mag_u2 * np.dot(u1u2, u2u3)
 		return math.atan2(a, b) * 180 / math.pi
-
-	# ── Gasteiger partial charges ─────────────────────────────────────────────
-
-	def Gasteiger(self, iterations=6):
-		'''Assign Gasteiger-Marsili partial charges to all atoms'''
+	def GetAngle(self, nt1, atom1, nt2, atom2, nt3, atom3):
+		''' Measure distance between any two atoms '''
+		a1    = self.GetAtomCoord(nt1, atom1)
+		a2    = self.GetAtomCoord(nt2, atom2)
+		a3    = self.GetAtomCoord(nt3, atom3)
+		A     = a2 - a1
+		B     = a2 - a3
+		cos_t = np.dot(A, B) / (np.linalg.norm(A) * np.linalg.norm(B))
+		return math.degrees(math.acos(max(-1.0, min(1.0, cos_t))))
+	def GetMass(self):
+		''' Total mass of nucleic acid in Da '''
+		return round(sum(self.Masses[e] for e in self.GetAtomList()), 3)
+	def GetSize(self):
+		''' Calculate number of base pairs (length of strand) '''
+		nts = self.data['Nucleotides']
+		return sum(1 for v in nts.values() if v[1] == 'A')
+	def GetFASTA(self):
+		''' Return 5\'->3\' one-letter FASTA sequence of a strand '''
+		nts = self.data['Nucleotides']
+		return ''.join(v[0] for v in nts.values() if v[1] == 'A')
+	def GetType(self):
+		''' Return the type of the nucleic acid (DNA or RNA) '''
+		return self.data['Type']
+	def GetRg(self):
+		''' Calculate the radius of gyration of a nucleic acid '''
+		mass  = np.array([self.Masses[e] for e in self.GetAtomList()])
+		tmass = mass.sum()
+		if tmass == 0:
+			raise ZeroDivisionError('No atoms in pose')
+		coord = self.data['Coordinates']
+		xm    = coord * mass[:, np.newaxis]
+		rr    = np.sum(coord * xm)
+		mm    = np.sum((xm.sum(0) / tmass) ** 2)
+		return round(math.sqrt(rr / tmass - mm), 3)
+	def GetCharge(self, iterations=6):
+		''' Calculate Gasteiger-Marsili partial charges to all atoms '''
 		PARAMS = {
 			'C3': (7.98,  9.18,  1.88),
 			'C2': (8.79,  9.32,  1.51),
@@ -772,8 +534,7 @@ class PoseN():
 		heavy_thresh[s_mask] = 2.1
 		bond_mask = (dm < heavy_thresh) & (dm > 0.0)
 		bonds = {i: [] for i in ids}
-		for ii, jj in np.argwhere(bond_mask):
-			bonds[ids[ii]].append(ids[jj])
+		for ii, jj in np.argwhere(bond_mask): bonds[ids[ii]].append(ids[jj])
 		heavy    = ~is_H
 		short    = (dm < 1.42) & (dm > 0)
 		sp2_mask = short & heavy[:,None] & heavy[None,:]
@@ -798,9 +559,9 @@ class PoseN():
 		for n in range(iterations):
 			damp  = 1.0 / (2 ** (n+1))
 			chi   = {i: a + q*(b+c*q)
-			         for i in ids
-			         for a,b,c in [atype[i]]
-			         for q     in [charges[i]]}
+				for i in ids
+				for a,b,c in [atype[i]]
+				for q     in [charges[i]]}
 			delta = {i: 0.0 for i in ids}
 			for i in ids:
 				for j in bonds[i]:
@@ -818,108 +579,58 @@ class PoseN():
 			for i in ids: charges[i] += delta[i]
 		for i in ids:
 			self.data['Atoms'][i][2] = round(charges[i], 4)
-
-	# ── Structural manipulation ───────────────────────────────────────────────
-
-	def Rotation3Angle(
-			self, nt1, atom1, nt2, atom2, nt3, atom3, theta):
-		'''Rotate structure after atom2 to adjust nt1-nt2-nt3 angle'''
-		atom2i = self._get_atom_idx(nt2, atom2)
-		A      = (self.GetAtom(nt3, atom3)
-		          - self.GetAtom(nt1, atom1))
-		B      = (self.GetAtom(nt3, atom3)
-		          - self.GetAtom(nt2, atom2))
-		u  = np.cross(B, A)
-		lu = np.linalg.norm(u)
-		if lu < 1e-10:
-			return
-		u      = u / lu
-		ori    = self.GetAtom(nt2, atom2).copy()
-		before = self.data['Coordinates'][:atom2i]
-		after  = self.data['Coordinates'][atom2i:] - ori
-		RM     = self.Rotation_Matrix(theta, u)
-		after  = np.matmul(after, RM) + ori
-		self.data['Coordinates'] = np.append(before, after, axis=0)
-
-	def Adjust(self, nt1, atom1, nt2, atom2, length):
-		'''Translate atom2 and its downstream atoms to set bond length'''
-		Ai     = self._get_atom_idx(nt1, atom1)
-		Bi     = self._get_atom_idx(nt2, atom2)
-		coords = self.data['Coordinates']
-		v      = coords[Bi] - coords[Ai]
-		mag    = np.linalg.norm(v)
-		if mag < 1e-10:
-			return
-		shift = v * (length / mag) - v
-		for idx in self._downstream_atoms(Ai, Bi):
-			coords[idx] += shift
-		self.data['Coordinates'] = coords
-
-	def Rotate(self, nt, theta, angle_type):
-		'''Set a backbone or chi torsion to theta degrees (absolute)'''
-		at  = angle_type.lower()
-		nts = self.data['Nucleotides']
-		prv = self._prev_nt(nt)
-		nxt = self._next_nt(nt)
-		try:
-			if at == 'alpha':
-				if prv is None: return
-				piv_a = self._get_atom_idx(prv, "O3'")
-				piv_b = self._get_atom_idx(nt,  'P')
-			elif at == 'beta':
-				piv_a = self._get_atom_idx(nt, 'P')
-				piv_b = self._get_atom_idx(nt, "O5'")
-			elif at == 'gamma':
-				piv_a = self._get_atom_idx(nt, "O5'")
-				piv_b = self._get_atom_idx(nt, "C5'")
-			elif at == 'delta':
-				piv_a = self._get_atom_idx(nt, "C5'")
-				piv_b = self._get_atom_idx(nt, "C4'")
-			elif at == 'epsilon':
-				if nxt is None: return
-				piv_a = self._get_atom_idx(nt, "C4'")
-				piv_b = self._get_atom_idx(nt, "C3'")
-			elif at == 'zeta':
-				if nxt is None: return
-				piv_a = self._get_atom_idx(nt,  "C3'")
-				piv_b = self._get_atom_idx(nt,  "O3'")
-			elif at == 'chi':
-				tricode = nts[nt][4]
-				catoms  = (
-					self.NucleotidesDB[tricode]['Chi Angle Atoms'])
-				piv_a = self._get_atom_idx(nt, catoms[1])
-				piv_b = self._get_atom_idx(nt, catoms[2])
-			else:
-				raise Exception(f'Unknown angle type: {angle_type}')
-		except Exception:
-			return
-		current    = self.Angle(nt, angle_type)
-		downstream = self._downstream_atoms(piv_a, piv_b)
-		coords     = self.data['Coordinates']
-		ori        = coords[piv_b].copy()
-		u          = coords[piv_a] - coords[piv_b]
-		u          = u / np.linalg.norm(u)
-		RM_zero    = self.Rotation_Matrix(-current, u)
-		RM_new     = self.Rotation_Matrix(theta, u)
-		for idx in downstream:
-			v           = coords[idx] - ori
-			v           = np.matmul(v, RM_zero)
-			v           = np.matmul(v, RM_new)
-			coords[idx] = v + ori
-		self.data['Coordinates'] = coords
-
-	def RotatePose(self, theta=None, u=None, l=None, ori=None):
-		'''Rigidly rotate and/or translate the full pose'''
+	def GetInfo(self):
+		''' Print all basic info about a nucleic acid '''
+		print('Type:\t\t{}'.format(self.data['Type']))
+		print('Sequence:\t{}'.format(self.data['FASTA']))
+		print('Mass:\t\t{} Da'.format(self.data['Mass']))
+		print('Size:\t\t{} bp'.format(self.data['Size']))
+		print('Rg:\t\t{} Å'.format(self.data['Rg']))
+		print('Energy:\t\t{}'.format(self.data['Energy']))
+	def GetAtomCoord(self, nt, atom):
+		''' Get specific atom coordinates '''
+		info    = self.data['Nucleotides'][nt]
+		indices = info[2] if atom in self.BB_ATOMS else info[3]
+		for i in indices:
+			if self.data['Atoms'][i][0] == atom:
+				return self.data['Coordinates'][i]
+		raise Exception(f'Nucleotide {nt} does not have atom {atom}')
+	def GetAtomList(self, PDB=False):
+		''' Return list of all atoms '''
+		idx = 0 if PDB else 1
+		return [x[idx] for x in self.data['Atoms'].values()]
+	def GetAtomBonds(self, index1, index2):
+		''' Get the atom pair that participate in a bond from their index '''
+		if index2 not in self.data['Bonds'].get(index1, []):
+			raise Exception('Requested atoms are not bonded')
+		return [
+			self.data['Atoms'][index1][0],
+			self.data['Atoms'][index1][1],
+			self.data['Atoms'][index2][0],
+			self.data['Atoms'][index2][1]]
+	def GetIdentity(self, index, item, q=False):
+		''' Identify an atom, atom charge, or nucleotide given its index '''
+		if item.upper() == 'ATOM':
+			Atom = self.data['Atoms'][index]
+			if q: return Atom[-1]
+			else: return Atom[0]
+		elif item.upper() == 'NUCLEOTIDE':
+			Nucleotide = self.data['Nucleotides'][index][0]
+			return Nucleotide
+		else:
+			raise Exception('Incorrect item')
+	def MovePose(self, theta=None, u=None, l=None, ori=None):
+		''' Rotate and/or translate the full pose rigidly '''
 		coords = self.data['Coordinates'].copy()
 		if theta is not None and u is not None:
 			u   = np.array(u, dtype=float)
 			mag = np.linalg.norm(u)
 			if mag < 1e-10:
 				raise Exception(
-					'Rotation axis u cannot be a zero vector')
+				'Rotation axis u cannot be a zero vector')
 			u      = u / mag
 			pivot  = coords.mean(axis=0)
-			R      = self.Rotation_Matrix(theta, u)
+			R      = self._rotmat(theta, u)
 			coords = np.matmul(coords - pivot, R) + pivot
 		if l is not None and ori is not None:
 			ori      = np.array(ori, dtype=float)
@@ -931,3 +642,202 @@ class PoseN():
 					'ori coincides with pose centroid')
 			coords = coords + (d / mag) * l
 		self.data['Coordinates'] = coords
+	def RotateDihedral(self, nt, theta, angle_type):
+		''' Rotate around a bond '''
+		at  = angle_type.upper()
+		nts = self.data['Nucleotides']
+		prv = self._prevnt(nt)
+		nxt = self._nextnt(nt)
+		try:
+			if at == 'ALPHA':
+				if prv is None: return
+				piv_a = self._atomidx(prv, "O3'")
+				piv_b = self._atomidx(nt,  'P')
+			elif at == 'beta':
+				piv_a = self._atomidx(nt, 'P')
+				piv_b = self._atomidx(nt, "O5'")
+			elif at == 'GAMMA':
+				piv_a = self._atomidx(nt, "O5'")
+				piv_b = self._atomidx(nt, "C5'")
+			elif at == 'DELTA':
+				piv_a = self._atomidx(nt, "C5'")
+				piv_b = self._atomidx(nt, "C4'")
+			elif at == 'EPSILON':
+				if nxt is None: return
+				piv_a = self._atomidx(nt, "C4'")
+				piv_b = self._atomidx(nt, "C3'")
+			elif at == 'ZETA':
+				if nxt is None: return
+				piv_a = self._atomidx(nt,  "C3'")
+				piv_b = self._atomidx(nt,  "O3'")
+			elif at == 'CHI':
+				tricode = nts[nt][4]
+				catoms  = (
+					self.Nucleotides[tricode]['Chi Angle Atoms'])
+				piv_a = self._atomidx(nt, catoms[1])
+				piv_b = self._atomidx(nt, catoms[2])
+			else:
+				raise Exception(f'Unknown angle type: {angle_type}')
+		except Exception: return
+		current    = self.GetDihedral(nt, angle_type)
+		downstream = self._downstreamatoms(piv_a, piv_b)
+		coords     = self.data['Coordinates']
+		ori        = coords[piv_b].copy()
+		u          = coords[piv_a] - coords[piv_b]
+		u          = u / np.linalg.norm(u)
+		RM_zero    = self._rotmat(-current, u)
+		RM_new     = self._rotmat(theta, u)
+		for idx in downstream:
+			v           = coords[idx] - ori
+			v           = np.matmul(v, RM_zero)
+			v           = np.matmul(v, RM_new)
+			coords[idx] = v + ori
+		self.data['Coordinates'] = coords
+	def AdjustAngle(self, nt1, atom1, nt2, atom2, nt3, atom3, theta):
+		''' Change angle between three atoms '''
+		atom2i = self._atomidx(nt2, atom2)
+		A      = (self.GetAtomCoord(nt3, atom3) - self.GetAtomCoord(nt1, atom1))
+		B      = (self.GetAtomCoord(nt3, atom3) - self.GetAtomCoord(nt2, atom2))
+		u  = np.cross(B, A)
+		lu = np.linalg.norm(u)
+		if lu < 1e-10: return
+		u      = u / lu
+		ori    = self.GetAtomCoord(nt2, atom2).copy()
+		before = self.data['Coordinates'][:atom2i]
+		after  = self.data['Coordinates'][atom2i:] - ori
+		RM     = self._rotmat(theta, u)
+		after  = np.matmul(after, RM) + ori
+		self.data['Coordinates'] = np.append(before, after, axis=0)
+	def AdjustDistance(self, nt1, atom1, nt2, atom2, length):
+		''' Change the distance between any two atoms '''
+		Ai     = self._atomidx(nt1, atom1)
+		Bi     = self._atomidx(nt2, atom2)
+		coords = self.data['Coordinates']
+		v      = coords[Bi] - coords[Ai]
+		mag    = np.linalg.norm(v)
+		if mag < 1e-10:
+			return
+		shift = v * (length / mag) - v
+		for idx in self._downstreamatoms(Ai, Bi): coords[idx] += shift
+		self.data['Coordinates'] = coords
+
+
+
+
+
+
+
+
+
+
+
+
+
+"""
+
+	def Build(self, sequence, fmt='DNA'):
+		'''Build a canonical double-stranded B-DNA or A-RNA helix'''
+		sequence = sequence.upper()
+		N = len(sequence)
+		if fmt == 'DNA':
+			comp_map    = {'A':'T','T':'A','G':'C','C':'G'}
+			tri_map     = {'A':'DA','T':'DT','G':'DG','C':'DC'}
+			rise, twist = 3.4,  36.0
+		else:
+			comp_map    = {'A':'U','U':'A','G':'C','C':'G'}
+			tri_map     = {'A':'A','U':'U','G':'G','C':'C'}
+			rise, twist = 2.81, 32.7
+		def Rz(deg):
+			t = math.radians(deg)
+			c, s = math.cos(t), math.sin(t)
+			return np.array([[c,-s,0.],[s,c,0.],[0.,0.,1.]])
+		Rflip = np.diag([-1.0, 1.0, -1.0])
+		self.data = {
+			'Energy':0, 'Rg':0, 'Mass':0, 'Size':0,
+			'FASTA':None, 'Type':fmt,
+			'Nucleotides':{}, 'Atoms':{}, 'Bonds':{},
+			'Coordinates':np.zeros((0,3))}
+		coords_list = []
+		atom_idx    = 0
+		nt_idx      = 0
+		def add_nt(tricode, chain, k, flip, is_5prime):
+			nonlocal atom_idx, nt_idx
+			db       = self.NucleotidesDB[tricode]
+			vecs     = np.array(db['Vectors'])
+			bb_meta  = db['Backbone Atoms']
+			bas_meta = db['Base Atoms']
+			bonds_db = db['Bonds']
+			n_bb     = len(bb_meta)
+			skip     = 3 if is_5prime else 0   # skip P,OP1,OP2
+			R = Rz(k * twist)
+			T = np.array([0.0, 0.0, k * rise])
+			if flip:
+				transformed = (vecs @ Rflip.T) @ R.T + T
+			else:
+				transformed = vecs @ R.T + T
+			local_to_global = {}
+			bb_indices  = []
+			bas_indices = []
+			for li in range(n_bb):
+				if li < skip:
+					local_to_global[li] = -1
+					continue
+				am = bb_meta[li]
+				self.data['Atoms'][atom_idx] = [
+					am[0], am[1], am[2], 1.0, 0.0]
+				coords_list.append(transformed[li])
+				local_to_global[li] = atom_idx
+				bb_indices.append(atom_idx)
+				atom_idx += 1
+			for li2, am in enumerate(bas_meta):
+				li = n_bb + li2
+				self.data['Atoms'][atom_idx] = [
+					am[0], am[1], am[2], 1.0, 0.0]
+				coords_list.append(transformed[li])
+				local_to_global[li] = atom_idx
+				bas_indices.append(atom_idx)
+				atom_idx += 1
+			bonds = self.data['Bonds']
+			for k_str, v_list in bonds_db.items():
+				li = int(k_str)
+				gi = local_to_global.get(li, -1)
+				if gi == -1:
+					continue
+				bonds.setdefault(gi, [])
+				for lj in v_list:
+					gj = local_to_global.get(lj, -1)
+					if gj != -1 and gj not in bonds[gi]:
+						bonds[gi].append(gj)
+			sym = tricode[-1]
+			self.data['Nucleotides'][nt_idx] = [
+				sym, chain, bb_indices, bas_indices, tricode]
+			nt_idx += 1
+		for i, base in enumerate(sequence):
+			add_nt(tri_map[base], 'A', i, False, i == 0)
+		comp_seq = ''.join(comp_map[b] for b in reversed(sequence))
+		for j, base in enumerate(comp_seq):
+			add_nt(tri_map[base], 'B', N-1-j, True, j == 0)
+		self.data['Coordinates'] = np.array(coords_list)
+		nts   = self.data['Nucleotides']
+		atoms = self.data['Atoms']
+		bonds = self.data['Bonds']
+		for strand_ids in [list(range(N)), list(range(N, 2*N))]:
+			for i in range(len(strand_ids)-1):
+				nt_i = nts[strand_ids[i]]
+				nt_j = nts[strand_ids[i+1]]
+				o3 = next(
+					(a for a in nt_i[2]
+					 if atoms[a][0] == "O3'"), None)
+				p  = next(
+					(a for a in nt_j[2]
+					 if atoms[a][0] == 'P'), None)
+				if o3 is None or p is None:
+					continue
+				bonds.setdefault(o3, [])
+				bonds.setdefault(p,  [])
+				if p  not in bonds[o3]: bonds[o3].append(p)
+				if o3 not in bonds[p]:  bonds[p].append(o3)
+		self.update_data()
+
+
+"""

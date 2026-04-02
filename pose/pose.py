@@ -41,9 +41,8 @@ class Pose():
 			'At':209.987, 'Rn':222.081, 'Fr':223.020, 'Ra':226.025,
 			'Ac':227.028, 'Th':232.038, 'Pa':231.036, 'U':238.029,
 			'Np':237,     'Pu':244}
-		self.data = {
-			'Energy':0, 'Rg':0, 'Mass':0, 'Size':0, 'FASTA':None, 'SS':None,
-			'Amino Acids':{}, 'Atoms':{}, 'Bonds':{},
+		self.data = {'Energy':0, 'Rg':0, 'Mass':0, 'Size':0, 'FASTA':None,
+			'SS':None, 'Amino Acids':{}, 'Atoms':{}, 'Bonds':{},
 			'Coordinates':np.array([[0, 0, 0]])}
 	def _isfused(self, SC):
 		''' Check if an amino acid's sidechain is fused to the backbone '''
@@ -639,7 +638,7 @@ class Pose():
 		mag = np.linalg.norm(B - A)
 		return mag
 	def GetDihedral(self, AA, angle_type, chi_type=None):
-		''' Measure angle at bond '''
+		''' Measure φ/ψ/ω/χ angle at bond '''
 		AminoAcid = self.data['Amino Acids'][AA][0].upper()
 		at = angle_type.upper()
 		if at == 'PHI':
