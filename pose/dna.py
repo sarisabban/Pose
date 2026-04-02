@@ -651,25 +651,25 @@ class PoseN():
 		try:
 			if at == 'ALPHA':
 				if prv is None: return
-				piv_a = self._atomidx(prv, "O3'")
-				piv_b = self._atomidx(nt,  'P')
-			elif at == 'beta':
 				piv_a = self._atomidx(nt, 'P')
 				piv_b = self._atomidx(nt, "O5'")
-			elif at == 'GAMMA':
+			elif at == 'BETA':
 				piv_a = self._atomidx(nt, "O5'")
 				piv_b = self._atomidx(nt, "C5'")
-			elif at == 'DELTA':
+			elif at == 'GAMMA':
 				piv_a = self._atomidx(nt, "C5'")
 				piv_b = self._atomidx(nt, "C4'")
-			elif at == 'EPSILON':
-				if nxt is None: return
+			elif at == 'DELTA':
 				piv_a = self._atomidx(nt, "C4'")
 				piv_b = self._atomidx(nt, "C3'")
+			elif at == 'EPSILON':
+				if nxt is None: return
+				piv_a = self._atomidx(nt, "C3'")
+				piv_b = self._atomidx(nt, "O3'")
 			elif at == 'ZETA':
 				if nxt is None: return
-				piv_a = self._atomidx(nt,  "C3'")
-				piv_b = self._atomidx(nt,  "O3'")
+				piv_a = self._atomidx(nt,  "O3'")
+				piv_b = self._atomidx(nxt, 'P')
 			elif at == 'CHI':
 				tricode = nts[nt][4]
 				catoms  = (
