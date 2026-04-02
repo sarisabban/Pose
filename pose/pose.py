@@ -541,7 +541,11 @@ class Pose():
 				f.write('TER')
 		elif filename[-3:].upper() == 'CIF':
 			with open(filename, 'w') as f:
-				f.write('data_POSE\n#\n')
+				f.write(f'data_{filename[:-4]}\n#\n')
+				f.write(f'_entry.id   {filename[:-4]}\n#\n')
+				f.write('_exptl.method   \'THEORETICAL MODEL\'\n#\n')
+				f.write('_audit_author.name          \'SARI SABBAN\'\n')
+				f.write('_audit_author.pdbx_ordinal  1\n#\n')
 				f.write('loop_\n')
 				cols = [
 					'_atom_site.group_PDB',

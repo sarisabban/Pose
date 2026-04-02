@@ -234,6 +234,7 @@ These are standalone tools (not Pose() class methods) and thus are called on the
 | `Parameterise('MSE.cif', 'J', 'MSE')`           | To add a new amino acid to the `AminoAcids.json` library. Takes `filename`, single letter unicode, three letter tricode |
 
 > BLAST handles sequences beyond the 20 canonical L-amino acids automatically: **D-amino acids**: stored as lowercase letters in `pose.data['FASTA']`. BLAST uppercases both sequences before alignment, treating each D-amino acid as its L-counterpart for scoring purposes. This correctly reflects the chemical reality that D- and L-forms of the same residue have identical side-chain chemistry. **Non-canonical amino acids**: any letter not in the 20-letter BLOSUM62 alphabet falls back to: `+4` for a self-match (equal to the minimum BLOSUM62 diagonal), `−1` for a mismatch. This keeps non-canonical residues visible to the aligner without inflating scores.
+
 > MSA handles sequences beyond the 20 canonical L-amino acids, identical to `BLAST()`
 
 For Parameterise() this is the workflow:
