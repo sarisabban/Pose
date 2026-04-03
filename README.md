@@ -9,7 +9,7 @@
 </pre></div>
 
 # Pose
-A bare-metal Python library for building and manipulating protein molecular structures
+A bare-metal Python library for building and manipulating protein and nucleic acid molecular structures
 
 ![Python >= 3](https://img.shields.io/badge/python-%3E%3D3-blue)
 ![NumPy](https://img.shields.io/badge/dependency-NumPy-orange)
@@ -26,15 +26,18 @@ A bare-metal Python library for building and manipulating protein molecular stru
 
 ## What is Pose?
 
-Pose constructs a data structure for a protein molecule that contains all relevant information defining a polypeptide. Primary information includes the XYZ cartesian coordinates of each atom, the identity and charge of each atom, and the bond graph of the entire molecule. Secondary information includes the FASTA sequence, radius of gyration, potential energy, and the secondary structure assignment for each residue.
+Pose constructs a data structure for a protein or a nucleic acid molecule that contains all relevant information defining a polymer. Primary information includes the XYZ cartesian coordinates of each atom, the identity and charge of each atom, and the bond graph of the entire molecule. Secondary information includes the FASTA sequence, radius of gyration, potential energy, and the secondary structure assignment for each residue.
 
-Using this data structure, Pose can build and manipulate polypeptides: construct any polypeptide from sequence, move torsion and rotamer angles, mutate residues, and measure bond lengths and angles. It is designed as a substrate for higher-level protocols such as simulated annealing, molecular dynamics, and machine learning-based protein design.
+Using this data structure, Pose can build and manipulate polypeptides and nucleic acids: construct any polypeptide or nucleic acid from sequence, move torsion and rotamer angles, mutate residues, and measure bond lengths and angles. It is designed as a substrate for higher-level protocols such as simulated annealing, molecular dynamics, and machine learning-based protein design.
 
 **Key features:**
 - Zero external dependencies beyond NumPy
 - 26 amino acids supported by default (20 canonical + 6 non-canonical: LYX, MSE, PYL, SEC, TRF, TSO), can be extended to 100+
 - Support for both L-amino acids and D-amino acids (mixed sequences fully supported)
-- Full bond graph with partial charges, torsion angles (PHI, PSI, OMEGA, CHI)
+- 5 DNA and RNA canonical nucleotides
+- Full bond graph with partial charges
+- Measure and rotate protein dihedral angles (φ/ψ/ω/χ)
+- Measure and rotate nucleic acids dihedral angles (α/β/γ/δ/ε/ζ/χ)
 - PDB/mmCIF file import and export
 - Zero-based indexing throughout (unlike PDB's one-based convention)
 
@@ -80,6 +83,11 @@ p.RotateDihedral(1, -45, 'PSI')
 # Mutate and export
 p.Mutate(2, 'V')        # Change residue at index 2 (Leu) → Val
 p.Export('peptide.pdb')
+
+# Import a nucleic acid
+p = PoseN()
+p.Import('1BNA.pdb')
+p.GetInfo()
 ```
 
 **D-amino acids** — use lowercase letters:
@@ -114,6 +122,14 @@ pB.ReBuild()
 pC = Pose()
 pC.Import('9ATK.pdb', chain='C')
 pC.ReBuild()
+
+# Import both DNA strands
+pDNA = Pose()
+pDNA.Import('1BNA.pdb', chainA='A', chainB='B')
+
+# Import one DNA strand
+pDNA = Pose()
+pDNA.Import('1BNA.pdb', chainA='A', chainB=None)
 ```
 
 ---
@@ -171,41 +187,55 @@ for idx, atom in p.data['Atoms'].items():
 |U - SEC|V - VAL|W - TRP|X - TRF|Y - TYR|
 |Z - TSO|
 
+## Supported Nucleotides
+
+### DNA
+
+|       |       |       |       |
+|-------|-------|-------|-------|
+|A - DA |T - DT |C - DC |G - DG |
+
+### RNA
+
+|      |      |      |      |
+|------|------|------|------|
+|A - A |U - U |C - C |G - G |
+
 ---
 
 ## API Reference
 
 ### Building & I/O
 
-| Method                                     | Description |
-|--------------------------------------------|-------------|
-| `Pose()`                                   | Construct a new Pose object |
-| `p.Build('SYKDLEGKVKSVLESNRGI')`           | Build a polypeptide from a one-letter sequence. Uppercase = L-amino acids, lowercase = D-amino acids |
-| `p.Import('1YN3.cif', chain='A', model=1)` | Load a structure from a PDB or mmCIF file (specific chain). It is best to use ReBuild() after importing a structure to optimise it. Cannot load structures with broken/non-continuous chains or missing backbone atoms. Choose a model `model=1` or `model=2` if an ensemble of models is found. If the same atom is found with multiple occupancies, Import() will only import that atom with the highest occupancy, if they are exactly 0.5, then the function will import that first record only |
-| `p.ReBuild()`                              | Rebuild the polypeptide as a primary structure then refold it using current angles and bond lengths. Best to use right after Import(). Use `D_AA=True` to rebuild entirely in D-amino acids. Will add missing hydrogens, calculate each atom's partial charge, as well as each amino acid's secondary structure |
-| `p.Export('out.pdb')`                      | Write the polypeptide to a PDB or mmCIF file |
+| Method                                                                                              | Description |
+|-----------------------------------------------------------------------------------------------------|-------------|
+| `Pose()`                                                                                            | Construct a new Pose object |
+| `p.Build('MSLESNRGI')`<br>p.Build('ATCG', fmt='DNA')                                                | Build a polypeptide from a one-letter sequence. Uppercase = L-amino acids, lowercase = D-amino acids.<br>Build a nucleic acid, use `fmt` to choose DNA or RNA |
+| `p.Import('1YN3.cif', chain='A', model=1)`<br>p.Import('1BNA.cif', chainA='A', chainB='B', model=1) | Load a structure from a PDB or mmCIF file (specific chain). It is best to use ReBuild() after importing a structure to optimise it. Cannot load structures with broken/non-continuous chains or missing backbone atoms. Choose a model `model=1` or `model=2` if an ensemble of models is found. If the same atom is found with multiple occupancies, Import() will only import that atom with the highest occupancy, if they are exactly 0.5, then the function will import that first record only<br>Use chainA and chainB to load one DNA strand `chainB=None` or both |
+| `p.ReBuild()`                                                                                       | Rebuild the polypeptide or nucleic acid. Best to use right after Import(). Use `D_AA=True` to rebuild entirely in D-amino acids. Will add missing hydrogens, calculate each atom's partial charge, as well as each amino acid's secondary structure |
+| `p.Export('out.pdb')`                                                                               | Write the polypeptide to a PDB or mmCIF file |
 
 ### Measurements
 
 | Method                                  | Description |
 |-----------------------------------------|-------------|
 | `p.GetDistance(0, 'N', 1, 'CA')`        | Get the distance (Å) between any two atoms. Example: N of residue 0 to CA of residue 1 |
-| `p.GetDihedral(2, 'PHI')`               | Get the PHI, PSI, or OMEGA angle of a residue. Example: PHI of residue 2 |
-| `p.GetDihedral(2, 'chi', 1)`            | Get the CHI 1–4 angle. Example: CHI 1 of residue 2 (Note: dihedrals are not case sensitive) |
+| `p.GetDihedral(2, 'PHI')`               | Get the PHI, PSI, or OMEGA angle of a residue in a protein, or ALPHA, BETA, GAMMA, DELTA, EPSILON, ZETA, and CHI angles for a nucleic acid. Example: PHI of residue 2 |
+| `p.GetDihedral(2, 'chi', 1)`            | Get the CHI 1–4 angles only for proteins. Example: CHI 1 of residue 2 (Note: dihedrals are not case sensitive) |
 | `p.GetAngle(0, 'N', 0, 'CA', 0, 'C')`   | Get the angle between any three atoms. Example: N–CA–C angle of residue 0 |
-| `p.GetMass()`                           | Get the molecular mass of a peptide (Daltons) |
-| `p.GetSize()`                           | Get the number of residues in a peptide (length of peptide)|
-| `p.GetFASTA()`                          | Get the FASTA sequence of a peptide as a list |
-| `p.GetSS()`                             | Get the secondary structure assignments for each amino acid as a list: H = α-helix, G = 3₁₀-helix, I = π-helix, E = β-strand, B = β-bridge, T = Turn, S = Bend, L = Loop. `GetDSSP()` needs to be called first to compute the secondary structures otherwise the default assignment is L for loops |
+| `p.GetMass()`                           | Get the molecular mass of a peptide (Daltons) or nucleic acids |
+| `p.GetSize()`                           | Get the number of residues or base pairs for a molecule (length of peptide or nucleic acid)|
+| `p.GetFASTA()`                          | Get the FASTA sequence of a peptide or nucleic acid as a list |
+| `p.GetSS()`                             | Get the secondary structure assignments for each amino acid as a list, only for proteins: H = α-helix, G = 3₁₀-helix, I = π-helix, E = β-strand, B = β-bridge, T = Turn, S = Bend, L = Loop. `GetDSSP()` needs to be called first to compute the secondary structures otherwise the default assignment is L for loops |
 | `p.GetRg()`                             | Get the radius of gyration (Å) for the whole structure |
 | `p.GetCharge()`                         | Get the Gasteiger-Marsili partial charges for every atom and store them in `p.data['Atoms'][i][2]`. Use `iterations=` to control convergence (default 6) |
-| `p.GetDSSP()`                           | Get the secondary structure for every amino acid and store them in `p.data['Amino Acids'][i][4]` |
-| `p.GetSASA()`                           | Get the Solvent Accessible Surface Area (SASA) for each amino acid, and add the values to `p.data['Amino Acids'][i][6]` |
-| `p.GetInfo()`                           | Print a formatted summary of the polypeptide information |
-| `p.GetAtomCoord(3, 'N')`                | Get the XYZ coordinates of an atom of a residue. Example: N of residue 3 |
+| `p.GetDSSP()`                           | Get the secondary structure for every amino acid, only for proteins, and store them in `p.data['Amino Acids'][i][4]` |
+| `p.GetSASA()`                           | Get the Solvent Accessible Surface Area (SASA) for each amino acid, only for proteins, and add the values to `p.data['Amino Acids'][i][6]` |
+| `p.GetInfo()`                           | Print a formatted summary of the polypeptide or nucleic acid information |
+| `p.GetAtomCoord(3, 'N')`                | Get the XYZ coordinates of an atom of a residue or a nucleotide. Example: N of residue 3 |
 | `p.GetAtomList(PDB=True)`               | Get a list of all atom element names for the entire structure. Use `PDB=True` for PDB-formatted names |
 | `p.GetAtomBonds(0, 1)`                  | Get the PDB name and element name `[atom 1 element name, atom 1 PDB name, atom 2 PDB name, atom 2 element name]` for two atoms (if they are bonded together). Use the atom indeces |
-| `p.GetIdentity(3, 'atom')`              | Identify an index. what type atom/residue/amino acid an index belongs to. Use `q=True` for charge |
+| `p.GetIdentity(3, 'atom')`              | Identify an index. What type atom/residue/nucleotide an index belongs to. Use `q=True` for charge |
 | `print(p.data)`                         | Print the full data JSON object |
 
 You can also inspect the p.data JSON object and extract relevent info using `print(p.data['FASTA'])` or `p.data['Atoms']`.

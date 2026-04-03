@@ -643,7 +643,7 @@ class PoseN():
 			coords = coords + (d / mag) * l
 		self.data['Coordinates'] = coords
 	def RotateDihedral(self, nt, theta, angle_type):
-		''' Rotate around a bond '''
+		''' Rotate α/β/γ/δ/ε/ζ/χ angle at bond '''
 		at  = angle_type.upper()
 		nts = self.data['Nucleotides']
 		prv = self._prevnt(nt)
@@ -733,7 +733,6 @@ class PoseN():
 
 
 
-"""
 
 	def Build(self, sequence, fmt='DNA'):
 		'''Build a canonical double-stranded B-DNA or A-RNA helix'''
@@ -762,7 +761,7 @@ class PoseN():
 		nt_idx      = 0
 		def add_nt(tricode, chain, k, flip, is_5prime):
 			nonlocal atom_idx, nt_idx
-			db       = self.NucleotidesDB[tricode]
+			db       = self.Nucleotides[tricode]
 			vecs     = np.array(db['Vectors'])
 			bb_meta  = db['Backbone Atoms']
 			bas_meta = db['Base Atoms']
@@ -837,7 +836,6 @@ class PoseN():
 				bonds.setdefault(p,  [])
 				if p  not in bonds[o3]: bonds[o3].append(p)
 				if o3 not in bonds[p]:  bonds[p].append(o3)
-		self.update_data()
+		self._update()
 
 
-"""

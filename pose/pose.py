@@ -1040,7 +1040,7 @@ class Pose():
 		else:
 			raise Exception('Incorrect item')
 	def RotateDihedral(self, AA, theta, angle_type, chi_type=None):
-		''' Rotate around a bond '''
+		''' Rotate φ/ψ/ω/χ angle at bond '''
 		AminoAcid = self.data['Amino Acids'][AA][0].upper()
 		at = angle_type.upper()
 		BB    = self.data['Amino Acids'][AA][2]
