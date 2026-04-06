@@ -1144,10 +1144,6 @@ class Pose():
 		after = after + ori
 		combine = np.append(before, after, axis=0)
 		self.data['Coordinates'] = combine
-	def Mutate(self, index, AA):
-		''' Mutate an amino acid to a different amino acid '''
-		seq = ''.join(self.GetFASTA())
-		self.ReBuild(seq[:index] + AA + seq[index+1:])
 	def AdjustDistance(self, AA1, atom1, AA2, atom2, length):
 		''' Change the distance between any two atoms '''
 		if (atom1 not in {'N', 'CA', 'C', 'O'}
@@ -1202,3 +1198,7 @@ class Pose():
 			nB = (B-A) * mut
 			after = after - (B-A) + nB
 			self.data['Coordinates'] = np.concatenate((before, after))
+	def Mutate(self, index, AA):
+		''' Mutate an amino acid to a different amino acid '''
+		seq = ''.join(self.GetFASTA())
+		self.ReBuild(seq[:index] + AA + seq[index+1:])

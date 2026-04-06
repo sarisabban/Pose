@@ -249,8 +249,8 @@ You can also inspect the p.data JSON object and extract relevent info using `pri
 | `p.MovePose(5, [18, 10, 5], 6, [0, 0, 0])`      | Rotate and/or translate the whole structure. Example: rotate `5`° degrees around axis `[18, 10, 5]` and move `6`Å towards point `[0, 0, 0]` |
 | `p.MovePose(5, [18, 10, 5], None, None)`        | Rotate without translating |
 | `p.AdjustAngle(1, 'N', 1, 'CA', 1, 'C', -2)`    | Add/subtract degrees from a three-atom angle. Example: subtract 2° from N–CA–C angle of residue 1 |
-| `p.Mutate(1, 'V')`                              | Mutate a residue. Example: residue 1 → L-Valine. `v` = 1 → D-Valine |
 | `p.AdjustDistance(0, 'N', 0, 'CA', 1.46)`       | Set the distance between two atoms (Å). Example: N–CA bond of residue 0 → 1.46 Å. Order matters: `(0,'N',0,'CA',d)` ≠ `(0,'CA',0,'N',d)` |
+| `p.Mutate(1, 'V')`                              | Mutate a residue. Example: residue 1 → L-Valine. `v` = 1 → D-Valine |
 
 ### Tools
 

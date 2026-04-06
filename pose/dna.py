@@ -741,16 +741,16 @@ class PoseN():
 		if fmt == 'DNA':
 			comp_map    = {'A':'T','T':'A','G':'C','C':'G'}
 			tri_map     = {'A':'DA','T':'DT','G':'DG','C':'DC'}
-			rise, twist = 3.4,  36.0
+			rise, twist = 3.375, 36.0
 		else:
 			comp_map    = {'A':'U','U':'A','G':'C','C':'G'}
 			tri_map     = {'A':'A','U':'U','G':'G','C':'C'}
-			rise, twist = 2.81, 32.7
+			rise, twist = 2.548, 32.7
 		def Rz(deg):
 			t = math.radians(deg)
 			c, s = math.cos(t), math.sin(t)
 			return np.array([[c,-s,0.],[s,c,0.],[0.,0.,1.]])
-		Rflip = np.diag([-1.0, 1.0, -1.0])
+		Rflip = np.diag([1.0, -1.0, -1.0])
 		self.data = {
 			'Energy':0, 'Rg':0, 'Mass':0, 'Size':0,
 			'FASTA':None, 'Type':fmt,
@@ -767,9 +767,9 @@ class PoseN():
 			bas_meta = db['Base Atoms']
 			bonds_db = db['Bonds']
 			n_bb     = len(bb_meta)
-			skip     = 3 if is_5prime else 0   # skip P,OP1,OP2
-			R = Rz(k * twist)
-			T = np.array([0.0, 0.0, k * rise])
+			skip     = 0
+			R = Rz(-k * twist)
+			T = np.array([0.0, 0.0, -k * rise])
 			if flip:
 				transformed = (vecs @ Rflip.T) @ R.T + T
 			else:
