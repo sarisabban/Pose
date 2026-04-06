@@ -724,7 +724,14 @@ class PoseN():
 		shift = v * (length / mag) - v
 		for idx in self._downstreamatoms(Ai, Bi): coords[idx] += shift
 		self.data['Coordinates'] = coords
-	def ReBuild(self, sequence=None):
+	def Mutate(self, base, index):
+		''' Mutate a nucleotide base pair '''
+		seq = list(self.data['FASTA'])
+		seq[index] = base.upper()
+		N = len(seq)
+		mutated = {index, 2 * N - 1 - index}
+		self.ReBuild(''.join(seq), _mutated=mutated)
+	def ReBuild(self, sequence=None, _mutated=None):
 		''' Rebuild nucleic acid from its dihedral angles '''
 		fmt = self.data['Type']
 		if sequence is None:
@@ -983,8 +990,14 @@ class PoseN():
 				continue
 			Finv = F.T
 			saved = ring_local[i]
-			all_idx = nts2[i][2] + nts2[i][3]
-			for ai in all_idx:
+			# For mutated positions, only restore
+			# backbone atoms (sugar ring, OP1/OP2, H)
+			# — base atoms keep canonical geometry.
+			if _mutated and i in _mutated:
+				restore = nts2[i][2]
+			else:
+				restore = nts2[i][2] + nts2[i][3]
+			for ai in restore:
 				aname = self.data['Atoms'][ai][0]
 				if aname in saved:
 					coords[ai] = (
