@@ -853,9 +853,8 @@ class PoseN():
 				continue
 			info = nts[i]
 			saved = {}
-			bb_skip = {"P", "OP1", "OP2",
-				"O5'", "C5'", "C4'",
-				"C3'", "O3'"}
+			bb_skip = {"P", "O5'", "C5'",
+				"C4'", "C3'", "O3'"}
 			all_idx = info[2] + info[3]
 			for ai in all_idx:
 				aname = self.data['Atoms'][ai][0]
