@@ -408,6 +408,81 @@ def RMSD(pose1, pose2, alg='align'):
 			rmsd = np.sqrt(np.mean((diff**2).sum(axis=1)))
 	return(round(float(rmsd), 5))
 
+def RMSD_N(pose1, pose2, alg='kabsch'):
+	'''
+	Calculate RMSD between two nucleic acid poses using C1' atoms.
+	Alignment algorithms:
+		kabsch     - SVD-based optimal rotation (default)
+		quaternion - eigenvalue-based optimal rotation
+		simple     - translation only, no rotation
+	'''
+	if alg not in ('kabsch', 'quaternion', 'simple'):
+		raise Exception('Unknown algorithm: ' + str(alg))
+	def get_C1p(pose):
+		coords = []
+		nts = pose.data['Nucleotides']
+		atoms = pose.data['Atoms']
+		crds = pose.data['Coordinates']
+		for nt_idx in sorted(nts.keys()):
+			for atom_idx in nts[nt_idx][2]:
+				if atoms[atom_idx][0] == "C1'":
+					coords.append(
+						crds[atom_idx].copy().astype(float))
+					break
+		return(np.array(coords))
+	def kabsch_R(Pc, Qc):
+		H = Pc.T @ Qc
+		U, S, Vt = np.linalg.svd(H)
+		d = np.sign(np.linalg.det(Vt.T @ U.T))
+		return(Vt.T @ np.diag(
+			np.array([1.0, 1.0, d])) @ U.T)
+	P_full = get_C1p(pose1)
+	Q_full = get_C1p(pose2)
+	if len(P_full) == 0 or len(Q_full) == 0:
+		raise Exception(
+			"No C1' atoms found in one or both poses")
+	n = min(len(P_full), len(Q_full))
+	P = P_full[:n]
+	Q = Q_full[:n]
+	P = P - P.mean(axis=0)
+	Q = Q - Q.mean(axis=0)
+	if alg == 'simple':
+		diff = P - Q
+		rmsd = np.sqrt(np.mean((diff**2).sum(axis=1)))
+	elif alg == 'kabsch':
+		R = kabsch_R(P, Q)
+		diff = P - (Q @ R)
+		rmsd = np.sqrt(np.mean((diff**2).sum(axis=1)))
+	elif alg == 'quaternion':
+		H = P.T @ Q
+		R11, R12, R13 = H[0,0], H[0,1], H[0,2]
+		R21, R22, R23 = H[1,0], H[1,1], H[1,2]
+		R31, R32, R33 = H[2,0], H[2,1], H[2,2]
+		F = np.array([
+			[R11+R22+R33, R23-R32,
+				R31-R13, R12-R21],
+			[R23-R32, R11-R22-R33,
+				R12+R21, R13+R31],
+			[R31-R13, R12+R21,
+				-R11+R22-R33, R23+R32],
+			[R12-R21, R13+R31,
+				R23+R32, -R11-R22+R33]])
+		_, vecs = np.linalg.eigh(F)
+		q0, q1, q2, q3 = vecs[:, -1]
+		R = np.array([
+			[q0**2+q1**2-q2**2-q3**2,
+				2*(q1*q2-q0*q3),
+				2*(q1*q3+q0*q2)],
+			[2*(q1*q2+q0*q3),
+				q0**2-q1**2+q2**2-q3**2,
+				2*(q2*q3-q0*q1)],
+			[2*(q1*q3-q0*q2),
+				2*(q2*q3+q0*q1),
+				q0**2-q1**2-q2**2+q3**2]])
+		diff = P - (Q @ R)
+		rmsd = np.sqrt(np.mean((diff**2).sum(axis=1)))
+	return(round(float(rmsd), 5))
+
 # BLOSUM62 scoring matrix — shared by BLAST() and MSA()
 _aa  = 'ARNDCQEGHILKMFPSTWYV'
 _bm  = [

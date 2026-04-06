@@ -696,18 +696,22 @@ class PoseN():
 	def AdjustAngle(self, nt1, atom1, nt2, atom2, nt3, atom3, theta):
 		''' Change angle between three atoms '''
 		atom2i = self._atomidx(nt2, atom2)
-		A      = (self.GetAtomCoord(nt3, atom3) - self.GetAtomCoord(nt1, atom1))
-		B      = (self.GetAtomCoord(nt3, atom3) - self.GetAtomCoord(nt2, atom2))
+		atom3i = self._atomidx(nt3, atom3)
+		A      = (self.GetAtomCoord(nt3, atom3)
+			- self.GetAtomCoord(nt1, atom1))
+		B      = (self.GetAtomCoord(nt3, atom3)
+			- self.GetAtomCoord(nt2, atom2))
 		u  = np.cross(B, A)
 		lu = np.linalg.norm(u)
 		if lu < 1e-10: return
 		u      = u / lu
 		ori    = self.GetAtomCoord(nt2, atom2).copy()
-		before = self.data['Coordinates'][:atom2i]
-		after  = self.data['Coordinates'][atom2i:] - ori
+		coords = self.data['Coordinates']
 		RM     = self._rotmat(theta, u)
-		after  = np.matmul(after, RM) + ori
-		self.data['Coordinates'] = np.append(before, after, axis=0)
+		for idx in self._downstreamatoms(atom2i, atom3i):
+			v          = coords[idx] - ori
+			coords[idx] = np.matmul(v, RM) + ori
+		self.data['Coordinates'] = coords
 	def AdjustDistance(self, nt1, atom1, nt2, atom2, length):
 		''' Change the distance between any two atoms '''
 		Ai     = self._atomidx(nt1, atom1)
@@ -720,10 +724,313 @@ class PoseN():
 		shift = v * (length / mag) - v
 		for idx in self._downstreamatoms(Ai, Bi): coords[idx] += shift
 		self.data['Coordinates'] = coords
-
-
-
-
+	def ReBuild(self, sequence=None):
+		''' Rebuild nucleic acid from its dihedral angles '''
+		fmt = self.data['Type']
+		if sequence is None:
+			sequence = self.data['FASTA']
+		nts = self.data['Nucleotides']
+		N   = len(nts)
+		# ── Step 1: Collect all geometry ──────────────────────
+		ALPHAs, BETAs, GAMMAs = {}, {}, {}
+		DELTAs, EPSILONs, ZETAs, CHIs = {}, {}, {}, {}
+		aPO5C5, aO5C5C4 = {}, {}
+		aC5C4C3, aC4C3O3 = {}, {}
+		aC3O3P, aO3PO5 = {}, {}
+		bPO5, bO5C5, bC5C4 = {}, {}, {}
+		bC4C3, bC3O3, bO3P = {}, {}, {}
+		def _has(nt, atom):
+			try:
+				self.GetAtomCoord(nt, atom)
+				return True
+			except Exception:
+				return False
+		for i in range(N):
+			prv = self._prevnt(i)
+			nxt = self._nextnt(i)
+			hasP = _has(i, 'P')
+			if prv is not None \
+			and _has(prv, "O3'") and hasP:
+				ALPHAs[i] = self.GetDihedral(
+					i, 'Alpha')
+			if hasP:
+				BETAs[i] = self.GetDihedral(i, 'Beta')
+			GAMMAs[i] = self.GetDihedral(i, 'Gamma')
+			DELTAs[i] = self.GetDihedral(i, 'Delta')
+			if nxt is not None and _has(nxt, 'P'):
+				EPSILONs[i] = self.GetDihedral(
+					i, 'Epsilon')
+				ZETAs[i] = self.GetDihedral(
+					i, 'Zeta')
+			CHIs[i] = self.GetDihedral(i, 'Chi')
+			try:
+				aPO5C5[i] = self.GetAngle(
+					i, "P", i, "O5'", i, "C5'")
+				bPO5[i] = self.GetDistance(
+					i, "P", i, "O5'")
+			except Exception:
+				pass
+			try:
+				aO5C5C4[i] = self.GetAngle(
+					i, "O5'", i, "C5'",
+					i, "C4'")
+				bO5C5[i] = self.GetDistance(
+					i, "O5'", i, "C5'")
+			except Exception:
+				pass
+			try:
+				aC5C4C3[i] = self.GetAngle(
+					i, "C5'", i, "C4'",
+					i, "C3'")
+				bC5C4[i] = self.GetDistance(
+					i, "C5'", i, "C4'")
+			except Exception:
+				pass
+			try:
+				aC4C3O3[i] = self.GetAngle(
+					i, "C4'", i, "C3'",
+					i, "O3'")
+				bC4C3[i] = self.GetDistance(
+					i, "C4'", i, "C3'")
+			except Exception:
+				pass
+			try:
+				bC3O3[i] = self.GetDistance(
+					i, "C3'", i, "O3'")
+			except Exception:
+				pass
+			if nxt is not None:
+				try:
+					aC3O3P[i] = self.GetAngle(
+						i, "C3'", i, "O3'",
+						nxt, "P")
+					aO3PO5[i] = self.GetAngle(
+						i, "O3'", nxt, "P",
+						nxt, "O5'")
+					bO3P[i] = self.GetDistance(
+						i, "O3'", nxt, "P")
+				except Exception:
+					pass
+		# Save C1' reference coords for final alignment
+		ref_C1p = []
+		for i in range(N):
+			try:
+				ref_C1p.append(
+					self.GetAtomCoord(i, "C1'"
+					).copy())
+			except Exception:
+				ref_C1p.append(None)
+		# Save ring + base atom positions relative to
+		# a local frame built from C4', C3', C5'.
+		# After backbone reconstruction, these atoms
+		# are restored exactly, preserving sugar pucker
+		# and glycosidic geometry.
+		def _local_frame(c4, c3, c5):
+			''' Build orthonormal frame at C4' '''
+			e1 = c3 - c4
+			e1 = e1 / np.linalg.norm(e1)
+			v  = c5 - c4
+			e2 = v - np.dot(v, e1) * e1
+			n  = np.linalg.norm(e2)
+			if n < 1e-10:
+				return None
+			e2 = e2 / n
+			e3 = np.cross(e1, e2)
+			return np.array([e1, e2, e3])
+		ring_local = {}
+		for i in range(N):
+			try:
+				c4 = self.GetAtomCoord(
+					i, "C4'").copy()
+				c3 = self.GetAtomCoord(
+					i, "C3'").copy()
+				c5 = self.GetAtomCoord(
+					i, "C5'").copy()
+			except Exception:
+				continue
+			F = _local_frame(c4, c3, c5)
+			if F is None:
+				continue
+			info = nts[i]
+			saved = {}
+			bb_skip = {"P", "OP1", "OP2",
+				"O5'", "C5'", "C4'",
+				"C3'", "O3'"}
+			all_idx = info[2] + info[3]
+			for ai in all_idx:
+				aname = self.data['Atoms'][ai][0]
+				if aname in bb_skip:
+					continue
+				pos = self.data[
+					'Coordinates'][ai].copy()
+				rel = F @ (pos - c4)
+				saved[aname] = rel
+			ring_local[i] = saved
+		# ── Step 2: Rebuild canonical structure ───────────────
+		self.data = {
+			'Energy':0, 'Rg':0, 'Mass':0, 'Size':0,
+			'FASTA':None, 'Type':fmt,
+			'Nucleotides':{}, 'Atoms':{}, 'Bonds':{},
+			'Coordinates':np.zeros((0, 3))}
+		self.Build(sequence, fmt=fmt)
+		# ── Step 3: Apply collected geometry ──────────────────
+		for i in range(N):
+			if i in ALPHAs:
+				self.RotateDihedral(
+					i, ALPHAs[i], 'Alpha')
+			if i in BETAs:
+				self.RotateDihedral(
+					i, BETAs[i], 'Beta')
+			self.RotateDihedral(i, GAMMAs[i], 'Gamma')
+			self.RotateDihedral(i, DELTAs[i], 'Delta')
+			self.RotateDihedral(i, CHIs[i], 'Chi')
+			if i in bPO5:
+				self.AdjustDistance(
+					i, "P", i, "O5'", bPO5[i])
+			if i in bO5C5:
+				self.AdjustDistance(
+					i, "O5'", i, "C5'",
+					bO5C5[i])
+			if i in bC5C4:
+				self.AdjustDistance(
+					i, "C5'", i, "C4'",
+					bC5C4[i])
+			if i in bC4C3:
+				self.AdjustDistance(
+					i, "C4'", i, "C3'",
+					bC4C3[i])
+			if i in bC3O3:
+				self.AdjustDistance(
+					i, "C3'", i, "O3'",
+					bC3O3[i])
+			if i in aPO5C5:
+				cur = self.GetAngle(
+					i, "P", i, "O5'", i, "C5'")
+				self.AdjustAngle(
+					i, "P", i, "O5'", i, "C5'",
+					cur - aPO5C5[i])
+			if i in aO5C5C4:
+				cur = self.GetAngle(
+					i, "O5'", i, "C5'",
+					i, "C4'")
+				self.AdjustAngle(
+					i, "O5'", i, "C5'",
+					i, "C4'",
+					cur - aO5C5C4[i])
+			if i in aC5C4C3:
+				cur = self.GetAngle(
+					i, "C5'", i, "C4'",
+					i, "C3'")
+				self.AdjustAngle(
+					i, "C5'", i, "C4'",
+					i, "C3'",
+					cur - aC5C4C3[i])
+			if i in aC4C3O3:
+				cur = self.GetAngle(
+					i, "C4'", i, "C3'",
+					i, "O3'")
+				self.AdjustAngle(
+					i, "C4'", i, "C3'",
+					i, "O3'",
+					cur - aC4C3O3[i])
+			nxt = self._nextnt(i)
+			if nxt is not None:
+				if i in EPSILONs:
+					self.RotateDihedral(
+						i, EPSILONs[i],
+						'Epsilon')
+				if i in ZETAs:
+					self.RotateDihedral(
+						i, ZETAs[i], 'Zeta')
+				if i in bO3P:
+					self.AdjustDistance(
+						i, "O3'", nxt, "P",
+						bO3P[i])
+				if i in aC3O3P:
+					cur = self.GetAngle(
+						i, "C3'", i, "O3'",
+						nxt, "P")
+					self.AdjustAngle(
+						i, "C3'", i, "O3'",
+						nxt, "P",
+						cur - aC3O3P[i])
+				if i in aO3PO5:
+					cur = self.GetAngle(
+						i, "O3'", nxt, "P",
+						nxt, "O5'")
+					self.AdjustAngle(
+						i, "O3'", nxt, "P",
+						nxt, "O5'",
+						cur - aO3PO5[i])
+		# ── Step 4: Restore ring + base atom positions ───────
+		# Re-place O4', C1', C2', base, and H atoms using
+		# the saved local-frame coordinates.
+		nts2 = self.data['Nucleotides']
+		coords = self.data['Coordinates']
+		for i in range(N):
+			if i not in ring_local:
+				continue
+			try:
+				c4 = self.GetAtomCoord(
+					i, "C4'").copy()
+				c3 = self.GetAtomCoord(
+					i, "C3'").copy()
+				c5 = self.GetAtomCoord(
+					i, "C5'").copy()
+			except Exception:
+				continue
+			F = _local_frame(c4, c3, c5)
+			if F is None:
+				continue
+			Finv = F.T
+			saved = ring_local[i]
+			all_idx = nts2[i][2] + nts2[i][3]
+			for ai in all_idx:
+				aname = self.data['Atoms'][ai][0]
+				if aname in saved:
+					coords[ai] = (
+						c4 + Finv @ saved[aname])
+		self.data['Coordinates'] = coords
+		# ── Step 5: Align each chain to original frame ───────
+		# Each chain's internal geometry is correct but
+		# positioned in Build()'s canonical frame. Align
+		# each chain independently via Kabsch on C1' atoms.
+		def _kabsch(P, Q):
+			Pc = P.mean(0); Qc = Q.mean(0)
+			Pp = P - Pc;    Qp = Q - Qc
+			H  = Pp.T @ Qp
+			U, S, Vt = np.linalg.svd(H)
+			d = np.sign(
+				np.linalg.det(Vt.T @ U.T))
+			R = Vt.T @ np.diag(
+				[1.0, 1.0, d]) @ U.T
+			return R, Qc, Pc
+		nts2  = self.data['Nucleotides']
+		coords = self.data['Coordinates']
+		for chain in set(v[1] for v in nts2.values()):
+			ref_pts, new_pts, atom_ids = [], [], []
+			for i in range(N):
+				if nts2[i][1] != chain:
+					continue
+				if ref_C1p[i] is None:
+					continue
+				ref_pts.append(ref_C1p[i])
+				new_pts.append(
+					self.GetAtomCoord(
+						i, "C1'").copy())
+				for ai in (nts2[i][2] + nts2[i][3]):
+					if ai not in atom_ids:
+						atom_ids.append(ai)
+			if len(ref_pts) < 3:
+				continue
+			P = np.array(ref_pts, dtype=float)
+			Q = np.array(new_pts, dtype=float)
+			R, Qc, Pc = _kabsch(P, Q)
+			for ai in atom_ids:
+				coords[ai] = (
+					(coords[ai] - Qc) @ R + Pc)
+		self.data['Coordinates'] = coords
+		self._update()
 
 
 
