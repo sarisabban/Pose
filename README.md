@@ -26,20 +26,21 @@ A bare-metal Python library for building and manipulating protein and nucleic ac
 
 ## What is Pose?
 
-Pose constructs a data structure for a protein or a nucleic acid molecule that contains all relevant information defining a polymer. Primary information includes the XYZ cartesian coordinates of each atom, the identity and charge of each atom, and the bond graph of the entire molecule. Secondary information includes the FASTA sequence, radius of gyration, potential energy, and the secondary structure assignment for each residue.
+Pose constructs a data structure for a protein or a nucleic acid molecule that contains all relevant information defining a polymer. Primary information includes the XYZ cartesian coordinates of each atom, the identity and charge of each atom, and the bond graph of the entire molecule. Secondary information includes the FASTA sequence, radius of gyration, potential energy, and the secondary structure assignment for each protein residue.
 
-Using this data structure, Pose can build and manipulate polypeptides and nucleic acids: construct any polypeptide or nucleic acid from sequence, move torsion and rotamer angles, mutate residues, and measure bond lengths and angles. It is designed as a substrate for higher-level protocols such as simulated annealing, molecular dynamics, and machine learning-based protein design.
+Using this data structure, Pose can build and manipulate polypeptides and nucleic acids: construct any polypeptide or nucleic acid from sequence, move dihedral and rotamer angles, mutate residues and base pairs, and measure bond lengths and angles. It is designed as a substrate for higher-level protocols such as simulated annealing, molecular dynamics, and machine learning-based molecular design.
 
 **Key features:**
-- Zero external dependencies beyond NumPy
+- Designed to be extremly stable bare-metal python, with zero external dependencies beyond NumPy
 - 26 amino acids supported by default (20 canonical + 6 non-canonical: LYX, MSE, PYL, SEC, TRF, TSO), can be extended to 100+
 - Support for both L-amino acids and D-amino acids (mixed sequences fully supported)
 - 5 DNA and RNA canonical nucleotides
 - Full bond graph with partial charges
 - Measure and rotate protein dihedral angles (φ/ψ/ω/χ)
 - Measure and rotate nucleic acids dihedral angles (α/β/γ/δ/ε/ζ/χ)
-- PDB/mmCIF file import and export
-- Zero-based indexing throughout (unlike PDB's one-based convention)
+- Measure and adjust the distance and angle between any atoms
+- PDB and mmCIF file import and export
+- Pythonic zero-based indexing throughout (unlike PDB's one-based convention)
 
 ---
 
@@ -58,6 +59,63 @@ conda create -n ENVIRONMENT python=3
 conda activate ENVIRONMENT
 pip3 install git+https://github.com/sarisabban/Pose
 ```
+
+
+
+
+
+
+
+
+
+
+
+---
+
+## Quick Start
+
+```python
+p = Pose()
+p.Import('1YN3.pdb')
+
+```
+
+
+
+
+
+---
+
+## API Reference
+
+### Building & I/O
+
+| Method                                                                                              | Description |
+|-----------------------------------------------------------------------------------------------------|-------------|
+| `p.Import(filename='1YN3.pdb', chain=['A', 'B'], model=1)` | Imports a structure from a filename (PDB or CIF) format and constructs the p.data JSON object. Import() can import a protein, DNA, or RNA structure, a single chain or a list of chains, chain=None will import all chains. It can also choose which model to import from an ensemble of models.
+
+
+
+
+### Measurements
+| Method                                                                                              | Description |
+|-----------------------------------------------------------------------------------------------------|-------------|
+
+
+### Manipulation
+| Method                                                                                              | Description |
+|-----------------------------------------------------------------------------------------------------|-------------|
+
+### Tools
+| Method                                                                                              | Description |
+|-----------------------------------------------------------------------------------------------------|-------------|
+
+
+
+
+
+
+
 
 ---
 
@@ -132,6 +190,11 @@ pDNA = Pose()
 pDNA.Import('1BNA.pdb', chainA='A', chainB=None)
 ```
 
+
+
+
+
+
 ---
 
 ## Key Concepts
@@ -200,6 +263,16 @@ for idx, atom in p.data['Atoms'].items():
 |      |      |      |      |
 |------|------|------|------|
 |A - A |U - U |C - C |G - G |
+
+
+
+
+
+
+
+
+
+
 
 ---
 
