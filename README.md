@@ -60,63 +60,6 @@ conda activate ENVIRONMENT
 pip3 install git+https://github.com/sarisabban/Pose
 ```
 
-
-
-
-
-
-
-
-
-
-
----
-
-## Quick Start
-
-```python
-p = Pose()
-p.Import('1YN3.pdb')
-
-```
-
-
-
-
-
----
-
-## API Reference
-
-### Building & I/O
-
-| Method                                                                                              | Description |
-|-----------------------------------------------------------------------------------------------------|-------------|
-| `p.Import(filename='1YN3.pdb', chain=['A', 'B'], model=1)` | Imports a structure from a filename (PDB or CIF) format and constructs the p.data JSON object. Import() can import a protein, DNA, or RNA structure, a single chain or a list of chains, chain=None will import all chains. It can also choose which model to import from an ensemble of models.
-
-
-
-
-### Measurements
-| Method                                                                                              | Description |
-|-----------------------------------------------------------------------------------------------------|-------------|
-
-
-### Manipulation
-| Method                                                                                              | Description |
-|-----------------------------------------------------------------------------------------------------|-------------|
-
-### Tools
-| Method                                                                                              | Description |
-|-----------------------------------------------------------------------------------------------------|-------------|
-
-
-
-
-
-
-
-
 ---
 
 ## Quick Start
@@ -130,9 +73,9 @@ p.Build('GAL')       # Gly-Ala-Leu (uppercase = L-amino acids)
 p.GetInfo()          # Print structured summary
 
 # Inspect properties
-print('Sequence:', p.GetFASTA())
-print('Mass:', p.GetMass(), 'Da')
-print('Rg:', p.GetRg(), 'Å')
+print('Sequence:', p.data['FASTA'])
+print('Mass:', p.data['Mass'], 'Da')
+print('Rg:', p.data['Rg'], 'Å')
 
 # Rotate backbone angles (indices are zero-based)
 p.RotateDihedral(1, -60, 'PHI')
@@ -141,6 +84,11 @@ p.RotateDihedral(1, -45, 'PSI')
 # Mutate and export
 p.Mutate(2, 'V')        # Change residue at index 2 (Leu) → Val
 p.Export('peptide.pdb')
+
+# Import a protein
+p = PoseN()
+p.Import('1YN3.pdb')
+p.GetInfo()
 
 # Import a nucleic acid
 p = PoseN()
@@ -164,31 +112,107 @@ p.Import('1TQG.pdb', chain='A')
 p.ReBuild()     # Adds missing hydrogens, and calculates SASA, atomic partial charge, and amino acid secondary structures
 ```
 
-It is advised that you always run p.ReBuild() after Import(). But understand that a new synthetic structure will be built, therefore you will lose the original occupancy and temperature-factor for each atom (replaces with 1.0 and 0.0).
+You can run p.ReBuild() after Import() to add hydrogens to the structure. But understand that a new synthetic structure will be built, therefore you will lose the original occupancy and temperature-factor for each atom (replaces with 1.0 and 0.0).
 
-If you want to use a protein complex with multiple chains, then add each chain as a seperate pose:
 
-```python
-pA = Pose()
-pA.Import('9ATK.pdb', chain='A')
-pA.ReBuild()
 
-pB = Pose()
-pB.Import('9ATK.pdb', chain='B')
-pB.ReBuild()
 
-pC = Pose()
-pC.Import('9ATK.pdb', chain='C')
-pC.ReBuild()
 
-# Import both DNA strands
-pDNA = Pose()
-pDNA.Import('1BNA.pdb', chainA='A', chainB='B')
 
-# Import one DNA strand
-pDNA = Pose()
-pDNA.Import('1BNA.pdb', chainA='A', chainB=None)
-```
+
+
+
+
+
+
+
+
+
+
+
+
+
+---
+
+## API Reference
+
+### Building & I/O
+
+
+
+| `p.Build('MSLESNRGI')`<br>p.Build('ATCG', fmt='DNA')                                                | Build a polypeptide from a one-letter sequence. Uppercase = L-amino acids, lowercase = D-amino acids.<br>Build a nucleic acid, use `fmt` to choose DNA or RNA |
+| `p.ReBuild()`                                                                                       | Rebuild the polypeptide or nucleic acid. Best to use right after Import(). Use `D_AA=True` to rebuild entirely in D-amino acids. Will add missing hydrogens, calculate each atom's partial charge, as well as each amino acid's secondary structure |
+| `p.Mutate(1, 'V')`                              | Mutate a residue. Example: residue 1 → L-Valine. `v` = 1 → D-Valine |
+
+
+| Method                                                     | Description |
+|------------------------------------------------------------|-------------|
+| `p.Import(filename='1YN3.pdb', chain=['A', 'B'], model=1)` | Imports a structure from a filename (PDB or CIF) format and constructs the p.data JSON object. Import() can import a protein, DNA, or RNA structure, a single chain or a list of chains, chain=None will import all chains. It can also choose which model to import from an ensemble of models. Cannot import a structure that is a mixtire of proteins and nucleic acids in seperate chains, best is to import each macromolecule type as a seperate pose |
+| `p.Export('out.pdb')`                                      | Write the full structure, and all chains, to a PDB or mmCIF file |
+
+### Measurements
+| Method                                 | Description |
+|----------------------------------------|-------------|
+| `p.GetDistance(0, 'N', 5, 'CA')`       | Get the distance in Å between any two atoms. Example: residue 0 nitrogen atom to residue 5 CA atom |
+| `p.GetDihedral(2, 'PHI')`              | Calculate the amino acid φ/ψ/ω/χ and nucleotide α/β/γ/δ/ε/ζ/χ dihedral angles. In this example we are measuring the PHI angle of the 3rd protein residue (index 2). For protein χ dihedral use `p.GetDihedral(4, 'chi', 1)` 5th residue (index 4), CHI 1 angle |
+| `p.GetAngle(0, 'N', 5, 'CA', 17, 'C')` | Get the angle between any three atoms in the whole structure. Example: N of residue 1, CA of residue 5, and C angle of residue 17 |
+| `p.GetAtomBonds(0, 1)`                 | Confirm and get the PDB name and element name `[atom 1 element name, atom 1 PDB name, atom 2 PDB name, atom 2 element name]` for two atoms (if they are bonded together). Use the atom indeces. If the two atoms are not bonded an error will be raised |
+| `p.GetIdentity(0, 'Atom')`             | Identify the PDB name of an atom, or an amino acid, or a nucleotide by its index. Example `p.GetIdentity(5, 'Atom')` or `p.GetIdentity(5, 'amino acid')` or `p.GetIdentity(5, 'nucleotide')`. Also, specifically just for atoms, you are return its partial charge using `p.GetIdentity(3, 'Atom', charge=True)` |
+| `p.GetInfo()`                          | Print a formatted summary of the structure's information |
+| `p.GetAtomCoord(3, 'N')`               | Get the XYZ coordinates of an atom of a residue or a nucleotide (monomers). Example: `N` nitrogen of monomer index `3 |
+| `p.GetAtomIdx(3, 'N')`                 | Get the atom index in `p.data['Coordinates']` from it's name within a monomer. This is the opposite of `p.GetAtomCoord(3, 'N')` |
+| `p.GetAtomList(PDB=True)`              | Get a list of all atom element names for the entire structure. Use `PDB=True` for PDB-formatted names |
+| `p.CalcMass()`                         | Calculates the entire molecular mass of a molecule (all chains) in Da (Daltons), updates the value of p.data['Mass'] |
+| `p.CalcSize()`                         | Calculates the length of each chain in a structure, updates the value of p.data['Size']. You can get the length of each chain using `p.data['Size'][CHAIN]` |
+| `p.CalcFASTA()`                        | Compiles the FASTA sequence of each chain, updates the value of p.data['FASTA']. You can get the FASTA sequence of each chain using `p.data['FASTA'][CHAIN]` |
+| `p.CalcRg()`                           | Calculates the entire Radius of Gyration of a molecule (all chains) in Å (angstrom), updates the value of p.data['Rg'] |
+| `p.CalcCharge()`                       | Calculate the Gasteiger-Marsili partial charges to all atoms, updates the value of self.data['Atoms'][index][2] |
+| `p.CalsDSSP()`                         | Calculates each amino acid's secondary structure assignment, only for proteins, and store them in `p.data['Amino Acids'][i][4]` and updated `p.data['SS'][CHAIN]`, therefore this is where you can get the SS sequence of each chain |
+| `p.CalcSASA()`                         | Calculates the Solvent Accessible Surface Area (SASA) for each amino acid, only for proteins, and adds the value to `p.data['Amino Acids'][i][6]` |
+
+### Manipulation
+| Method                                      | Description |
+|---------------------------------------------|-------------|
+| `p.MovePose(5, [18, 10, 5], 6, [0, 0, 0])`  | Rotate and/or translate the whole structure. Example: rotate 5° degrees around axis [18, 10, 5] and move 6Å towards point [0, 0, 0] |
+| `p.AdjustDistance(0, 'N', 4, 'C', 17)`      | Set the distance between any two atoms in (Å). Example: set the distance between N in residue 1 and C in residue to 17 Å. Order matters: `(0,'N',0,'CA',d)` ≠ `(0,'CA',0,'N',d)` |
+| `p.AdjustAngle(1, 'N', 1, 'CA', 1, 'C', -2)`| Add/subtract degrees from a three-atom angle, with atom 2 being the pivot point. Example: subtract 2° from N–CA–C angle of residue 1, with the CA atom being the pivot |
+| `p.RotateDihedral(1, -60, 'PHI')`           | Rotate the amino acid φ/ψ/ω/χ and nucleotide α/β/γ/δ/ε/ζ/χ dihedral angles. Example: residue 1 PHI dihedral to -60° |
+
+### Tools
+| Method                                                                                              | Description |
+|-----------------------------------------------------------------------------------------------------|-------------|
+
+
+
+These are standalone tools (not Pose() class methods) and thus are called on their own
+
+| Function                                        | Description |
+|-------------------------------------------------|-------------|
+| `RMSD(pose1, pose2, alg='align')`               | Computes the Root Mean Squared Deviation between two `Pose` structures using Cα (alpha-carbon) atoms only. Returns the  RMSD in (Å). Supported algorithms: `'align'`, `'kabsch'`, `'quaternion'`, or `'simple'` |
+| `BLAST(FASTA1, FASTA2)`                         | Perform pairwise protein sequence alignment using the Smith-Waterman local alignment algorithm with BLOSUM62 substitution scores, matching the statistical model used by NCBI BLASTP. Returns: `(alignment_string, percent_identity, e_value)` |
+| `MSA([FASTA1, FASTA2, FASTA3....])`             | Aligns three or more protein sequences using a ClustalW-like progressive alignment strategy, pairwise distances are computed with `BLAST()`. Returns: `(alignment_string, aligned_list)` |
+| `Parameterise('MSE.cif', 'J', 'MSE')`           | To add a new amino acid to the `AminoAcids.json` library. Takes `filename`, single letter unicode, three letter tricode |
+
+> BLAST handles sequences beyond the 20 canonical L-amino acids automatically: **D-amino acids**: stored as lowercase letters in `pose.data['FASTA']`. BLAST uppercases both sequences before alignment, treating each D-amino acid as its L-counterpart for scoring purposes. This correctly reflects the chemical reality that D- and L-forms of the same residue have identical side-chain chemistry. **Non-canonical amino acids**: any letter not in the 20-letter BLOSUM62 alphabet falls back to: `+4` for a self-match (equal to the minimum BLOSUM62 diagonal), `−1` for a mismatch. This keeps non-canonical residues visible to the aligner without inflating scores.
+
+> MSA handles sequences beyond the 20 canonical L-amino acids, identical to `BLAST()`
+
+For Parameterise() this is the workflow:
+
+1. Download the CIF file for the amino acid from [RCSB Chemical Sketch](https://www.rcsb.org/chemical-sketch)
+2. Call `Parameterise()` with the CIF file path, a single-letter key, and the three-letter residue code.
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
@@ -264,99 +288,22 @@ for idx, atom in p.data['Atoms'].items():
 |------|------|------|------|
 |A - A |U - U |C - C |G - G |
 
-
-
-
-
-
-
-
-
-
-
----
-
-## API Reference
-
-### Building & I/O
-
-| Method                                                                                              | Description |
-|-----------------------------------------------------------------------------------------------------|-------------|
-| `Pose()`                                                                                            | Construct a new Pose object |
-| `p.Build('MSLESNRGI')`<br>p.Build('ATCG', fmt='DNA')                                                | Build a polypeptide from a one-letter sequence. Uppercase = L-amino acids, lowercase = D-amino acids.<br>Build a nucleic acid, use `fmt` to choose DNA or RNA |
-| `p.Import('1YN3.cif', chain='A', model=1)`<br>p.Import('1BNA.cif', chainA='A', chainB='B', model=1) | Load a structure from a PDB or mmCIF file (specific chain). It is best to use ReBuild() after importing a structure to optimise it. Cannot load structures with broken/non-continuous chains or missing backbone atoms. Choose a model `model=1` or `model=2` if an ensemble of models is found. If the same atom is found with multiple occupancies, Import() will only import that atom with the highest occupancy, if they are exactly 0.5, then the function will import that first record only<br>Use chainA and chainB to load one DNA strand `chainB=None` or both |
-| `p.ReBuild()`                                                                                       | Rebuild the polypeptide or nucleic acid. Best to use right after Import(). Use `D_AA=True` to rebuild entirely in D-amino acids. Will add missing hydrogens, calculate each atom's partial charge, as well as each amino acid's secondary structure |
-| `p.Export('out.pdb')`                                                                               | Write the polypeptide to a PDB or mmCIF file |
-
-### Measurements
-
-| Method                                  | Description |
-|-----------------------------------------|-------------|
-| `p.GetDistance(0, 'N', 1, 'CA')`        | Get the distance (Å) between any two atoms. Example: N of residue 0 to CA of residue 1 |
-| `p.GetDihedral(2, 'PHI')`               | Get the PHI, PSI, or OMEGA angle of a residue in a protein, or ALPHA, BETA, GAMMA, DELTA, EPSILON, ZETA, and CHI angles for a nucleic acid. Example: PHI of residue 2 |
-| `p.GetDihedral(2, 'chi', 1)`            | Get the CHI 1–4 angles only for proteins. Example: CHI 1 of residue 2 (Note: dihedrals are not case sensitive) |
-| `p.GetAngle(0, 'N', 0, 'CA', 0, 'C')`   | Get the angle between any three atoms. Example: N–CA–C angle of residue 0 |
-| `p.GetMass()`                           | Get the molecular mass of a peptide (Daltons) or nucleic acids |
-| `p.GetSize()`                           | Get the number of residues or base pairs for a molecule (length of peptide or nucleic acid)|
-| `p.GetFASTA()`                          | Get the FASTA sequence of a peptide or nucleic acid as a list |
-| `p.GetSS()`                             | Get the secondary structure assignments for each amino acid as a list, only for proteins: H = α-helix, G = 3₁₀-helix, I = π-helix, E = β-strand, B = β-bridge, T = Turn, S = Bend, L = Loop. `GetDSSP()` needs to be called first to compute the secondary structures otherwise the default assignment is L for loops |
-| `p.GetRg()`                             | Get the radius of gyration (Å) for the whole structure |
-| `p.GetCharge()`                         | Get the Gasteiger-Marsili partial charges for every atom and store them in `p.data['Atoms'][i][2]`. Use `iterations=` to control convergence (default 6) |
-| `p.GetDSSP()`                           | Get the secondary structure for every amino acid, only for proteins, and store them in `p.data['Amino Acids'][i][4]` |
-| `p.GetSASA()`                           | Get the Solvent Accessible Surface Area (SASA) for each amino acid, only for proteins, and add the values to `p.data['Amino Acids'][i][6]` |
-| `p.GetInfo()`                           | Print a formatted summary of the polypeptide or nucleic acid information |
-| `p.GetAtomCoord(3, 'N')`                | Get the XYZ coordinates of an atom of a residue or a nucleotide. Example: N of residue 3 |
-| `p.GetAtomList(PDB=True)`               | Get a list of all atom element names for the entire structure. Use `PDB=True` for PDB-formatted names |
-| `p.GetAtomBonds(0, 1)`                  | Get the PDB name and element name `[atom 1 element name, atom 1 PDB name, atom 2 PDB name, atom 2 element name]` for two atoms (if they are bonded together). Use the atom indeces |
-| `p.GetIdentity(3, 'atom')`              | Identify an index. What type atom/residue/nucleotide an index belongs to. Use `q=True` for charge |
-| `print(p.data)`                         | Print the full data JSON object |
-
-You can also inspect the p.data JSON object and extract relevent info using `print(p.data['FASTA'])` or `p.data['Atoms']`.
-
-### Manipulation
-
-| Method                                          | Description |
-|-------------------------------------------------|-------------|
-| `p.RotateDihedral(1, -60, 'PHI')`               | Rotate a backbone dihedral angle. Example: PHI of residue 1 → -60° |
-| `p.RotateDihedral(2, 20, 'chi', 1)`             | Rotate a sidechain dihedral angle. Example: CHI 1 of residue 2 → 20° |
-| `p.MovePose(5, [18, 10, 5], 6, [0, 0, 0])`      | Rotate and/or translate the whole structure. Example: rotate `5`° degrees around axis `[18, 10, 5]` and move `6`Å towards point `[0, 0, 0]` |
-| `p.MovePose(5, [18, 10, 5], None, None)`        | Rotate without translating |
-| `p.AdjustAngle(1, 'N', 1, 'CA', 1, 'C', -2)`    | Add/subtract degrees from a three-atom angle. Example: subtract 2° from N–CA–C angle of residue 1 |
-| `p.AdjustDistance(0, 'N', 0, 'CA', 1.46)`       | Set the distance between two atoms (Å). Example: N–CA bond of residue 0 → 1.46 Å. Order matters: `(0,'N',0,'CA',d)` ≠ `(0,'CA',0,'N',d)` |
-| `p.Mutate(1, 'V')`                              | Mutate a residue. Example: residue 1 → L-Valine. `v` = 1 → D-Valine |
-
-### Tools
-
-These are standalone tools (not Pose() class methods) and thus are called on their own
-
-| Function                                        | Description |
-|-------------------------------------------------|-------------|
-| `RMSD(pose1, pose2, alg='align')`               | Computes the Root Mean Squared Deviation between two `Pose` structures using Cα (alpha-carbon) atoms only. Returns the  RMSD in (Å). Supported algorithms: `'align'`, `'kabsch'`, `'quaternion'`, or `'simple'` |
-| `BLAST(FASTA1, FASTA2)`                         | Perform pairwise protein sequence alignment using the Smith-Waterman local alignment algorithm with BLOSUM62 substitution scores, matching the statistical model used by NCBI BLASTP. Returns: `(alignment_string, percent_identity, e_value)` |
-| `MSA([FASTA1, FASTA2, FASTA3....])`             | Aligns three or more protein sequences using a ClustalW-like progressive alignment strategy, pairwise distances are computed with `BLAST()`. Returns: `(alignment_string, aligned_list)` |
-| `Parameterise('MSE.cif', 'J', 'MSE')`           | To add a new amino acid to the `AminoAcids.json` library. Takes `filename`, single letter unicode, three letter tricode |
-
-> BLAST handles sequences beyond the 20 canonical L-amino acids automatically: **D-amino acids**: stored as lowercase letters in `pose.data['FASTA']`. BLAST uppercases both sequences before alignment, treating each D-amino acid as its L-counterpart for scoring purposes. This correctly reflects the chemical reality that D- and L-forms of the same residue have identical side-chain chemistry. **Non-canonical amino acids**: any letter not in the 20-letter BLOSUM62 alphabet falls back to: `+4` for a self-match (equal to the minimum BLOSUM62 diagonal), `−1` for a mismatch. This keeps non-canonical residues visible to the aligner without inflating scores.
-
-> MSA handles sequences beyond the 20 canonical L-amino acids, identical to `BLAST()`
-
-For Parameterise() this is the workflow:
-
-1. Download the CIF file for the amino acid from [RCSB Chemical Sketch](https://www.rcsb.org/chemical-sketch)
-2. Call `Parameterise()` with the CIF file path, a single-letter key, and the three-letter residue code.
-
 ---
 
 ## Data Structure Reference
 
+Get the content of the structure's JSON object using `print(p.data[KEY])`
+
 | Key           | Value Type  | Description |
 |---------------|-------------|-------------|
+| `Type`        | String      | Identified the structure as a protein, DNA, or RNA |
 | `Energy`      | Float       | Potential energy of the molecule |
 | `Rg`          | Float       | Radius of gyration |
 | `Mass`        | Float       | Mass in Daltons |
-| `Size`        | Integer     | Number of residues |
-| `FASTA`       | String      | One-letter sequence |
-| `SS`          | String      | One-letter amino acid secondary structure asignments |
+| `Size`        | Dict        | Length of each chain, ie: the number of monomers for each chain |
+| `FASTA`       | Dict        | One-letter sequence for each chain |
+| `SS`          | Dict        | One-letter amino acid secondary structure asignments for each chain |
+| `Nucleotides` | Dict        | `{index: [symbol, chain, bb_atom_indices, sc_atom_indices, tricode]}`, **zero-based indexing** |
 | `Amino Acids` | Dict        | `{index: [symbol, chain, bb_atom_indices, sc_atom_indices, secondary_struct, tricode, SASA]}`, **zero-based indexing** |
 | `Atoms`       | Dict        | `{atom_index: [pdb_name, element, partial charge, occupancy, temp_factor]}`, **zero-based indexing** |
 | `Bonds`       | Dict        | Bond graph as adjacency list: `{atom_index: [bonded_atom_indices]}` |
@@ -364,28 +311,39 @@ For Parameterise() this is the workflow:
 
 ---
 
-## Description of the AminoAcid.json:
+## Description of amino acids in database.json:
+
+This information resides in `database['Amino Acids'][AMINO_ACID_UNICODE or BACKBONE]`
+
+| Dictionary Key                        | Value Type     | Description of Values |
+|---------------------------------------|----------------|-----------------------|
+| `Vectors`                             | List of lists  | The position of each atom relative to the N of the backbone. If the N coorinate is X, Y, Z = 0, 0, 0 you will get these vectors. To find the correct vectors position the N at coordinate X, Y, Z = 0, 0, 0, and use the corresponding coordinates of each atom|
+| `Tricode`                             | String         | The three letter code for each amino acid|
+| `Fused`                               | Boolian        | True = the sidechain is fused to the backbone|
+| `Backbone Atoms` or `Sidechain Atoms` | List of lists  | The atom identity of each coordinate point, for example: first coordinate point is the nitrogen with symbol N and PDB entry N, next atom is the hydrogen that is bonded to the nitrogen with symbol H and PDB entry 1H etc... Unlike the PDB where all hydrogens are collected after the amino acid, here each atom's hydrogens come right after it. This makes for easier matrix operations. Order is index [0] = PDB atom's name, index [1] = element, index [2] = partial charge, index [3] = occupancy, index [4] = temperature factor |
+| `Chi Angle Atoms`                     | List of lists  | The atoms in the sidechain that are contributing to a chi angle|
+| `Bonds`                               | Dictionary     | The bond graph as an adjacency list|
+
+## Description of nucleotides in database.json:
+
+This information resides in `database['Nucleotides'][NUCEOTIDE_TRICODE]`
+
 | Dictionary Key    | Value Type     | Description of Values |
 |-------------------|----------------|-----------------------|
-| `Vectors`         | List of lists  | The position of each atom relative to the N of the backbone. If the N coorinate is X, Y, Z = 0, 0, 0 you will get these vectors. To find the correct vectors position the N at coordinate X, Y, Z = 0, 0, 0, and use the corresponding coordinates of each atom|
-| `Tricode`         | String         | The three letter code for each amino acid|
-| `Fused`           | Boolian        | True = the sidechain is fused to the backbone|
-| `Sidechain Atoms` | List of lists  | The atom identity of each coordinate point, first coordinate point is the nitrogen with symbol N and PDB entry N, next atom is the hydrogen that is bonded to the nitrogen with symbol H and PDB entry 1H etc... Unlike the PDB where all hydrogens are collected after the amino acid, here each atom's hydrogens come right after it. This makes for easier matrix operations. Order is index [0] = PDB atom's name, index [1] = element, index [2] = partial charge, index [3] = occupancy, index [4] = temperature factor |
-| `Chi Angle Atoms` | List of lists  | The atoms in the sidechain that are contributing to a chi angle|
-| `Bonds`           | Dictionary     | The bond graph as an adjacency list|
+| `Vectors`         | List of lists  | The position of each atom relative to the N of the backbone. If the N coorinate is X, Y, Z = 0, 0, 0 you will get these vectors. To find the correct vectors position the N at coordinate X, Y, Z = 0, 0, 0, and use the corresponding coordinates of each atom |
+| `Tricode`         | String         | The three letter code for each amino acid |
+| `Type`            | String         | Identify as `DNA` or `RNA` |
+| `Backbone Atoms`  | List of lists  | The atom identity of each backbone coordinate point, first coordinate point is the phosphorus with symbol P and PDB entry P, next atom is the oxygen atom that is bonded to the phosphorus with symbol O and PDB entry OP1 etc... |
+| `Base Atoms`      | List of lists  | The atom identity of each nistrogen base coordinate point |
+| `Chi Angle Atoms` | List of lists  | The atoms in the sidechain that are contributing to a chi angle |
+| `Bonds`           | Dictionary     | The bond graph as an adjacency list |
 
 ---
 
-## Contributing
+## Community & Contributions
 
 Contributions are welcome! Open an issue or pull request on GitHub, or just email me.
 
----
-
-## Community
-
-Chat with users and contributors in real time:
-
-**IRC:** `#pose` channel on the `irc.libera.chat` network, Or use the [Libera web chat](https://web.libera.chat/#pose), no install needed
+Chat with users and contributors in real time: **IRC:** `#pose` channel on the `irc.libera.chat` network, Or use the [Libera web chat](https://web.libera.chat/#pose), no install needed.
 
 Come ask questions, share what you've built with Pose, or discuss contributions.
