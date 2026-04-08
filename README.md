@@ -69,8 +69,9 @@ from pose import *
 
 # Build a peptide
 p = Pose()
-p.Build('GAL')       # Gly-Ala-Leu (uppercase = L-amino acids)
-p.GetInfo()          # Print structured summary
+p.Build('MSLESNRGI', chain='A', fmt='protein') # Uppercase = L-amino acids, lowercase = D-amino acids
+p.Build('MSLESNRGI', chain='B', fmt='protein') # Add a second chain
+p.GetInfo()                                    # Print structured summary
 
 # Inspect properties
 print('Sequence:', p.data['FASTA'])
@@ -93,6 +94,12 @@ p.GetInfo()
 # Import a nucleic acid
 p = PoseN()
 p.Import('1BNA.pdb')
+p.GetInfo()
+
+
+# Build a nucleic acid
+p = Pose()
+p.Build('ATGCGTACGTTCCGGCAGACGT', chain='A', fmt='DNA')
 p.GetInfo()
 ```
 
@@ -140,15 +147,16 @@ You can run p.ReBuild() after Import() to add hydrogens to the structure. But un
 
 
 
-| `p.Build('MSLESNRGI')`<br>p.Build('ATCG', fmt='DNA')                                                | Build a polypeptide from a one-letter sequence. Uppercase = L-amino acids, lowercase = D-amino acids.<br>Build a nucleic acid, use `fmt` to choose DNA or RNA |
-| `p.ReBuild()`                                                                                       | Rebuild the polypeptide or nucleic acid. Best to use right after Import(). Use `D_AA=True` to rebuild entirely in D-amino acids. Will add missing hydrogens, calculate each atom's partial charge, as well as each amino acid's secondary structure |
-| `p.Mutate(1, 'V')`                              | Mutate a residue. Example: residue 1 → L-Valine. `v` = 1 → D-Valine |
+| `p.ReBuild()`                                              | Rebuild the polypeptide or nucleic acid. Use `D_AA=True` to rebuild a protein entirely in D-amino acids. Will add missing hydrogens |
+| `p.Mutate(1, 'V')`                                         | Mutate a residue. Example: residue 1 → L-Valine. `v` = 1 → D-Valine |
 
 
 | Method                                                     | Description |
 |------------------------------------------------------------|-------------|
 | `p.Import(filename='1YN3.pdb', chain=['A', 'B'], model=1)` | Imports a structure from a filename (PDB or CIF) format and constructs the p.data JSON object. Import() can import a protein, DNA, or RNA structure, a single chain or a list of chains, chain=None will import all chains. It can also choose which model to import from an ensemble of models. Cannot import a structure that is a mixtire of proteins and nucleic acids in seperate chains, best is to import each macromolecule type as a seperate pose |
 | `p.Export('out.pdb')`                                      | Write the full structure, and all chains, to a PDB or mmCIF file |
+| `p.Build('MSLESNRGI', chain='A', fmt='protein')`           | Build a macromolecule from a one-letter sequence. For a polypeptide add the sequence and choose the format `fmt='Protein'`, uppercase = L-amino acids, lowercase = D-amino acids. For a nucleic acid add the sequence and choose the format `fmt='DNA'` or `fmt='RNA'`. You can add more chains by repeating the command with different chain `chain='A'` values |
+
 
 ### Measurements
 | Method                                 | Description |
@@ -174,7 +182,7 @@ You can run p.ReBuild() after Import() to add hydrogens to the structure. But un
 | Method                                      | Description |
 |---------------------------------------------|-------------|
 | `p.MovePose(5, [18, 10, 5], 6, [0, 0, 0])`  | Rotate and/or translate the whole structure. Example: rotate 5° degrees around axis [18, 10, 5] and move 6Å towards point [0, 0, 0] |
-| `p.AdjustDistance(0, 'N', 4, 'C', 17)`      | Set the distance between any two atoms in (Å). Example: set the distance between N in residue 1 and C in residue to 17 Å. Order matters: `(0,'N',0,'CA',d)` ≠ `(0,'CA',0,'N',d)` |
+| `p.AdjustDistance(0, 'N', 4, 'C', 17)`      | Set the distance between any two atoms in (Å). Example: set the distance between N in residue 1 and C in residue to 17 Å. Order matters: `(0, 'N', 0, 'CA', d)` ≠ `(0, 'CA', 0, 'N', d)` |
 | `p.AdjustAngle(1, 'N', 1, 'CA', 1, 'C', -2)`| Add/subtract degrees from a three-atom angle, with atom 2 being the pivot point. Example: subtract 2° from N–CA–C angle of residue 1, with the CA atom being the pivot |
 | `p.RotateDihedral(1, -60, 'PHI')`           | Rotate the amino acid φ/ψ/ω/χ and nucleotide α/β/γ/δ/ε/ζ/χ dihedral angles. Example: residue 1 PHI dihedral to -60° |
 
@@ -228,21 +236,22 @@ For Parameterise() this is the workflow:
 All residue and atom indices start at 0, not 1. Residue 0 is the N-terminal amino acid. This is the **opposite** of PDB convention.
 
 ```python
-p.Build('GAL')
-p.GetDihedral(0, 'PHI')            # PHI of first residue (index 0)
-p.GetDihedral(2, 'chi', 1)         # CHI 1 of third residue (index 2)
-p.GetDistance(0, 'N', 1, 'CA')     # N of residue 0 to CA of residue 1
+p.Build('MSLESNRGI', chain='A', fmt='protein') # Construct a polypeptide
+p.GetDihedral(0, 'PHI')                        # PHI of first residue (index 0)
+p.GetDihedral(2, 'chi', 1)                     # CHI 1 of third residue (index 2)
+p.GetDistance(0, 'N', 1, 'CA')                 # N of residue 0 to CA of residue 1
+p.Build('MSLESNRGI', chain='B', fmt='protein') # Add a second chain
 ```
 
 ### Accessing the data structure directly
 
 ```python
-p.data['FASTA']              # sequence string
-p.data['Size']               # number of residues (int)
+p.data['FASTA']              # Sequence string
+p.data['Size']               # Number of residues (int)
 p.data['Amino Acids'][0]     # [letter, chain, bb_indices, sc_indices, secondary structure, tricode, SASA]
 p.data['Atoms'][0]           # [pdb_name, element, charge, occupancy, temp_factor]
-p.data['Coordinates']        # numpy array, shape (N, 3)
-p.data['Bonds']              # adjacency list: {atom_index: [bonded_atom_indices]}
+p.data['Coordinates']        # Numpy array, shape (N, 3)
+p.data['Bonds']              # Adjacency list: {atom_index: [bonded_atom_indices]}
 ```
 
 Iterating over residues and atoms:

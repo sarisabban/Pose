@@ -526,8 +526,7 @@ class Pose():
 			raise Exception(
 				f'No recognized residues in '
 				f'{filename}')
-		self._validatechain(
-			At, Am, Co, filename, chain)
+		self._validatechain(At, Am, Co, filename, chain)
 		self.data['Coordinates'] = Co
 		self.data['Amino Acids'] = Am
 		self.data['Atoms'] = At
@@ -537,19 +536,13 @@ class Pose():
 		self.CalcSASA()
 	def _prevres(self, i):
 		''' Previous residue on same chain, or None '''
-		src = (self.data['Amino Acids']
-			or self.data['Nucleotides'])
-		if i-1 in src \
-		and src[i-1][1] == src[i][1]:
-			return i - 1
+		src = (self.data['Amino Acids'] or self.data['Nucleotides'])
+		if i-1 in src and src[i-1][1] == src[i][1]: return i - 1
 		return None
 	def _nextres(self, i):
 		''' Next residue on same chain, or None '''
-		src = (self.data['Amino Acids']
-			or self.data['Nucleotides'])
-		if i+1 in src \
-		and src[i+1][1] == src[i][1]:
-			return i + 1
+		src = (self.data['Amino Acids'] or self.data['Nucleotides'])
+		if i+1 in src and src[i+1][1] == src[i][1]: return i + 1
 		return None
 	def _hasatom(self, res, atom):
 		''' Check if atom exists in a residue '''
@@ -558,8 +551,7 @@ class Pose():
 		return any(self.data['Atoms'][i][0] == atom for i in info[2] + info[3])
 	def _nuctricode(self, resn, mt):
 		''' Map residue name to nucleotide tricode '''
-		if mt == 'DNA' and resn in ('A','G','C'):
-			return 'D' + resn
+		if mt == 'DNA' and resn in ('A','G','C'): return 'D' + resn
 		if resn == 'T': return 'DT'
 		return resn
 	def _addnucleotide(self, db, nr, ai, Co):
@@ -642,20 +634,15 @@ class Pose():
 		mol = self.data['Type']
 		nxt = self._nextres(res)
 		if mol == 'Protein':
-			if at == 'PHI':
-				return res, 'N', res, 'CA'
-			elif at == 'PSI':
-				return res, 'CA', res, 'C'
+			if at == 'PHI': return res, 'N', res, 'CA'
+			elif at == 'PSI': return res, 'CA', res, 'C'
 			elif at == 'OMEGA':
 				if nxt is None: return None
 				return res, 'C', nxt, 'N'
 			elif at == 'CHI':
-				assert chi_type is not None, \
-					'Protein CHI needs chi_type'
-				sym = self.data['Amino Acids'][
-					res][0].upper()
-				ca = self.aminoacids[sym][
-					'Chi Angle Atoms'][chi_type-1]
+				assert chi_type is not None, 'Protein CHI needs chi_type'
+				sym = self.data['Amino Acids'][res][0].upper()
+				ca = self.aminoacids[sym]['Chi Angle Atoms'][chi_type-1]
 				return res, ca[1], res, ca[2]
 			else:
 				raise Exception(
@@ -681,6 +668,180 @@ class Pose():
 		raise Exception(
 			'No structure loaded. '
 			'Call Import() first')
+	def _flip(self, AA):
+		''' Flip amino acid 180° on CA H1-H2 axis '''
+		p = AA[2]
+		AA = AA - p
+		H1, H2 = AA[3], AA[4]
+		u = np.cross(H1, H2)
+		u = u / np.linalg.norm(u)
+		TM = np.array([
+			[2*u[0]**2-1, 2*u[0]*u[1], 2*u[0]*u[2]],
+			[2*u[0]*u[1], 2*u[1]**2-1, 2*u[1]*u[2]],
+			[2*u[0]*u[2], 2*u[1]*u[2], 2*u[2]**2-1]])
+		return np.matmul(AA, TM) + p
+	def _ld(self, AA):
+		''' Convert amino acid L to D chirality '''
+		return AA * [1, 1, -1]
+	def _buildprotein(self, sequence, chain):
+		''' Build one protein chain, append to data '''
+		is_new = (self.data['Type'] is None or self.data['Amino Acids'] is None)
+		if is_new:
+			self.data['Type'] = 'Protein'
+			self.data['Amino Acids'] = {}
+			self.data['Atoms'] = {}
+			self.data['Bonds'] = {}
+			self.data['Coordinates'] = np.zeros((0, 3))
+		aa_db = self.aminoacids
+		Eadj = (0.400, 1.472, 0)
+		Oadj = (0.812, 0.940, 0)
+		n = len(sequence)
+		aa_start = len(self.data['Amino Acids'])
+		atom_start = len(self.data['Atoms'])
+		new_coords = []
+		X, Y, Z = 0, 0, 0
+		for i, aa in enumerate(sequence):
+			LD = aa.islower()
+			last = i == n - 1
+			odd = (i % 2) != 0
+			if n == 1 or i == 0:
+				bb = 'Backbone' if n == 1 else 'Backbone start'
+				idx = 6
+				flip = False
+			else:
+				bb = 'Backbone end' if last else 'Backbone middle'
+				adj = Eadj if odd else Oadj
+				prev = new_coords[-1][-2]
+				X = prev[0] + adj[0]
+				Y = prev[1] + adj[1]
+				Z = prev[2] + adj[2]
+				idx = 4
+				flip = odd
+			T = np.array([X, Y, Z])
+			BB = np.array(aa_db[bb]['Vectors']) + T
+			SC = np.array(aa_db[aa.upper()]['Vectors']) + T
+			AA_co = np.insert(BB, [idx], SC, axis=0)
+			if LD: AA_co = self._ld(AA_co)
+			if flip: AA_co = self._flip(AA_co)
+			if self._isfused(aa): AA_co = np.delete(AA_co, [1], axis=0)
+			new_coords.append(AA_co)
+		all_co = np.concatenate(new_coords)
+		I = atom_start
+		for i, aa in enumerate(sequence):
+			LD = aa.islower()
+			aa_u = aa.upper()
+			if n == 1 or i == 0:
+				bb = 'Backbone' if n == 1 else 'Backbone start'
+				bb_idx = 6
+			else:
+				bb = 'Backbone end' if i == n-1 else 'Backbone middle'
+				bb_idx = 4
+			bb_atoms = aa_db[bb][
+				'Backbone Atoms'][:bb_idx]
+			if self._isfused(aa):
+				bb_atoms = [b for j, b in enumerate(bb_atoms) if j != 1]
+			sc_atoms = aa_db[aa_u]['Sidechain Atoms']
+			tail = aa_db[bb]['Backbone Atoms'][bb_idx:]
+			full = bb_atoms + sc_atoms + tail
+			BBi, SCi = [], []
+			for v in full:
+				self.data['Atoms'][I] = [v[0], v[1], v[2], v[3], v[4]]
+				if v[0] in self.probbatoms: BBi.append(I)
+				else: SCi.append(I)
+				I += 1
+			tri = aa_db[aa_u]['Tricode']
+			if LD: tri = 'D' + tri[1:]
+			ai = aa_start + i
+			self.data['Amino Acids'][ai] = [aa, chain, BBi, SCi, 'L', tri, 0]
+		self.data['Coordinates'] = np.append(
+			self.data['Coordinates'], all_co, axis=0)
+		for i, aa in enumerate(sequence):
+			ai = aa_start + i
+			if n == 1 or i == 0:
+				bb = 'Backbone' if n == 1 else 'Backbone start'
+			else:
+				bb = 'Backbone end' if i == n-1 else 'Backbone middle'
+			new_ch = (i == 0 and aa_start > 0)
+			self._bondtree(bb, aa, new_chain=new_ch)
+	def _buildnucleotide(self, sequence, fmt):
+		''' Build double-stranded DNA or RNA '''
+		sequence = sequence.upper()
+		N = len(sequence)
+		if fmt == 'DNA':
+			comp = {'A':'T', 'T':'A', 'G':'C', 'C':'G'}
+			tri = {'A':'DA', 'T':'DT', 'G':'DG', 'C':'DC'}
+			rise, twist = 3.375, 36.0
+		else:
+			comp = {'A':'U', 'U':'A', 'G':'C', 'C':'G'}
+			tri = {'A':'A', 'U':'U', 'G':'G', 'C':'C'}
+			rise, twist = 2.548, 32.7
+		def Rz(deg):
+			t = math.radians(deg)
+			c, s = math.cos(t), math.sin(t)
+			return np.array([
+				[c, -s, 0.],
+				[s, c, 0.],
+				[0., 0., 1.]])
+		Rflip = np.diag([1.0, -1.0, -1.0])
+		self.data = {
+			'Type': fmt, 'Energy': 0,
+			'Rg': 0, 'Mass': 0, 'Size': {},
+			'FASTA': {}, 'SS': {},
+			'Nucleotides': {},
+			'Amino Acids': None,
+			'Atoms': {}, 'Bonds': {},
+			'Coordinates': np.zeros((0, 3))}
+		Co, ai, ni = [], 0, 0
+		nt_ch = defaultdict(list)
+		def add_nt(tricode, chain, k, flip):
+			nonlocal ai, ni
+			db = self.nucleotides[tricode]
+			vecs = np.array(db['Vectors'])
+			bbm = db['Backbone Atoms']
+			bsm = db['Base Atoms']
+			n_bb = len(bbm)
+			R = Rz(-k * twist)
+			T = np.array([0., 0., -k * rise])
+			if flip:
+				tr = (vecs @ Rflip.T) @ R.T + T
+			else:
+				tr = vecs @ R.T + T
+			ltg = {}
+			bbi, bsi = [], []
+			for li in range(n_bb):
+				am = bbm[li]
+				self.data['Atoms'][ai] = [am[0], am[1], am[2], 1.0, 0.0]
+				Co.append(tr[li])
+				ltg[li] = ai
+				bbi.append(ai)
+				ai += 1
+			for li2, am in enumerate(bsm):
+				li = n_bb + li2
+				self.data['Atoms'][ai] = [am[0], am[1], am[2], 1.0, 0.0]
+				Co.append(tr[li])
+				ltg[li] = ai
+				bsi.append(ai)
+				ai += 1
+			bd = self.data['Bonds']
+			for ks, vl in db['Bonds'].items():
+				gi = ltg.get(int(ks), -1)
+				if gi == -1: continue
+				bd.setdefault(gi, [])
+				for lj in vl:
+					gj = ltg.get(lj, -1)
+					if gj != -1 and gj not in bd[gi]:
+						bd[gi].append(gj)
+			sym = tricode[-1]
+			self.data['Nucleotides'][ni] = [sym, chain, bbi, bsi, tricode]
+			nt_ch[chain].append(ni)
+			ni += 1
+		for i, base in enumerate(sequence):
+			add_nt(tri[base], 'A', i, False)
+		comp_seq = ''.join(comp[b] for b in reversed(sequence))
+		for j, base in enumerate(comp_seq):
+			add_nt(tri[base], 'B', N - 1 - j, True)
+		self.data['Coordinates'] = np.array(Co)
+		self._phosphobonds(nt_ch)
 	def _update(self):
 		''' Update cached properties after structural changes '''
 		self.CalcMass()
@@ -1276,3 +1437,11 @@ class Pose():
 			v = np.matmul(v, RM_new)
 			coords[idx] = v + ori
 		self.data['Coordinates'] = coords
+	def Build(self, sequence, chain='A', fmt='Protein'):
+		''' Build protein/DNA/RNA from sequence '''
+		if fmt.upper() == 'Protein': self._buildprotein(sequence, chain)
+		elif fmt.upper() in ('DNA', 'RNA'): self._buildnucleotide(sequence, fmt)
+		else:
+			raise Exception(
+				f'Unknown format: {fmt}')
+		self._update()
