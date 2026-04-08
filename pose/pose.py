@@ -530,6 +530,12 @@ class Pose():
 		self.data['Amino Acids'] = Am
 		self.data['Atoms'] = At
 		self._buildbonds(Am)
+		valid = set(self.data['Atoms'].keys())
+		Bd = self.data['Bonds']
+		for k in list(Bd.keys()):
+			if k not in valid: del Bd[k]
+			else: Bd[k] = [j for j in Bd[k]
+				if j in valid]
 		self.CalcCharge()
 		self.CalcDSSP()
 		self.CalcSASA()
@@ -1932,12 +1938,32 @@ class Pose():
 				raise Exception(
 					f'Nucleotide {index} '
 					f'not found')
+			ch = nts[index][1]
 			fasta = self.data['FASTA']
+			chain_idxs = [i for i in
+				sorted(nts)
+				if nts[i][1] == ch]
+			pos = chain_idxs.index(index)
 			first_ch = sorted(
 				fasta.keys())[0]
 			seq = list(fasta[first_ch])
 			N = len(seq)
-			seq[index] = residue.upper()
+			if ch == first_ch:
+				seq[pos] = residue.upper()
+			else:
+				comp = {'A':'T', 'T':'A',
+					'G':'C', 'C':'G',
+					'U':'A', 'A':'U'}
+				if self.data['Type'] == 'DNA':
+					comp = {'A':'T', 'T':'A',
+						'G':'C', 'C':'G'}
+				else:
+					comp = {'A':'U', 'U':'A',
+						'G':'C', 'C':'G'}
+				bp = N - 1 - pos
+				seq[bp] = comp.get(
+					residue.upper(),
+					residue.upper())
 			chains = sorted(set(
 				v[1] for v in nts.values()))
 			mutated = {index}
