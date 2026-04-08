@@ -121,42 +121,19 @@ p.ReBuild()     # Adds missing hydrogens, and calculates SASA, atomic partial ch
 
 You can run p.ReBuild() after Import() to add hydrogens to the structure. But understand that a new synthetic structure will be built, therefore you will lose the original occupancy and temperature-factor for each atom (replaces with 1.0 and 0.0).
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 ---
 
 ## API Reference
 
 ### Building & I/O
 
-
-
-| `p.ReBuild()`                                              | Rebuild the polypeptide or nucleic acid. Use `D_AA=True` to rebuild a protein entirely in D-amino acids. Will add missing hydrogens |
-| `p.Mutate(1, 'V')`                                         | Mutate a residue. Example: residue 1 → L-Valine. `v` = 1 → D-Valine |
-
-
 | Method                                                     | Description |
 |------------------------------------------------------------|-------------|
 | `p.Import(filename='1YN3.pdb', chain=['A', 'B'], model=1)` | Imports a structure from a filename (PDB or CIF) format and constructs the p.data JSON object. Import() can import a protein, DNA, or RNA structure, a single chain or a list of chains, chain=None will import all chains. It can also choose which model to import from an ensemble of models. Cannot import a structure that is a mixtire of proteins and nucleic acids in seperate chains, best is to import each macromolecule type as a seperate pose |
 | `p.Export('out.pdb')`                                      | Write the full structure, and all chains, to a PDB or mmCIF file |
-| `p.Build('MSLESNRGI', chain='A', fmt='protein')`           | Build a macromolecule from a one-letter sequence. For a polypeptide add the sequence and choose the format `fmt='Protein'`, uppercase = L-amino acids, lowercase = D-amino acids. For a nucleic acid add the sequence and choose the format `fmt='DNA'` or `fmt='RNA'`. You can add more chains by repeating the command with different chain `chain='A'` values |
-
+| `p.Build('MSLESNRGI', chain='A', fmt='protein')`           | Build a macromolecule from a one-letter sequence. For a polypeptide add the sequence and choose the format `fmt='Protein'`, uppercase = L-amino acids, lowercase = D-amino acids. For a nucleic acid add the sequence and choose the format `fmt='DNA'` or `fmt='RNA'`. You can add more chains by repeating the command with different chain `chain='A'` values. A structure can either be a protein, or a nucleic acid (DNA/RNA), it cannot be a mixture of the two |
+| `p.ReBuild(sequence=None, D_AA=False, _mutate=None)`       | Rebuild the polypeptide or nucleic acid. Use `sequence='AGLMTSWVLVA'` to rebuild the structure with multiple bulk mutations on chain A. Use `sequence={'A':'MSLKLSTVVA', 'B':'ASLKSWFWVA'}` to perform mutations at multiple chains at the same time. Use `D_AA=True` to rebuild a protein entirely in D-amino acids. Will add missing hydrogens. For DNA and RNA, the `sequence=''` length must match exatcly the original sequence length, otherwise an error will be raised |
+| `p.Mutate(1, 'V')`                                         | Mutate a single monomer. Example: residue 1 → L-Valine. `v` = 1 → D-Valine. Works with DNA and RNA too |
 
 ### Measurements
 | Method                                 | Description |
@@ -187,10 +164,6 @@ You can run p.ReBuild() after Import() to add hydrogens to the structure. But un
 | `p.RotateDihedral(1, -60, 'PHI')`           | Rotate the amino acid φ/ψ/ω/χ and nucleotide α/β/γ/δ/ε/ζ/χ dihedral angles. Example: residue 1 PHI dihedral to -60° |
 
 ### Tools
-| Method                                                                                              | Description |
-|-----------------------------------------------------------------------------------------------------|-------------|
-
-
 
 These are standalone tools (not Pose() class methods) and thus are called on their own
 
@@ -209,23 +182,6 @@ For Parameterise() this is the workflow:
 
 1. Download the CIF file for the amino acid from [RCSB Chemical Sketch](https://www.rcsb.org/chemical-sketch)
 2. Call `Parameterise()` with the CIF file path, a single-letter key, and the three-letter residue code.
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 ---
 
