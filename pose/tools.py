@@ -267,10 +267,10 @@ def Parameterise(filename, unicode, tricode):
 		'Sidechain Atoms': atoms_out,
 		'Chi Angle Atoms': chis,
 		'Bonds':           {str(k): v for k, v in final_bonds.items()},}
-	# 11. Write to AminoAcids.json in the pose package directory
+	# 11. Write to database.json in the pose package directory
 	db_path = os.path.join(
 		os.path.dirname(os.path.abspath(__file__)),
-		'AminoAcids.json')
+		'database.json')
 	with open(db_path) as f:
 		db = json.load(f)
 	if unicode in db:
