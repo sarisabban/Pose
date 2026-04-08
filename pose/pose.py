@@ -1,136 +1,195 @@
 #!/usr/bin/env python3
 
 import os
-import math
 import json
+import math
 import copy
 import datetime
 import numpy as np
 from collections import defaultdict
 
-np.seterr(all='ignore')
-
 class Pose():
-	''' Data structure that represents a protein '''
+	''' A class that builds and manipulates protein, DNA, and RNA '''
 	def __init__(self):
 		path, modulename = os.path.split(__file__)
-		with open(f'{path}/AminoAcids.json') as f: self.AminoAcids=json.load(f)
-		self.BB_ATOMS = {'N', '1H', '2H', '3H', 'CA', 'HA', 'C', 'O', 'OXT'}
-		self.Masses = {
-			'H':1.008,    'He':4.003,   'Li':6.941,   'Be':9.012,
-			'B':10.811,   'C':12.011,   'N':14.007,   'O':15.999,
-			'F':18.998,   'Ne':20.180,  'Na':22.990,  'Mg':24.305,
-			'Al':26.982,  'Si':28.086,  'P':30.974,   'S':32.066,
-			'Cl':35.453,  'Ar':39.948,  'K':39.098,   'Ca':40.078,
-			'Sc':44.956,  'Ti':47.867,  'V':50.942,   'Cr':51.996,
-			'Mn':54.938,  'Fe':55.845,  'Co':58.933,  'Ni':58.693,
-			'Cu':63.546,  'Zn':65.38,   'Ga':69.723,  'Ge':72.631,
-			'As':74.922,  'Se':78.971,  'Br':79.904,  'Kr':84.798,
-			'Rb':84.468,  'Sr':87.62,   'Y':88.906,   'Zr':91.224,
-			'Nb':92.906,  'Mo':95.95,   'Tc':98.907,  'Ru':101.07,
-			'Rh':102.906, 'Pd':106.42,  'Ag':107.868, 'Cd':112.414,
-			'In':114.818, 'Sn':118.711, 'Sb':121.760, 'Te':126.7,
-			'I':126.904,  'Xe':131.294, 'Cs':132.905, 'Ba':137.328,
+		with open(f'{path}/database.json') as f: database = json.load(f)
+		self.aminoacids=database['Amino Acids']
+		self.nucleotides=database['Nucleotides']
+		self.probbatoms = {'N', '1H', '2H', '3H', 'CA', 'HA', 'C', 'O', 'OXT'}
+		self.nucbbatoms = {
+			'P'  , 'OP1', 'OP2', "O5'", "C5'", "H5'", "H5''", "C4'",
+			"H4'", "O4'", "C3'", "H3'", "C2'", "H2'", "H2''", "C1'",
+			"H1'", "O3'", "O2'", "HO2'"}
+		self.masses = {
+			'H' :1.008  , 'He':4.003  , 'Li':6.941  , 'Be':9.012  ,
+			'B' :10.811 , 'C' :12.011 , 'N' :14.007 ,  'O':15.999 ,
+			'F' :18.998 , 'Ne':20.180 , 'Na':22.990 , 'Mg':24.305 ,
+			'Al':26.982 , 'Si':28.086 , 'P' :30.974 ,  'S':32.066 ,
+			'Cl':35.453 , 'Ar':39.948 , 'K' :39.098 , 'Ca':40.078 ,
+			'Sc':44.956 , 'Ti':47.867 , 'V' :50.942 , 'Cr':51.996 ,
+			'Mn':54.938 , 'Fe':55.845 , 'Co':58.933 , 'Ni':58.693 ,
+			'Cu':63.546 , 'Zn':65.38  , 'Ga':69.723 , 'Ge':72.631 ,
+			'As':74.922 , 'Se':78.971 , 'Br':79.904 , 'Kr':84.798 ,
+			'Rb':84.468 , 'Sr':87.62  , 'Y' :88.906 , 'Zr':91.224 ,
+			'Nb':92.906 , 'Mo':95.95  , 'Tc':98.907 , 'Ru':101.07 ,
+			'Rh':102.906, 'Pd':106.42 , 'Ag':107.868, 'Cd':112.414,
+			'In':114.818, 'Sn':118.711, 'Sb':121.760, 'Te':126.7  ,
+			'I' :126.904, 'Xe':131.294, 'Cs':132.905, 'Ba':137.328,
 			'La':138.905, 'Ce':140.116, 'Pr':140.908, 'Nd':144.243,
-			'Pm':144.913, 'Sm':150.36,  'Eu':151.964, 'Gd':157.25,
+			'Pm':144.913, 'Sm':150.36 , 'Eu':151.964, 'Gd':157.25 ,
 			'Tb':158.925, 'Dy':162.500, 'Ho':164.930, 'Er':167.259,
-			'Tm':168.934, 'Yb':173.055, 'Lu':174.967, 'Hf':178.49,
-			'Ta':180.948, 'W':183.84,   'Re':186.207, 'Os':190.23,
+			'Tm':168.934, 'Yb':173.055, 'Lu':174.967, 'Hf':178.49 ,
+			'Ta':180.948, 'W' :183.84 , 'Re':186.207, 'Os':190.23 ,
 			'Ir':192.217, 'Pt':195.085, 'Au':196.967, 'Hg':200.592,
-			'Tl':204.383, 'Pb':207.2,   'Bi':208.980, 'Po':208.982,
+			'Tl':204.383, 'Pb':207.2  , 'Bi':208.980, 'Po':208.982,
 			'At':209.987, 'Rn':222.081, 'Fr':223.020, 'Ra':226.025,
-			'Ac':227.028, 'Th':232.038, 'Pa':231.036, 'U':238.029,
-			'Np':237,     'Pu':244}
-		self.data = {'Energy':0, 'Rg':0, 'Mass':0, 'Size':0, 'FASTA':None,
-			'SS':None, 'Amino Acids':{}, 'Atoms':{}, 'Bonds':{},
-			'Coordinates':np.array([[0, 0, 0]])}
+			'Ac':227.028, 'Th':232.038, 'Pa':231.036, 'U' :238.029,
+			'Np':237    , 'Pu':244}
+		self.data = {'Type':None, 'Energy':0, 'Rg':0, 'Mass':0, 'Size':{},
+		'FASTA':{}, 'SS':{}, 'Nucleotides':None, 'Amino Acids':None,
+		'Atoms':{}, 'Bonds':{}, 'Coordinates':np.zeros((0, 3))}
 	def _isfused(self, SC):
 		''' Check if an amino acid's sidechain is fused to the backbone '''
-		return self.AminoAcids[SC.upper()]['Fused']
-	def _atomaaiter(self):
-		''' Yield (atom_item, coordinate, AAindex) for every atom '''
-		AAs    = self.data['Amino Acids']
-		AAidx  = 0
-		length = len(AAs[AAidx][2]) + len(AAs[AAidx][3]) - 1
-		for atom, coord in zip(
-				self.data['Atoms'].items(),
-				self.data['Coordinates']):
-			yield atom, coord, AAidx
-			if length:
-				length -= 1
-			else:
-				AAidx += 1
-				try: length = (len(AAs[AAidx][2]) + len(AAs[AAidx][3]) - 1)
-				except (KeyError, IndexError): pass
-	def _pdbentry(self, atom, n, a, l, r, c, s, i, x, y, z, o, t, q, e):
-		''' Construct a PDB atom data row '''
-		ATOM = '{:<6}'.format(atom)
-		N = '{:>5} '.format(n)
-		A = '{:<4}'.format(a)
-		L = '{:<1}'.format(l)
-		R = '{:>3}'.format(r)
-		C = '{:>2}'.format(c)
-		S = '{:>4}'.format(s)
-		I = '{:>1}   '.format(i)
-		X = '{:>8.3f}'.format(x)
-		Y = '{:>8.3f}'.format(y)
-		Z = '{:>8.3f} '.format(z)
-		O = '{:>5.2f} '.format(o)
-		T = ('{:>5.2f} '.format(t))[:6]
-		Q = '{:>10}'.format('')
-		E = '{:<2} \n'.format(e)
-		entry = ATOM + N + A + L + R + C + S + I + X + Y + Z + O + T + Q + E
-		return entry
-	def _cifentry(self, atom, n, a, l, r, c, label_seq, x, y, z, o, t, q, e):
-		''' Construct a mmCIF _atom_site data row '''
+		return self.aminoacids[SC.upper()]['Fused']
+	def _compiless(self):
+		''' Return per-chain secondary structure dict '''
+		if self.data['Amino Acids'] is None: return {}
+		ss = {}
+		for v in self.data['Amino Acids'].values():
+			ss.setdefault(v[1], []).append(v[4])
+		ss = {k: ''.join(v) for k, v in ss.items()}
+		self.data['SS'] = ss
+	def _rotmat(self, theta, u):
+		''' Rotate a matrix around axis u by theta angle '''
+		ux, uy, uz = u[0], u[1], u[2]
+		S = math.sin(math.radians(theta))
+		C = math.cos(math.radians(theta))
+		R = np.array([
+		[C+ux**2*(1-C)   , ux*uy*(1-C)-uz*S, ux*uz*(1-C)+uy*S],
+		[uy*ux*(1-C)+uz*S, C+uy**2*(1-C)   , uy*uz*(1-C)-ux*S],
+		[uz*ux*(1-C)-uy*S, uz*uy*(1-C)+ux*S, C+uz**2*(1-C)   ]])
+		return R
+	def _atomiter(self):
+		''' Yield (atom, coord, res_idx) for all atoms '''
+		src = (self.data['Amino Acids'] or self.data['Nucleotides'])
+		At = self.data['Atoms']
+		Co = self.data['Coordinates']
+		for ri, info in src.items():
+			for ai in info[2] + info[3]:
+				yield (ai, At[ai]), Co[ai], ri
+	def _pdbentry(self, rec, n, a, l, r, c, s, ins, x, y, z, o, t, q, e):
+		''' Format a PDB ATOM line '''
+		return (
+			'{:<6}'.format(rec)
+			+ '{:>5} '.format(n)
+			+ '{:<4}'.format(a)
+			+ '{:<1}'.format(l)
+			+ '{:>3}'.format(r)
+			+ '{:>2}'.format(c)
+			+ '{:>4}'.format(s)
+			+ '{:>1}   '.format(ins)
+			+ '{:>8.3f}'.format(x)
+			+ '{:>8.3f}'.format(y)
+			+ '{:>8.3f} '.format(z)
+			+ '{:>5.2f} '.format(o)
+			+ ('{:>5.2f} '.format(t))[:6]
+			+ '{:>10}'.format('')
+			+ '{:<2} \n'.format(e))
+	def _cifentry(self, rec, n, a, l, r, c, seq, x, y, z, o, t, q, e):
+		''' Format a CIF _atom_site line '''
 		alt = '.' if l == '' else l
-		charge = '?' if q == 0.0 else '{:.3f}'.format(q)
-		fields = [
-			atom, str(n), e, a, alt, r, c, '1',
-			str(label_seq), '?',
-			'{:.3f}'.format(x), '{:.3f}'.format(y),
+		ch = '?' if q == 0.0 else '{:.3f}'.format(q)
+		return ' '.join([
+			rec, str(n), e, a, alt, r, c,
+			'1', str(seq), '?',
+			'{:.3f}'.format(x),
+			'{:.3f}'.format(y),
 			'{:.3f}'.format(z),
-			'{:.2f}'.format(o), '{:.2f}'.format(t),
-			charge,
-			str(label_seq), r, c, a, '1']
-		return ' '.join(fields) + '\n'
-	def _insert(self, AA, X, Y, Z):
-		''' Inser a backbone or sidechain given its initial coordinates '''
-		if len(AA) == 1: AA = AA.upper()
-		atoms = np.array(self.AminoAcids[AA]['Vectors']) + np.array([X, Y, Z])
-		return atoms
-	def _amino(self, backbone_type, X, Y, Z, aa, index, flip=False, LD=False):
-		''' Construct an amino acid and add its coordinates to the data '''
-		BB = self._insert(backbone_type, X, Y, Z)
-		SC = self._insert(aa, X, Y, Z)
-		AA = np.insert(BB, index, SC, axis=0)
-		if LD: AA = self._ld(AA)
-		if flip: AA = self._flip(AA)
-		if self._isfused(aa): AA = np.delete(AA, [1], axis=0)
-		self.data['Coordinates'] = \
-		np.append(self.data['Coordinates'], AA, axis=0)
-		if backbone_type == 'Backbone' or backbone_type == 'Backbone start':
-			self.data['Coordinates'] = \
-			np.delete(self.data['Coordinates'], [0], axis=0)
-	def _atoms(self, AA, chain, backbone_type, BB_index, AA_index, I, LD=False):
-		''' Construct, and add to pose, atom and amino acid identities '''
-		BB = backbone_type[:BB_index]
-		if self._isfused(AA): BB.pop(1)
-		BB = BB + self.AminoAcids[AA.upper()]['Sidechain Atoms']
-		BB = BB + backbone_type[BB_index:]
-		BBi, SCi = [], []
-		for atomi, v in enumerate(BB, I):
-			self.data['Atoms'][atomi] = [v[0], v[1], v[2], v[3], v[4]]
-			(BBi if v[0] in self.BB_ATOMS else SCi).append(atomi)
-		tri = self.AminoAcids[AA.upper()]['Tricode']
-		if LD: tri = 'D' + tri[1:]
-		self.data['Amino Acids'][AA_index] = [AA, chain, BBi, SCi, 'L', tri, 0]
+			'{:.2f}'.format(o),
+			'{:.2f}'.format(t),
+			ch, str(seq), r, c, a, '1']) + '\n'
+	def _exportpdb(self, filename, src, ti):
+		''' Write PDB file '''
+		with open(filename, 'w') as f:
+			dt = datetime.date.today()
+			f.write('HEADER' + ' '*44
+				+ dt.strftime('%d-%b-%Y')
+				+ ' '*3 + 'XXXX'
+				+ ' '*11 + '\n')
+			f.write('EXPDTA    '
+				'THEORETICAL MODEL'
+				+ ' '*52 + '\n')
+			f.write('REMARK 220 REMARK: '
+				'MODEL GENERATED BY '
+				'SARI SABBAN'
+				+ ' '*30 + '\n')
+			prev_ch = None
+			for atom, coord, ri in self._atomiter():
+				info = src[ri]
+				ch = info[1]
+				if prev_ch is not None and ch != prev_ch: f.write('TER\n')
+				f.write(self._pdbentry(
+					'ATOM', atom[0]+1,
+					atom[1][0], '',
+					info[ti], ch, ri+1, '',
+					coord[0], coord[1], coord[2],
+					atom[1][3], atom[1][4],
+					atom[1][2], atom[1][1]))
+				prev_ch = ch
+			f.write('TER\n')
+	def _exportcif(self, filename, src, ti):
+		''' Write CIF file '''
+		name = os.path.splitext(os.path.basename(filename))[0]
+		cols = [
+			'_atom_site.group_PDB',
+			'_atom_site.id',
+			'_atom_site.type_symbol',
+			'_atom_site.label_atom_id',
+			'_atom_site.label_alt_id',
+			'_atom_site.label_comp_id',
+			'_atom_site.label_asym_id',
+			'_atom_site.label_entity_id',
+			'_atom_site.label_seq_id',
+			'_atom_site.pdbx_PDB_ins_code',
+			'_atom_site.Cartn_x',
+			'_atom_site.Cartn_y',
+			'_atom_site.Cartn_z',
+			'_atom_site.occupancy',
+			'_atom_site.B_iso_or_equiv',
+			'_atom_site.pdbx_formal_charge',
+			'_atom_site.auth_seq_id',
+			'_atom_site.auth_comp_id',
+			'_atom_site.auth_asym_id',
+			'_atom_site.auth_atom_id',
+			'_atom_site.pdbx_PDB_model_num']
+		with open(filename, 'w') as f:
+			f.write(f'data_{name}\n#\n')
+			f.write(f'_entry.id   {name}\n#\n')
+			f.write("_exptl.method   "
+				"'THEORETICAL MODEL'\n#\n")
+			f.write("_audit_author.name"
+				"          'SARI SABBAN'\n")
+			f.write("_audit_author."
+				"pdbx_ordinal  1\n#\n")
+			f.write('loop_\n')
+			for c in cols:
+				f.write(c + '\n')
+			for atom, coord, ri in self._atomiter():
+				info = src[ri]
+				f.write(self._cifentry(
+					'ATOM', atom[0]+1,
+					atom[1][0], '',
+					info[ti], info[1], ri+1,
+					coord[0], coord[1], coord[2],
+					atom[1][3], atom[1][4],
+					atom[1][2], atom[1][1]))
+			f.write('#\n')
 	def _bondtreefused(self, BB, SC):
 		''' Construct bond graph for when a sidechain is fused to a backbone '''
 		BBb = {int(k): v for k, v in
-			copy.deepcopy(self.AminoAcids[BB]['Bonds']).items()}
+			copy.deepcopy(self.aminoacids[BB]['Bonds']).items()}
 		SCb = {int(k): v for k, v in
-			copy.deepcopy(self.AminoAcids[SC]['Bonds']).items()}
+			copy.deepcopy(self.aminoacids[SC]['Bonds']).items()}
 		length = len(SCb)
 		BBb.pop(1)
 		nBBb = {}
@@ -148,9 +207,7 @@ class Pose():
 			BBb = nBBb
 		for i in reversed(range(len(BBb))):
 			if i > n+1:
-				oldvals = BBb[i]
 				newvals = [x if x<=n else x+length-1 for x in BBb[i]]
-				oldk = i
 				newk = i+length-1
 				del BBb[i]
 				BBb[newk] = newvals
@@ -158,10 +215,8 @@ class Pose():
 		for i, (k, v) in enumerate(SCb.items(), start=n+2):
 			if k < 0: break
 			k = i
-			if BB == 'Backbone' or BB == 'Backbone start':
-				v = [x+n+2 for x in v]
-			else:
-				v = [x+n+4 if x<0 else x+n+2 for x in v]
+			if BB == 'Backbone' or BB == 'Backbone start': v=[x+n+2 for x in v]
+			else: v = [x+n+4 if x<0 else x+n+2 for x in v]
 			if i == n+2: v.append(n)
 			BBb[k] = sorted(v)
 		return BBb
@@ -172,19 +227,17 @@ class Pose():
 			BBb = self._bondtreefused(BB, SC)
 			return BBb
 		BBb = {int(k): v for k, v in
-			copy.deepcopy(self.AminoAcids[BB]['Bonds']).items()}
+			copy.deepcopy(self.aminoacids[BB]['Bonds']).items()}
 		SCb = {int(k): v for k, v in
-			copy.deepcopy(self.AminoAcids[SC]['Bonds']).items()}
+			copy.deepcopy(self.aminoacids[SC]['Bonds']).items()}
 		length = len(SCb)
-		if BB == 'Backbone' or BB == 'Backbone start':
-			n = 4
-		else:
-			n = 2
+		if BB == 'Backbone' or BB == 'Backbone start': n = 4
+		else: n = 2
 		for i in reversed(range(len(BBb))):
 			if i > n+1:
-				oldvals = BBb[i]
-				newvals = [x if x<=n else x+length for x in BBb[i]]
-				oldk = i
+				newvals = [x if x<=n
+					else x+length
+					for x in BBb[i]]
 				newk = i+length
 				del BBb[i]
 				BBb[newk] = newvals
@@ -194,11 +247,10 @@ class Pose():
 			if length != 1:
 				v = [x+n+2 for x in v]
 				if i == n+2: v.append(n)
-			else:
-				v = [x+n+1 for x in v]
+			else: v = [x+n+1 for x in v]
 			BBb[k] = sorted(v)
 		return BBb
-	def _bondtree(self, BB, AA):
+	def _bondtree(self, BB, AA, new_chain=False):
 		''' Update the pose bond graph when adding a new amino acid '''
 		BBb = self._bondtreenotfused(BB, AA)
 		BT = self.data['Bonds']
@@ -207,518 +259,1059 @@ class Pose():
 			self.data['Bonds'] = BBb
 			return
 		i_max = max(BT)
-		BT[i_max-1] += [i_max+1]
+		if not new_chain:
+			BT[i_max-1] += [i_max+1]
 		for i in range(len(BBb)):
 			K = i+length
 			v = BBb[i]
 			V = [x+length for x in v]
-			if i == 0: V.append(i_max-1)
+			if i == 0 and not new_chain:
+				V.append(i_max-1)
 			BT[K] = V
 		self.data['Bonds'] = BT
-	def _rotmat(self, theta, u):
-		''' Rotate a matrix around axis u by theta angle '''
-		ux, uy, uz = u[0], u[1], u[2]
-		S = math.sin(math.radians(theta))
-		C = math.cos(math.radians(theta))
-		R = np.array([
-		[C+ux**2*(1-C)   , ux*uy*(1-C)-uz*S, ux*uz*(1-C)+uy*S],
-		[uy*ux*(1-C)+uz*S, C+uy**2*(1-C)   , uy*uz*(1-C)-ux*S],
-		[uz*ux*(1-C)-uy*S, uz*uy*(1-C)+ux*S, C+uz**2*(1-C)   ]])
-		return R
-	def _flip(self, AA):
-		''' Flip an amino acid 180 degrees on CA's H1 H2 axis'''
-		p = AA[2]
-		AA = AA - p
-		H1 = AA[3]
-		H2 = AA[4]
-		u = np.cross(H1, H2)
-		lu = np.linalg.norm(u)
-		u = u / lu
-		TM = np.array([
-		[2*u[0]**2-1, 2*u[0]*u[1], 2*u[0]*u[2]],
-		[2*u[0]*u[1], 2*u[1]**2-1, 2*u[2]*u[2]],
-		[2*u[0]*u[2], 2*u[2]*u[2], 2*u[2]**2-1]])
-		AA = np.matmul(AA, TM)
-		AA = AA + p
-		return AA
-	def _ld(self, AA):
-		''' Convert an amino acid between L and D chirality '''
-		AA = AA * [1, 1, -1]
-		return AA
-	def _rotbb(self, split, ori, A, B, current, theta):
-		''' Apply zero-then-rotate to coordinates from split onward '''
-		before = self.data['Coordinates'][:split]
-		after  = self.data['Coordinates'][split:] - ori
-		u = B - A
-		u = u / np.linalg.norm(u)
-		after = np.matmul(after, self._rotmat(-current, u))
-		after = np.matmul(after, self._rotmat(theta, u))
-		self.data['Coordinates'] = np.append(before, after + ori, axis=0)
-	def _update(self):
-		''' Update cached properties after structural changes '''
-		self.data['Mass']  = self.GetMass()
-		self.data['FASTA'] = ''.join(self.GetFASTA())
-		self.data['SS']    = ''.join(self.GetSS())
-		self.data['Size']  = self.GetSize()
-		self.data['Rg']    = self.GetRg()
-	def Import(self, filename, chain='A', model=1):
-		''' Import a structure from a .pdb or .cif file '''
-		if filename[-3:].upper() == 'PDB':
-			ATOM, N, A, L, R, C, S, I, X, Y, Z, O, T, Q, E = \
-			[], [], [], [], [], [], [], [], [], [], [], [], [], [], []
-			has_models   = False
-			in_target    = False
-			found_models = []
-			with open(filename) as f:
-				for line in f:
-					line = line.strip()
-					if not line:
-						continue
-					record = line.split()[0]
-					if record == 'MODEL':
-						has_models = True
-						try:
-							mnum = int(line.split()[1])
-						except (IndexError, ValueError):
-							mnum = len(found_models) + 1
-						found_models.append(mnum)
-						in_target = (mnum == model)
-					elif record == 'ENDMDL':
-						if in_target:
-							break
-						in_target = False
-					elif record == 'ATOM' \
-					and line.split()[4] == chain \
-					and (not has_models or in_target):
-						ATOM.append(line[:4].strip())
-						N.append(int(line[6:11].strip()))
-						A.append(line[12:16].strip())
-						L.append(line[16].strip())
-						R.append(line[17:20].strip())
-						C.append(line[21].strip())
-						S.append(int(line[22:26].strip()))
-						I.append(line[26].strip())
-						X.append(float(line[30:38].strip()))
-						Y.append(float(line[38:46].strip()))
-						Z.append(float(line[46:54].strip()))
-						O.append(float(line[54:60].strip()))
-						T.append(float(line[60:66].strip()))
-						q = line[70:76].strip()
-						Q.append(float(q) if q else 0.0)
-						E.append(line[76:78].strip())
-			if has_models and model not in found_models:
-				raise Exception(
-					f'Model {model} not found in '
-					f'{filename}. '
-					f'Available models: {found_models}')
-		elif filename[-3:].upper() == 'CIF':
-			ATOM, N, A, L, R, C, S, I, X, Y, Z, O, T, Q, E = \
-			[], [], [], [], [], [], [], [], [], [], [], [], [], [], []
-			with open(filename) as f:
-				lines = f.readlines()
-			col = {}
-			col_index = 0
-			data_start = 0
-			for idx, line in enumerate(lines):
-				if line.strip() == 'loop_':
-					nxt = lines[idx+1].strip() if idx+1 < len(lines) else ''
-					if nxt.startswith('_atom_site.'):
-						i = idx + 1
-						while i < len(lines) and \
-						lines[i].strip().startswith('_atom_site.'):
-							colname = \
-							lines[i].strip().split('.')[1]
-							col[colname] = col_index
-							col_index += 1
-							i += 1
-						data_start = i
-						break
-			i_group      = col['group_PDB']
-			i_type       = col['type_symbol']
-			i_altloc     = col['label_alt_id']
-			i_charge     = col['pdbx_formal_charge']
-			i_x          = col['Cartn_x']
-			i_y          = col['Cartn_y']
-			i_z          = col['Cartn_z']
-			i_occ        = col['occupancy']
-			i_bfac       = col['B_iso_or_equiv']
-			i_chain      = col['auth_asym_id']
-			i_atom       = col['auth_atom_id']
-			i_resn       = col['auth_comp_id']
-			i_seqid      = col['auth_seq_id']
-			i_serial     = col['id']
-			i_model_num  = col.get('pdbx_PDB_model_num', None)
-			found_models = []
-			for line in lines[data_start:]:
-				ln = line.strip()
-				if not ln or ln == '#':
-					break
-				fields = ln.split()
-				if fields[i_group] != 'ATOM':
-					continue
-				if fields[i_chain] != chain:
-					continue
-				if i_model_num is not None:
-					mnum = int(fields[i_model_num])
-					if mnum not in found_models:
-						found_models.append(mnum)
-					if mnum != model:
-						continue
-				ATOM.append(fields[i_group])
-				N.append(int(fields[i_serial]))
-				A.append(fields[i_atom])
-				L.append('' if (alt:=fields[i_altloc]) == '.' else alt)
-				R.append(fields[i_resn])
-				C.append(fields[i_chain])
-				S.append(int(fields[i_seqid]))
-				I.append('')
-				X.append(float(fields[i_x]))
-				Y.append(float(fields[i_y]))
-				Z.append(float(fields[i_z]))
-				O.append(float(fields[i_occ]))
-				T.append(float(fields[i_bfac]))
-				raw_q = fields[i_charge]
-				Q.append(0.0 if raw_q == '?' \
-				else float(raw_q))
-				E.append(fields[i_type])
-			if i_model_num is not None \
-			and found_models \
-			and model not in found_models:
-				raise Exception(
-					f'Model {model} not found in '
-					f'{filename}. '
-					f'Available models: {found_models}')
-		if not N: raise Exception(f'No ATOM in chain {chain} for {filename}')
-		N = [x-N[0] for x in N]
-		S_first, S = S[0], [x-S[0] for x in S]
-		best = {}
-		for i in range(len(A)):
-			key = (S[i], A[i])
-			if key not in best:
-				best[key] = i
-			elif O[i] > O[best[key]]:
-				best[key] = i
-		keep = sorted(best.values())
-		A, R, C, S, X, Y, Z, O, T, Q, E = [[l[i] for i in keep]
-			for l in [A, R, C, S, X, Y, Z, O, T, Q, E]]
-		ALL = [list(row) for row in zip(A, R, C, S, X, Y, Z, O, T, Q, E)]
-		Structure = defaultdict(list)
-		for atom in ALL: Structure[atom[3]].append(atom)
-		for k, v in Structure.items():
-			seen = set()
-			Structure[k] = [e for e in v
-				if e[0] not in seen and not seen.add(e[0])]
-		count = 0
-		Atoms = {}
-		Aminos = {}
-		Coordinates = []
-		for k, v in Structure.items():
-			BB, SC = [], []
-			for atom, amino, chain, residue, x, y, z, o, t, c, e in v:
-				Coordinates.append([x, y, z])
-				Atoms[count] = [atom, e, c, o, t]
-				(BB if atom in self.BB_ATOMS else SC).append(count)
-				count += 1
-			tricode = amino
-			amino = next(
-				k for k, v in self.AminoAcids.items()
-				if v['Tricode'] == amino)
-			Aminos[k] = [amino, chain, BB, SC, 'L', tricode, 0]
-		Coordinates = np.array(Coordinates)
-		errors = []
-		required_bb = {'N', 'CA', 'C'}
-		sorted_keys = sorted(Aminos.keys())
-		for k in sorted_keys:
-			present = {Atoms[ai][0] for ai in Aminos[k][2]}
-			missing = required_bb - present
-			if missing:
-				orig = k + S_first
-				tri  = Aminos[k][5]
-				errors.append(
-					f'  residue {orig} ({tri}): '
-					f'missing atom(s) {sorted(missing)}')
-		for ki, kj in zip(sorted_keys[:-1], sorted_keys[1:]):
-			C_idx = next(
-				(ai for ai in Aminos[ki][2]
-				if Atoms[ai][0] == 'C'), None)
-			N_idx = next(
-				(ai for ai in Aminos[kj][2]
-				if Atoms[ai][0] == 'N'), None)
-			if C_idx is None or N_idx is None:
-				continue
-			dist = np.linalg.norm(
-				Coordinates[C_idx] - Coordinates[N_idx])
-			if dist > 2.0:
-				orig_i  = ki + S_first
-				orig_j  = kj + S_first
-				gap     = kj - ki - 1
-				tri_i   = Aminos[ki][5]
-				tri_j   = Aminos[kj][5]
-				gap_str = (
-					f', {gap} residue(s) missing'
-					if gap > 0 else '')
-				errors.append(
-					f'  residue {orig_i} ({tri_i}) \u2192 '
-					f'{orig_j} ({tri_j}): '
-					f'C-N = {dist:.2f} \u00c5{gap_str}')
-		if errors:
-			raise Exception(
-				f'Broken chain in {filename} '
-				f'chain {chain}:\n'
-				+ '\n'.join(errors))
-		Aminos = {i: v for i, v in enumerate(Aminos.values())}
-		self.data['Coordinates'] = Coordinates
-		self.data['Amino Acids'] = Aminos
-		self.data['Atoms'] = Atoms
-		sequence = ''.join(self.GetFASTA())
-		for i, aa in enumerate(sequence):
-			bb = (
-			'Backbone start' if i == 0 else
-			'Backbone end'   if i == len(sequence)-1 else
-			'Backbone middle')
-			self._bondtree(bb, aa)
-		self._update()
-	def Export(self, filename):
-		''' Export pose to a .pdb or .cif file '''
-		if filename[-3:].upper() == 'PDB':
-			with open(filename, 'w') as f:
-				DATE = datetime.date.today().strftime("%d-%b-%Y")
-				f.write('HEADER'+' '*44+DATE+' '*3+'XXXX'+' '*11+'\n')
-				f.write('EXPDTA'+' '*4+'THEORETICAL MODEL'+' '*52+'\n')
-				f.write('REMARK 220 REMARK: MODEL GENERATED BY '
-				'SARI SABBAN'+' '*30+'\n')
-				AAs = self.data['Amino Acids']
-				for atom, coord, AAidx in self._atomaaiter():
-					line = self._pdbentry(
-						'ATOM', atom[0]+1, atom[1][0], '',
-						AAs[AAidx][5], AAs[AAidx][1],
-						AAidx+1, '',
-						coord[0], coord[1], coord[2],
-						atom[1][3], atom[1][4], atom[1][2], atom[1][1])
-					f.write(line)
-				f.write('TER')
-		elif filename[-3:].upper() == 'CIF':
-			with open(filename, 'w') as f:
-				f.write(f'data_{filename[:-4]}\n#\n')
-				f.write(f'_entry.id   {filename[:-4]}\n#\n')
-				f.write('_exptl.method   \'THEORETICAL MODEL\'\n#\n')
-				f.write('_audit_author.name          \'SARI SABBAN\'\n')
-				f.write('_audit_author.pdbx_ordinal  1\n#\n')
-				f.write('loop_\n')
-				cols = [
-					'_atom_site.group_PDB',
-					'_atom_site.id',
-					'_atom_site.type_symbol',
-					'_atom_site.label_atom_id',
-					'_atom_site.label_alt_id',
-					'_atom_site.label_comp_id',
-					'_atom_site.label_asym_id',
-					'_atom_site.label_entity_id',
-					'_atom_site.label_seq_id',
-					'_atom_site.pdbx_PDB_ins_code',
-					'_atom_site.Cartn_x',
-					'_atom_site.Cartn_y',
-					'_atom_site.Cartn_z',
-					'_atom_site.occupancy',
-					'_atom_site.B_iso_or_equiv',
-					'_atom_site.pdbx_formal_charge',
-					'_atom_site.auth_seq_id',
-					'_atom_site.auth_comp_id',
-					'_atom_site.auth_asym_id',
-					'_atom_site.auth_atom_id',
-					'_atom_site.pdbx_PDB_model_num']
-				for col in cols: f.write(col + '\n')
-				AAs = self.data['Amino Acids']
-				for atom, coord, AAidx in self._atomaaiter():
-					line = self._cifentry(
-						'ATOM', atom[0]+1, atom[1][0], '',
-						AAs[AAidx][5], AAs[AAidx][1],
-						AAidx+1,
-						coord[0], coord[1], coord[2],
-						atom[1][3], atom[1][4], atom[1][2], atom[1][1])
-					f.write(line)
-				f.write('#\n')
-	def Build(self, sequence, chain='A'):
-		''' Build a polypeptide primary structure from sequence '''
-		X, Y, Z = 0, 0, 0
-		Eadj = (0.400, 1.472, 0)
-		Oadj = (0.812, 0.940, 0)
-		n    = len(sequence)
-		for i, aa in enumerate(sequence):
-			LD, last, odd = aa.islower(), i == n-1, (i%2) != 0
-			if n == 1 or i == 0:
-				bb  = 'Backbone' if n == 1 else 'Backbone start'
-				idx = [6]
-				I   = len(self.data['Coordinates']) - 1
-				flip = False
+	def _downstreamatoms(self, res1, atom1, res2, atom2):
+		''' Find atom indices downstream of atom2, on the same chain as res2 '''
+		src = (self.data['Amino Acids'] or self.data['Nucleotides'])
+		chain = src[res2][1]
+		Bi = self.GetAtomIdx(res2, atom2)
+		result = set()
+		if res1 == res2:
+			bb = set(src[res2][2])
+			sc = set(src[res2][3])
+			if Bi in bb:
+				pos = src[res2][2].index(Bi)
+				result.update(
+					src[res2][2][pos:])
+				result.update(src[res2][3])
 			else:
-				bb   = 'Backbone end' if last else 'Backbone middle'
-				adj  = Eadj if odd else Oadj
-				prev = self.data['Coordinates'][-2]
-				X    = prev[0] + adj[0]
-				Y    = prev[1] + adj[1]
-				Z    = prev[2] + adj[2]
-				idx  = [4]
-				I    = len(self.data['Coordinates'])
-				flip = odd
-			self._amino(bb, X, Y, Z, aa, idx, flip=flip, LD=LD)
-			AAs = self.AminoAcids[bb]['Backbone Atoms']
-			self._atoms(aa, chain, AAs, idx[0], i, I, LD=LD)
-			self._bondtree(bb, aa)
-		self._update()
-	def ReBuild(self, sequence=None, D_AA=False):
-		''' Fold a polypeptide using angles and bonds '''
-		if sequence == None:
-			sequence = self.data['FASTA']
-		PHIs, PSIs, OMGs = [], [], []
-		NCaC, CaCN, CNCa, CHIs = [], [], [0], {}
-		bNCA, bCAC, bCN1 = [], [], []
-		for i in range(len(sequence)):
-			PHIs.append(self.GetDihedral(i, 'PHI'))
-			PSIs.append(self.GetDihedral(i, 'PSI'))
-			OMGs.append(self.GetDihedral(i, 'OMEGA'))
-			NCaC.append(self.GetAngle(i, 'N', i, 'CA', i, 'C'))
-			if i != 0:
-				CNCa.append(self.GetAngle(i-1, 'C', i, 'N', i, 'CA'))
-			if i != len(sequence) -1:
-				CaCN.append(self.GetAngle(i, 'CA', i, 'C', i+1, 'N'))
-			chi = []
-			for number in range(1, 21):
-				try: chi.append(self.Angle(i, 'CHI', number))
-				except: pass
-			CHIs[i] = chi
-			bNCA.append(self.GetDistance(i, 'N', i, 'CA'))
-			bCAC.append(self.GetDistance(i, 'CA', i, 'C'))
-			try: bCN1.append(self.GetDistance(i, 'C', i+1, 'N'))
-			except: pass
-		self.data = copy.deepcopy({
-			'Energy':0, 'Rg':0, 'Mass':0, 'Size':0,
-			'FASTA':None, 'SS':None,
-			'Amino Acids':{}, 'Atoms':{}, 'Bonds':{},
-			'Coordinates':np.array([[0, 0, 0]])})
-		self.Build(sequence)
-		for i, (p, s, o, n, a, c, b1, b2, b3) in enumerate(zip(
-		PHIs, PSIs, OMGs, NCaC, CaCN, CNCa, bNCA, bCAC, bCN1)):
-			self.RotateDihedral(i, p, 'PHI')
-			self.RotateDihedral(i, s, 'PSI')
-			self.AdjustDistance(i, 'N', i, 'CA', b1)
-			self.AdjustDistance(i, 'CA', i, 'C', b2)
-			N = self.GetAngle(i, 'N', i, 'CA', i, 'C')
-			self.AdjustAngle(i, 'N', i, 'CA', i, 'C', N-n)
-			if i != 0:
-				C = self.GetAngle(i-1, 'C', i, 'N', i, 'CA')
-				self.AdjustAngle(i-1, 'C', i, 'N', i, 'CA', C-c)
-			if i != len(sequence) -1:
-				A = self.GetAngle(i, 'CA', i, 'C', i+1, 'N')
-				self.AdjustAngle(i, 'CA', i, 'C', i+1, 'N', A-a)
-				self.RotateDihedral(i, o, 'OMEGA')
-				self.AdjustDistance(i, 'C', i+1, 'N', b3)
-		for i in range(len(sequence)):
-			chi = CHIs[i]
-			if not chi or self._isfused(sequence[i]): continue
-			try:
-				for ii, c in enumerate(chi):
-					self.RotateDihedral(i, c, 'CHI', ii+1)
-			except: continue
-		self.GetCharge()
-		self.GetDSSP()
-		self.GetSASA()
-		self._update()
-		if D_AA:
-			self.data['Coordinates'] = self.data['Coordinates'] * [1, 1, -1]
-			for i in range(len(sequence)):
-				Daa = self.data['Amino Acids'][i][0].lower()
-				tri = 'D' + self.data['Amino Acids'][i][5][1:]
-				self.data['Amino Acids'][i][0] = Daa
-				self.data['Amino Acids'][i][-1] = tri
-	def GetDistance(self, AA1, atom1, AA2, atom2):
-		''' Measure distance between any two atoms '''
-		A = self.GetAtomCoord(AA1, atom1)
-		B = self.GetAtomCoord(AA2, atom2)
-		mag = np.linalg.norm(B - A)
-		return mag
-	def GetDihedral(self, AA, angle_type, chi_type=None):
-		''' Measure φ/ψ/ω/χ angle at bond '''
-		AminoAcid = self.data['Amino Acids'][AA][0].upper()
-		at = angle_type.upper()
-		if at == 'PHI':
-			if AA == 0: return 0.0
-			r1 = self.GetAtomCoord(AA-1, 'C')
-			r2 = self.GetAtomCoord(AA, 'N')
-			r3 = self.GetAtomCoord(AA, 'CA')
-			r4 = self.GetAtomCoord(AA, 'C')
-		elif at == 'PSI':
-			r1 = self.GetAtomCoord(AA, 'N')
-			r2 = self.GetAtomCoord(AA, 'CA')
-			r3 = self.GetAtomCoord(AA, 'C')
-			try:
-				r4 = self.GetAtomCoord(AA+1, 'N')
-			except:
-				return 0.0
-		elif at == 'OMEGA':
-			r1 = self.GetAtomCoord(AA, 'CA')
-			r2 = self.GetAtomCoord(AA, 'C')
-			try:
-				r3 = self.GetAtomCoord(AA+1, 'N')
-				r4 = self.GetAtomCoord(AA+1, 'CA')
-			except: return 180.0
-		elif at == 'CHI':
-			assert type(chi_type) is int, 'Incorrect Chi angle type'
-			n_chi = len(self.AminoAcids[AminoAcid]['Chi Angle Atoms'])
-			if n_chi < chi_type:
-				raise Exception(
-					f'{AminoAcid} at position {AA} '
-					f'has no Chi {chi_type} angle')
-			atoms = self.AminoAcids[AminoAcid]['Chi Angle Atoms'][chi_type-1]
-			r1 = self.GetAtomCoord(AA, atoms[0])
-			r2 = self.GetAtomCoord(AA, atoms[1])
-			r3 = self.GetAtomCoord(AA, atoms[2])
-			r4 = self.GetAtomCoord(AA, atoms[3])
+				pos = src[res2][3].index(Bi)
+				result.update(src[res2][3][pos:])
+			for ri, info in src.items():
+				if info[1] != chain: continue
+				if ri > res2:
+					result.update(info[2] + info[3])
+		else:
+			for ri, info in src.items():
+				if info[1] != chain: continue
+				if ri >= res2:
+					result.update(info[2] + info[3])
+		return result
+	def _parsepdb(self, filename, chain, model):
+		''' Parse ATOM records from a PDB file '''
+		with open(filename) as f: raw = f.readlines()
+		rows, has_mdl, in_tgt = [], False, False
+		found = []
+		for line in raw:
+			line = line.rstrip()
+			if not line: continue
+			rec = line[:6].strip()
+			if rec == 'MODEL':
+				has_mdl = True
+				try: mnum = int(line.split()[1])
+				except (IndexError, ValueError):
+					mnum = len(found) + 1
+				found.append(mnum)
+				in_tgt = (mnum == model)
+				continue
+			if rec == 'ENDMDL':
+				if in_tgt: break
+				in_tgt = False
+				continue
+			if rec != 'ATOM': continue
+			ch = line[21]
+			if chain and ch not in chain: continue
+			if has_mdl and not in_tgt: continue
+			a = line[12:16].strip()
+			e = line[76:78].strip()
+			if not e:
+				s = a.lstrip('0123456789')
+				e = s[0] if s else a[0]
+			occ = float(line[54:60]) \
+				if len(line) >= 60 else 1.0
+			bfc = float(line[60:66]) \
+				if len(line) >= 66 else 0.0
+			rows.append((
+				a, line[17:20].strip(),
+				ch, int(line[22:26]),
+				float(line[30:38]),
+				float(line[38:46]),
+				float(line[46:54]),
+				occ, bfc, e))
+		if has_mdl and model not in found:
+			raise Exception(
+				f'Model {model} not found in '
+				f'{filename}. '
+				f'Available models: {found}')
+		return rows
+	def _cifsplit(self, line):
+		''' Split a CIF data line respecting quotes '''
+		tokens = []
+		i, n = 0, len(line)
+		while i < n:
+			if line[i] in (' ', '\t'):
+				i += 1
+				continue
+			if line[i] in ("'", '"'):
+				q = line[i]
+				j = line.find(q, i + 1)
+				if j == -1: j = n - 1
+				tokens.append(line[i+1:j])
+				j += 1
+				i = j
+			else:
+				j = i
+				while j < n and line[j] not in \
+				(' ', '\t'):
+					j += 1
+				tokens.append(line[i:j])
+				i = j
+		return tokens
+	def _cifcols(self, lines):
+		''' Find _atom_site column map and data start '''
+		C, ci = {}, 0
+		for idx, line in enumerate(lines):
+			if line.strip() != 'loop_': continue
+			nxt = lines[idx+1].strip() \
+				if idx+1 < len(lines) else ''
+			if not nxt.startswith('_atom_site.'):
+				continue
+			i = idx + 1
+			while i < len(lines) and \
+			lines[i].strip().startswith(
+				'_atom_site.'):
+				cn = lines[i].strip().split('.')[1]
+				C[cn] = ci
+				ci += 1
+				i += 1
+			return C, i
+		return C, 0
+	def _parsecif(self, filename, chain, model):
+		''' Parse ATOM records from a CIF file '''
+		with open(filename) as f:
+			lines = f.readlines()
+		C, start = self._cifcols(lines)
+		if not C:
+			raise Exception(
+				f'No _atom_site loop in '
+				f'{filename}')
+		i_mdl = C.get('pdbx_PDB_model_num')
+		i_alt = C.get('label_alt_id')
+		rows, found = [], []
+		for line in lines[start:]:
+			ln = line.strip()
+			if not ln or ln == '#': break
+			f = self._cifsplit(ln)
+			if f[C['group_PDB']] != 'ATOM': continue
+			ch = f[C['auth_asym_id']]
+			if chain and ch not in chain: continue
+			if i_mdl is not None:
+				mnum = int(f[i_mdl])
+				if mnum not in found:
+					found.append(mnum)
+				if mnum != model: continue
+			alt = f[i_alt] \
+				if i_alt is not None else '.'
+			if alt not in ('.','A','1',''): continue
+			raw_seq = f[C['auth_seq_id']]
+			try: seqid = int(raw_seq)
+			except ValueError: continue
+			rows.append((
+				f[C['auth_atom_id']].strip('"'),
+				f[C['auth_comp_id']], ch,
+				seqid,
+				float(f[C['Cartn_x']]),
+				float(f[C['Cartn_y']]),
+				float(f[C['Cartn_z']]),
+				float(f[C['occupancy']]),
+				float(f[C['B_iso_or_equiv']]),
+				f[C['type_symbol']]))
+		if i_mdl is not None and found \
+		and model not in found:
+			raise Exception(
+				f'Model {model} not found in '
+				f'{filename}. Available: {found}')
+		return rows
+	def _detecttype(self, resnames):
+		''' Auto-detect molecule type from residues '''
+		aa = {v['Tricode'] for v in
+			self.aminoacids.values()
+			if 'Tricode' in v}
+		if resnames & aa: return 'Protein'
+		if resnames & {'DT', 'T'}: return 'DNA'
+		if 'U' in resnames: return 'RNA'
+		nt = {self.nucleotides[r]['Type']
+			for r in resnames
+			if r in self.nucleotides}
+		return 'RNA' if 'RNA' in nt else 'DNA'
+	def _buildresidues(self, residues, sk):
+		''' Build Atoms/Aminos/Coords from residues '''
+		At, Am, Co = {}, {}, []
+		count, ai = 0, 0
+		for ch, rn in sk:
+			seen = set()
+			uniq = [r for r in residues[(ch, rn)]
+				if r[0] not in seen
+				and not seen.add(r[0])]
+			tri = uniq[0][1]
+			sym = next((k for k, v in
+				self.aminoacids.items()
+				if v['Tricode'] == tri), None)
+			if sym is None: continue
+			BB, SC = [], []
+			for r in uniq:
+				Co.append([r[4], r[5], r[6]])
+				At[count] = [
+					r[0], r[9], 0.0, r[7], r[8]]
+				(BB if r[0] in self.probbatoms
+					else SC).append(count)
+				count += 1
+			Am[ai] = [
+				sym, ch, BB, SC, 'L', tri, 0]
+			ai += 1
+		return At, Am, np.array(Co)
+	def _validatechain(self, At, Am, Co, filename, chain):
+		''' Validate backbone atoms and C-N bonds '''
+		err = []
+		req = {'N', 'CA', 'C'}
+		for k in sorted(Am):
+			miss = req - {At[a][0]
+				for a in Am[k][2]}
+			if miss:
+				err.append(
+					f'  residue {k} ({Am[k][5]})'
+					f': missing {sorted(miss)}')
+		keys = sorted(Am)
+		for ki, kj in zip(keys[:-1], keys[1:]):
+			if Am[ki][1] != Am[kj][1]: continue
+			ci = next((a for a in Am[ki][2]
+				if At[a][0] == 'C'), None)
+			ni = next((a for a in Am[kj][2]
+				if At[a][0] == 'N'), None)
+			if ci is None or ni is None: continue
+			d = np.linalg.norm(Co[ci] - Co[ni])
+			if d > 2.0:
+				err.append(
+					f'  {ki} ({Am[ki][5]})'
+					f' \u2192 {kj} ({Am[kj][5]})'
+					f': C\u2013N={d:.2f}\u00c5')
+		if err:
+			raise Exception(
+				f'Broken chain in {filename}'
+				f' chains {chain}:\n'
+				+ '\n'.join(err))
+	def _buildbonds(self, Am):
+		''' Build protein bond tree per chain '''
+		cpos = defaultdict(list)
+		for i in range(len(Am)):
+			cpos[Am[i][1]].append(i)
+		prev = None
+		for i in range(len(Am)):
+			ch = Am[i][1]
+			cr = cpos[ch]
+			pos = cr.index(i)
+			if pos == 0: bb = 'Backbone start'
+			elif pos == len(cr)-1:
+				bb = 'Backbone end'
+			else: bb = 'Backbone middle'
+			new = prev is not None and ch != prev
+			self._bondtree(
+				bb, Am[i][0], new_chain=new)
+			prev = ch
+	def _importprotein(self, residues, sk, filename, chain):
+		''' Populate self.data for protein '''
+		At, Am, Co = self._buildresidues(
+			residues, sk)
+		if not Am:
+			raise Exception(
+				f'No recognized residues in '
+				f'{filename}')
+		self._validatechain(At, Am, Co, filename, chain)
+		self.data['Coordinates'] = Co
+		self.data['Amino Acids'] = Am
+		self.data['Atoms'] = At
+		self._buildbonds(Am)
+		self.CalcCharge()
+		self.CalcDSSP()
+		self.CalcSASA()
+	def _prevres(self, i):
+		''' Previous residue on same chain, or None '''
+		src = (self.data['Amino Acids'] or self.data['Nucleotides'])
+		if i-1 in src and src[i-1][1] == src[i][1]: return i - 1
+		return None
+	def _nextres(self, i):
+		''' Next residue on same chain, or None '''
+		src = (self.data['Amino Acids'] or self.data['Nucleotides'])
+		if i+1 in src and src[i+1][1] == src[i][1]: return i + 1
+		return None
+	def _hasatom(self, res, atom):
+		''' Check if atom exists in a residue '''
+		source = (self.data['Amino Acids'] or self.data['Nucleotides'])
+		info = source[res]
+		return any(self.data['Atoms'][i][0] == atom for i in info[2] + info[3])
+	def _nuctricode(self, resn, mt):
+		''' Map residue name to nucleotide tricode '''
+		if mt == 'DNA' and resn in ('A','G','C'): return 'D' + resn
+		if resn == 'T': return 'DT'
+		return resn
+	def _addnucleotide(self, db, nr, ai, Co):
+		''' Process one nucleotide's atoms/bonds '''
+		bbm = db['Backbone Atoms']
+		bsm = db['Base Atoms']
+		n_bb = len(bbm)
+		D = self.data
+		bbi, bsi, ltg = [], [], {}
+		for li, am in enumerate(bbm + bsm):
+			row = nr.get(am[0])
+			if row is None:
+				ltg[li] = -1
+				continue
+			D['Atoms'][ai] = [am[0], am[1], am[2], row[7], row[8]]
+			Co.append([row[4], row[5], row[6]])
+			ltg[li] = ai
+			(bsi if li >= n_bb else bbi).append(ai)
+			ai += 1
+		dbn = {a[0] for a in bbm} | {a[0] for a in bsm}
+		for an, row in nr.items():
+			if an in dbn: continue
+			D['Atoms'][ai] = [an, row[9] or an[0], 0.0, row[7], row[8]]
+			Co.append([row[4], row[5], row[6]])
+			(bbi if an in self.nucbbatoms else bsi).append(ai)
+			ai += 1
+		bd = D['Bonds']
+		for ks, vl in db['Bonds'].items():
+			gi = ltg.get(int(ks), -1)
+			if gi == -1: continue
+			bd.setdefault(gi, [])
+			for lj in vl:
+				gj = ltg.get(lj, -1)
+				if gj != -1 and gj not in bd[gi]: bd[gi].append(gj)
+		return bbi, bsi, ai
+	def _phosphobonds(self, nt_ch):
+		''' Add O3'-P phosphodiester bonds '''
+		At = self.data['Atoms']
+		Bd = self.data['Bonds']
+		nts = self.data['Nucleotides']
+		for ids in nt_ch.values():
+			for i in range(len(ids) - 1):
+				o3 = next((a for a in nts[ids[i]][2] if At[a][0] == "O3'"),None)
+				p = next((a for a in nts[ids[i+1]][2] if At[a][0] == 'P'), None)
+				if o3 is None or p is None: continue
+				Bd.setdefault(o3, [])
+				Bd.setdefault(p, [])
+				if p not in Bd[o3]: Bd[o3].append(p)
+				if o3 not in Bd[p]: Bd[p].append(o3)
+	def _importnucleotide(self, residues, sk, mt):
+		''' Populate self.data for DNA/RNA '''
+		Co, ai, ni = [], 0, 0
+		nt_ch = defaultdict(list)
+		for ch, rn in sk:
+			resn = residues[(ch, rn)][0][1]
+			tri = self._nuctricode(resn, mt)
+			if tri not in self.nucleotides: continue
+			nr = {r[0]: r for r in residues[(ch, rn)]}
+			bbi, bsi, ai = self._addnucleotide(self.nucleotides[tri],nr,ai,Co)
+			self.data['Nucleotides'][ni] = [tri[-1], ch, bbi, bsi, tri]
+			nt_ch[ch].append(ni)
+			ni += 1
+		self.data['Coordinates'] = np.array(Co) if Co else np.zeros((0, 3))
+		self._phosphobonds(nt_ch)
+		self.CalcCharge()
+	def _dihedral(self, r1, r2, r3, r4):
+		''' Compute dihedral angle from 4 points '''
 		u1 = r2 - r1
 		u2 = r3 - r2
 		u3 = r4 - r3
-		mag_u2 = np.linalg.norm(u2)
-		u1u2 = np.cross(u1, u2)
-		u2u3 = np.cross(u2, u3)
-		u1u2Cu2u3 = np.cross(u1u2, u2u3)
-		u1u2Du2u3 = np.dot(u1u2, u2u3)
-		a = np.dot(u2, u1u2Cu2u3)
-		b = mag_u2 * u1u2Du2u3
-		theta = math.atan2(a, b) * 180 / math.pi
-		return theta
-	def GetAngle(self, AA1, atom1, AA2, atom2, AA3, atom3):
-		''' Measure the angle between three atoms '''
-		atom1 = self.GetAtomCoord(AA1, atom1)
-		atom2 = self.GetAtomCoord(AA2, atom2)
-		atom3 = self.GetAtomCoord(AA3, atom3)
-		A = atom2 - atom1
-		B = atom2 - atom3
-		cos_theta = np.dot(A, B) / (np.linalg.norm(A) * np.linalg.norm(B))
-		return math.degrees(math.acos(cos_theta))
-	def GetMass(self):
+		mag = np.linalg.norm(u2)
+		c12 = np.cross(u1, u2)
+		c23 = np.cross(u2, u3)
+		a = np.dot(u2, np.cross(c12, c23))
+		b = mag * np.dot(c12, c23)
+		return math.atan2(a, b) * 180 / math.pi
+	def _dihedralpivots(self, res, angle_type, chi_type=None):
+		''' Return (res_a, atom_a, res_b, atom_b) for pivot bond of dihedral '''
+		at = angle_type.upper()
+		mol = self.data['Type']
+		nxt = self._nextres(res)
+		if mol == 'Protein':
+			if at == 'PHI': return res, 'N', res, 'CA'
+			elif at == 'PSI': return res, 'CA', res, 'C'
+			elif at == 'OMEGA':
+				if nxt is None: return None
+				return res, 'C', nxt, 'N'
+			elif at == 'CHI':
+				assert chi_type is not None, 'Protein CHI needs chi_type'
+				sym = self.data['Amino Acids'][res][0].upper()
+				ca = self.aminoacids[sym]['Chi Angle Atoms'][chi_type-1]
+				return res, ca[1], res, ca[2]
+			else:
+				raise Exception(
+					f'Unknown protein angle: '
+					f'{angle_type}')
+		elif mol in ('DNA', 'RNA'):
+			if at == 'ALPHA':     return res, 'P', res, "O5'"
+			elif at == 'BETA':    return res, "O5'", res, "C5'"
+			elif at == 'GAMMA':   return res, "C5'", res, "C4'"
+			elif at == 'DELTA':   return res, "C4'", res, "C3'"
+			elif at == 'EPSILON': return res, "C3'", res, "O3'"
+			elif at == 'ZETA':
+				if nxt is None: return None
+				return res, "O3'", nxt, 'P'
+			elif at == 'CHI':
+				tri = self.data['Nucleotides'][res][4]
+				ca = self.nucleotides[tri]['Chi Angle Atoms']
+				return res, ca[1], res, ca[2]
+			else:
+				raise Exception(
+					f'Unknown nucleotide angle'
+					f': {angle_type}')
+		raise Exception(
+			'No structure loaded. '
+			'Call Import() first')
+	def _flip(self, AA):
+		''' Flip amino acid 180° on CA H1-H2 axis '''
+		p = AA[2]
+		AA = AA - p
+		H1, H2 = AA[3], AA[4]
+		u = np.cross(H1, H2)
+		u = u / np.linalg.norm(u)
+		TM = np.array([
+			[2*u[0]**2-1, 2*u[0]*u[1], 2*u[0]*u[2]],
+			[2*u[0]*u[1], 2*u[1]**2-1, 2*u[1]*u[2]],
+			[2*u[0]*u[2], 2*u[1]*u[2], 2*u[2]**2-1]])
+		return np.matmul(AA, TM) + p
+	def _ld(self, AA):
+		''' Convert amino acid L to D chirality '''
+		return AA * [1, 1, -1]
+	def _buildprotein(self, sequence, chain):
+		''' Build one protein chain, append to data '''
+		is_new = (self.data['Type'] is None or self.data['Amino Acids'] is None)
+		if is_new:
+			self.data['Type'] = 'Protein'
+			self.data['Amino Acids'] = {}
+			self.data['Nucleotides'] = None
+			self.data['Atoms'] = {}
+			self.data['Bonds'] = {}
+			self.data['Coordinates'] = \
+				np.zeros((0, 3))
+		aa_db = self.aminoacids
+		Eadj = (0.400, 1.472, 0)
+		Oadj = (0.812, 0.940, 0)
+		n = len(sequence)
+		aa_start = len(self.data['Amino Acids'])
+		atom_start = len(self.data['Atoms'])
+		new_coords = []
+		X, Y, Z = 0, 0, 0
+		for i, aa in enumerate(sequence):
+			LD = aa.islower()
+			last = i == n - 1
+			odd = (i % 2) != 0
+			if n == 1 or i == 0:
+				bb = 'Backbone' if n == 1 else 'Backbone start'
+				idx = 6
+				flip = False
+			else:
+				bb = 'Backbone end' if last else 'Backbone middle'
+				adj = Eadj if odd else Oadj
+				prev = new_coords[-1][-2]
+				X = prev[0] + adj[0]
+				Y = prev[1] + adj[1]
+				Z = prev[2] + adj[2]
+				idx = 4
+				flip = odd
+			T = np.array([X, Y, Z])
+			BB = np.array(aa_db[bb]['Vectors']) + T
+			SC = np.array(aa_db[aa.upper()]['Vectors']) + T
+			AA_co = np.insert(BB, [idx], SC, axis=0)
+			if LD: AA_co = self._ld(AA_co)
+			if flip: AA_co = self._flip(AA_co)
+			if self._isfused(aa): AA_co = np.delete(AA_co, [1], axis=0)
+			new_coords.append(AA_co)
+		all_co = np.concatenate(new_coords)
+		I = atom_start
+		for i, aa in enumerate(sequence):
+			LD = aa.islower()
+			aa_u = aa.upper()
+			if n == 1 or i == 0:
+				bb = 'Backbone' if n == 1 else 'Backbone start'
+				bb_idx = 6
+			else:
+				bb = 'Backbone end' if i == n-1 else 'Backbone middle'
+				bb_idx = 4
+			bb_atoms = aa_db[bb][
+				'Backbone Atoms'][:bb_idx]
+			if self._isfused(aa):
+				bb_atoms = [b for j, b in enumerate(bb_atoms) if j != 1]
+			sc_atoms = aa_db[aa_u]['Sidechain Atoms']
+			tail = aa_db[bb]['Backbone Atoms'][bb_idx:]
+			full = bb_atoms + sc_atoms + tail
+			BBi, SCi = [], []
+			for v in full:
+				self.data['Atoms'][I] = [v[0], v[1], v[2], v[3], v[4]]
+				if v[0] in self.probbatoms: BBi.append(I)
+				else: SCi.append(I)
+				I += 1
+			tri = aa_db[aa_u]['Tricode']
+			if LD: tri = 'D' + tri[1:]
+			ai = aa_start + i
+			self.data['Amino Acids'][ai] = [aa, chain, BBi, SCi, 'L', tri, 0]
+		self.data['Coordinates'] = np.append(
+			self.data['Coordinates'], all_co, axis=0)
+		for i, aa in enumerate(sequence):
+			ai = aa_start + i
+			if n == 1 or i == 0:
+				bb = 'Backbone' if n == 1 else 'Backbone start'
+			else:
+				bb = 'Backbone end' if i == n-1 else 'Backbone middle'
+			new_ch = (i == 0 and aa_start > 0)
+			self._bondtree(bb, aa, new_chain=new_ch)
+	def _buildnucleotide(self, sequence, fmt, chains=None):
+		''' Build DNA or RNA (single or double strand) '''
+		sequence = sequence.upper()
+		N = len(sequence)
+		if fmt == 'DNA':
+			comp = {'A':'T', 'T':'A', 'G':'C', 'C':'G'}
+			tri = {'A':'DA', 'T':'DT', 'G':'DG', 'C':'DC'}
+			rise, twist = 3.375, 36.0
+		else:
+			comp = {'A':'U', 'U':'A', 'G':'C', 'C':'G'}
+			tri = {'A':'A', 'U':'U', 'G':'G', 'C':'C'}
+			rise, twist = 2.548, 32.7
+		def Rz(deg):
+			t = math.radians(deg)
+			c, s = math.cos(t), math.sin(t)
+			return np.array([
+				[c, -s, 0.],
+				[s, c, 0.],
+				[0., 0., 1.]])
+		Rflip = np.diag([1.0, -1.0, -1.0])
+		self.data = {
+			'Type': fmt, 'Energy': 0,
+			'Rg': 0, 'Mass': 0, 'Size': {},
+			'FASTA': {}, 'SS': {},
+			'Nucleotides': {},
+			'Amino Acids': None,
+			'Atoms': {}, 'Bonds': {},
+			'Coordinates': np.zeros((0, 3))}
+		Co, ai, ni = [], 0, 0
+		nt_ch = defaultdict(list)
+		def add_nt(tricode, chain, k, flip):
+			nonlocal ai, ni
+			db = self.nucleotides[tricode]
+			vecs = np.array(db['Vectors'])
+			bbm = db['Backbone Atoms']
+			bsm = db['Base Atoms']
+			n_bb = len(bbm)
+			R = Rz(-k * twist)
+			T = np.array([0., 0., -k * rise])
+			if flip:
+				tr = (vecs @ Rflip.T) @ R.T + T
+			else:
+				tr = vecs @ R.T + T
+			ltg = {}
+			bbi, bsi = [], []
+			for li in range(n_bb):
+				am = bbm[li]
+				self.data['Atoms'][ai] = [am[0], am[1], am[2], 1.0, 0.0]
+				Co.append(tr[li])
+				ltg[li] = ai
+				bbi.append(ai)
+				ai += 1
+			for li2, am in enumerate(bsm):
+				li = n_bb + li2
+				self.data['Atoms'][ai] = [am[0], am[1], am[2], 1.0, 0.0]
+				Co.append(tr[li])
+				ltg[li] = ai
+				bsi.append(ai)
+				ai += 1
+			bd = self.data['Bonds']
+			for ks, vl in db['Bonds'].items():
+				gi = ltg.get(int(ks), -1)
+				if gi == -1: continue
+				bd.setdefault(gi, [])
+				for lj in vl:
+					gj = ltg.get(lj, -1)
+					if gj != -1 and gj not in bd[gi]:
+						bd[gi].append(gj)
+			sym = tricode[-1]
+			self.data['Nucleotides'][ni] = [sym, chain, bbi, bsi, tricode]
+			nt_ch[chain].append(ni)
+			ni += 1
+		if chains is None:
+			chains = ['A', 'B']
+		chain_a = chains[0]
+		for i, base in enumerate(sequence):
+			add_nt(tri[base], chain_a, i, False)
+		if len(chains) > 1:
+			chain_b = chains[1]
+			comp_seq = ''.join(
+				comp[b]
+				for b in reversed(sequence))
+			for j, base in enumerate(comp_seq):
+				add_nt(tri[base], chain_b,
+					N - 1 - j, True)
+		self.data['Coordinates'] = np.array(Co)
+		self._phosphobonds(nt_ch)
+	def _kabsch(self, P, Q):
+		''' Kabsch optimal rotation alignment '''
+		Pc = P.mean(0)
+		Qc = Q.mean(0)
+		H = (P - Pc).T @ (Q - Qc)
+		U, S, Vt = np.linalg.svd(H)
+		d = np.sign(np.linalg.det(Vt.T @ U.T))
+		R = Vt.T @ np.diag([1.0, 1.0, d]) @ U.T
+		return R, Qc, Pc
+	def _rebuildprotein(self, sequence, D_AA):
+		''' Rebuild protein from internal coords '''
+		AAs = self.data['Amino Acids']
+		N = len(AAs)
+		fasta = self.data['FASTA']
+		if sequence is None:
+			sequence = fasta
+		if isinstance(sequence, str) \
+		and len(fasta) > 1:
+			raise Exception(
+				'Multi-chain protein requires '
+				'sequence as dict, e.g. '
+				'{"A":"SEQ1", "B":"SEQ2"}')
+		if isinstance(sequence, dict):
+			full_seq = dict(fasta)
+			full_seq.update(sequence)
+			sequence = full_seq
+		if isinstance(sequence, dict):
+			for ch in sequence:
+				if ch in fasta \
+				and len(sequence[ch]) \
+				!= len(fasta[ch]):
+					raise Exception(
+						f'Chain {ch}: sequence '
+						f'length '
+						f'{len(sequence[ch])} '
+						f'does not match '
+						f'original '
+						f'{len(fasta[ch])}')
+		elif isinstance(sequence, str):
+			ch0 = sorted(fasta.keys())[0]
+			if len(sequence) != len(fasta[ch0]):
+				raise Exception(
+					f'Sequence length '
+					f'{len(sequence)} does not '
+					f'match original '
+					f'{len(fasta[ch0])}')
+		orig_coords = {}
+		for i in range(N):
+			info = AAs[i]
+			for ai in info[2] + info[3]:
+				aname = self.data['Atoms'][ai][0]
+				orig_coords[(i, aname)] = \
+					self.data[
+						'Coordinates'][ai].copy()
+		def _bb_frame(coords, i, src):
+			info = src[i]
+			n_i = next(a for a in info[2]
+				if self.data['Atoms'][a][0]
+				== 'N')
+			ca_i = next(a for a in info[2]
+				if self.data['Atoms'][a][0]
+				== 'CA')
+			c_i = next(a for a in info[2]
+				if self.data['Atoms'][a][0]
+				== 'C')
+			n = coords[n_i].copy()
+			ca = coords[ca_i].copy()
+			c = coords[c_i].copy()
+			e1 = ca - n
+			e1 = e1 / np.linalg.norm(e1)
+			v = c - n
+			e2 = v - np.dot(v, e1) * e1
+			nm = np.linalg.norm(e2)
+			if nm < 1e-10: return None, None
+			e2 = e2 / nm
+			F = np.array(
+				[e1, e2, np.cross(e1, e2)])
+			return F, n
+		self.data = {
+			'Type': None, 'Energy': 0,
+			'Rg': 0, 'Mass': 0, 'Size': {},
+			'FASTA': {}, 'SS': {},
+			'Nucleotides': None,
+			'Amino Acids': None,
+			'Atoms': {}, 'Bonds': {},
+			'Coordinates': np.zeros((0, 3))}
+		if isinstance(sequence, dict):
+			for ch, seq in sorted(
+			sequence.items()):
+				self._buildprotein(seq, ch)
+		else:
+			ch0 = sorted(fasta.keys())[0]
+			self._buildprotein(sequence, ch0)
+		AAs2 = self.data['Amino Acids']
+		coords = self.data['Coordinates']
+		for i in range(len(AAs2)):
+			has_orig = (
+				(i, 'N') in orig_coords
+				and (i, 'CA') in orig_coords
+				and (i, 'C') in orig_coords)
+			if not has_orig: continue
+			F_new, ori_new = _bb_frame(
+				coords, i, AAs2)
+			if F_new is None: continue
+			on = orig_coords[(i, 'N')]
+			oca = orig_coords[(i, 'CA')]
+			oc = orig_coords[(i, 'C')]
+			e1 = oca - on
+			e1 = e1 / np.linalg.norm(e1)
+			v = oc - on
+			e2 = v - np.dot(v, e1) * e1
+			nm = np.linalg.norm(e2)
+			if nm < 1e-10: continue
+			e2 = e2 / nm
+			F_orig = np.array(
+				[e1, e2, np.cross(e1, e2)])
+			F_orig_inv = F_orig.T
+			for ai in AAs2[i][2] + AAs2[i][3]:
+				aname = self.data['Atoms'][ai][0]
+				if (i, aname) in orig_coords:
+					coords[ai] = \
+						orig_coords[(i, aname)]
+				else:
+					local = F_new @ (
+						coords[ai] - ori_new)
+					coords[ai] = \
+						on + F_orig_inv @ local
+		self.data['Coordinates'] = coords
+		self.CalcCharge()
+		self.CalcDSSP()
+		self.CalcSASA()
+		if D_AA:
+			self.data['Coordinates'] *= [1, 1, -1]
+			N2 = len(self.data['Amino Acids'])
+			for i in range(N2):
+				aa = self.data['Amino Acids'][i]
+				aa[0] = aa[0].lower()
+				aa[5] = 'D' + aa[5][1:]
+	def _rebuildnucleotide(self, sequence, _mutated):
+		''' Rebuild DNA/RNA from internal coords '''
+		fmt = self.data['Type']
+		nts = self.data['Nucleotides']
+		N = len(nts)
+		fasta = self.data['FASTA']
+		first_ch = sorted(fasta.keys())[0]
+		if sequence is None:
+			seq_a = fasta[first_ch]
+		else:
+			seq_a = sequence
+		orig_len = len(fasta[first_ch])
+		if len(seq_a) != orig_len:
+			raise Exception(
+				f'Sequence length '
+				f'{len(seq_a)} does not match '
+				f'original {orig_len}')
+		old_syms = [nts[i][0]
+			for i in range(N)]
+		ALPHAs, BETAs, GAMMAs = {}, {}, {}
+		DELTAs, EPSILONs, ZETAs = {}, {}, {}
+		CHIs = {}
+		aPO5C5, aO5C5C4 = {}, {}
+		aC5C4C3, aC4C3O3 = {}, {}
+		aC3O3P, aO3PO5 = {}, {}
+		bPO5, bO5C5, bC5C4 = {}, {}, {}
+		bC4C3, bC3O3, bO3P = {}, {}, {}
+		for i in range(N):
+			prv = self._prevres(i)
+			nxt = self._nextres(i)
+			has_P = self._hasatom(i, 'P')
+			if prv is not None \
+			and self._hasatom(prv, "O3'") \
+			and has_P:
+				ALPHAs[i] = self.GetDihedral(i, 'ALPHA')
+			if has_P:
+				BETAs[i] = self.GetDihedral(i, 'BETA')
+			GAMMAs[i] = self.GetDihedral(i, 'GAMMA')
+			DELTAs[i] = self.GetDihedral(i, 'DELTA')
+			if nxt is not None and self._hasatom(nxt, 'P'):
+				EPSILONs[i] = self.GetDihedral(i, 'EPSILON')
+				ZETAs[i] = self.GetDihedral(i, 'ZETA')
+			CHIs[i] = self.GetDihedral(i, 'CHI')
+			if has_P:
+				aPO5C5[i] = self.GetAngle(i, 'P', i, "O5'", i, "C5'")
+				bPO5[i] = self.GetDistance(i, 'P', i, "O5'")
+			aO5C5C4[i] = self.GetAngle(i, "O5'", i, "C5'", i, "C4'")
+			bO5C5[i] = self.GetDistance(i, "O5'", i, "C5'")
+			aC5C4C3[i] = self.GetAngle(i, "C5'", i, "C4'", i, "C3'")
+			bC5C4[i] = self.GetDistance(i, "C5'", i, "C4'")
+			aC4C3O3[i] = self.GetAngle(i, "C4'", i, "C3'", i, "O3'")
+			bC4C3[i] = self.GetDistance(i, "C4'", i, "C3'")
+			bC3O3[i] = self.GetDistance(i, "C3'", i, "O3'")
+			if nxt is not None:
+				aC3O3P[i] = self.GetAngle(i, "C3'", i, "O3'", nxt, 'P')
+				aO3PO5[i] = self.GetAngle(i, "O3'", nxt, 'P', nxt, "O5'")
+				bO3P[i] = self.GetDistance(i, "O3'", nxt, 'P')
+		ref_C1 = []
+		for i in range(N):
+			if self._hasatom(i, "C1'"):
+				ref_C1.append(self.GetAtomCoord(i, "C1'").copy())
+			else:
+				ref_C1.append(None)
+		def _local_frame(c4, c3, c5):
+			e1 = c3 - c4
+			e1 = e1 / np.linalg.norm(e1)
+			v = c5 - c4
+			e2 = v - np.dot(v, e1) * e1
+			n = np.linalg.norm(e2)
+			if n < 1e-10: return None
+			e2 = e2 / n
+			return np.array([e1, e2, np.cross(e1, e2)])
+		ring_local = {}
+		bb_skip = {"P", "O5'", "C5'", "C4'", "C3'", "O3'"}
+		for i in range(N):
+			if not (self._hasatom(i, "C4'")
+			and self._hasatom(i, "C3'")
+			and self._hasatom(i, "C5'")):
+				continue
+			c4 = self.GetAtomCoord(i, "C4'").copy()
+			c3 = self.GetAtomCoord(i, "C3'").copy()
+			c5 = self.GetAtomCoord(i, "C5'").copy()
+			F = _local_frame(c4, c3, c5)
+			if F is None: continue
+			info = nts[i]
+			saved = {}
+			for ai in info[2] + info[3]:
+				aname = self.data['Atoms'][ai][0]
+				if aname in bb_skip: continue
+				pos = self.data['Coordinates'][ai].copy()
+				saved[aname] = F @ (pos - c4)
+			ring_local[i] = saved
+		orig_chains = sorted(set(
+			v[1] for v in nts.values()))
+		self._buildnucleotide(
+			seq_a, fmt, chains=orig_chains)
+		self.CalcCharge()
+		nts2 = self.data['Nucleotides']
+		if _mutated is None:
+			new_syms = [nts2[i][0]
+				for i in range(len(nts2))]
+			_mutated = {i for i in range(
+				min(N, len(nts2)))
+				if old_syms[i] != new_syms[i]}
+		def _sugarframe(mi):
+			info = nts2[mi]
+			ai_o4 = next((a for a in info[2]
+				if self.data['Atoms'][a][0]
+				== "O4'"), None)
+			ai_c1 = next((a for a in info[2]
+				if self.data['Atoms'][a][0]
+				== "C1'"), None)
+			ai_c2 = next((a for a in info[2]
+				if self.data['Atoms'][a][0]
+				== "C2'"), None)
+			if None in (ai_o4, ai_c1, ai_c2):
+				return None, None
+			co = self.data['Coordinates']
+			c1 = co[ai_c1].copy()
+			o4 = co[ai_o4].copy()
+			c2 = co[ai_c2].copy()
+			e1 = o4 - c1
+			nm = np.linalg.norm(e1)
+			if nm < 1e-10: return None, None
+			e1 = e1 / nm
+			v = c2 - c1
+			e2 = v - np.dot(v, e1) * e1
+			nm2 = np.linalg.norm(e2)
+			if nm2 < 1e-10: return None, None
+			e2 = e2 / nm2
+			F = np.array(
+				[e1, e2, np.cross(e1, e2)])
+			return F, c1
+		build_base_local = {}
+		for mi in _mutated:
+			if mi >= len(nts2): continue
+			Fb, c1b = _sugarframe(mi)
+			if Fb is None: continue
+			saved = {}
+			for ai in nts2[mi][3]:
+				aname = self.data[
+					'Atoms'][ai][0]
+				saved[aname] = Fb @ (
+					self.data['Coordinates'][ai]
+					- c1b)
+			build_base_local[mi] = saved
+		for i in range(N):
+			if i in ALPHAs:
+				self.RotateDihedral(i, ALPHAs[i], 'ALPHA')
+			if i in BETAs:
+				self.RotateDihedral(i, BETAs[i], 'BETA')
+			self.RotateDihedral(i, GAMMAs[i], 'GAMMA')
+			self.RotateDihedral(i, DELTAs[i], 'DELTA')
+			self.RotateDihedral(i, CHIs[i], 'CHI')
+			if i in bPO5:
+				self.AdjustDistance(i, 'P', i, "O5'", bPO5[i])
+			if i in bO5C5:
+				self.AdjustDistance(i, "O5'", i, "C5'", bO5C5[i])
+			if i in bC5C4:
+				self.AdjustDistance(i, "C5'", i, "C4'", bC5C4[i])
+			if i in bC4C3:
+				self.AdjustDistance(i, "C4'", i, "C3'", bC4C3[i])
+			if i in bC3O3:
+				self.AdjustDistance(i, "C3'", i, "O3'", bC3O3[i])
+			if i in aPO5C5:
+				cur = self.GetAngle(i, 'P', i, "O5'", i, "C5'")
+				self.AdjustAngle(i, 'P', i, "O5'", i, "C5'", cur - aPO5C5[i])
+			if i in aO5C5C4:
+				cur = self.GetAngle(i, "O5'", i, "C5'", i, "C4'")
+				self.AdjustAngle(i, "O5'", i, "C5'", i, "C4'", cur - aO5C5C4[i])
+			if i in aC5C4C3:
+				cur = self.GetAngle(i, "C5'", i, "C4'", i, "C3'")
+				self.AdjustAngle(i, "C5'", i, "C4'", i, "C3'", cur - aC5C4C3[i])
+			if i in aC4C3O3:
+				cur = self.GetAngle(i, "C4'", i, "C3'", i, "O3'")
+				self.AdjustAngle(i, "C4'", i, "C3'", i, "O3'", cur - aC4C3O3[i])
+			nxt = self._nextres(i)
+			if nxt is not None:
+				if i in EPSILONs:
+					self.RotateDihedral(i, EPSILONs[i], 'EPSILON')
+				if i in ZETAs:
+					self.RotateDihedral(i, ZETAs[i], 'ZETA')
+				if i in bO3P:
+					self.AdjustDistance(i, "O3'", nxt, 'P', bO3P[i])
+				if i in aC3O3P:
+					cur = self.GetAngle(i, "C3'", i, "O3'", nxt, 'P')
+					self.AdjustAngle(
+						i, "C3'", i, "O3'", nxt, 'P', cur - aC3O3P[i])
+				if i in aO3PO5:
+					cur = self.GetAngle(i, "O3'", nxt, 'P', nxt, "O5'")
+					self.AdjustAngle(
+						i, "O3'", nxt, 'P', nxt, "O5'", cur - aO3PO5[i])
+		coords = self.data['Coordinates']
+		for i in range(N):
+			if i not in ring_local: continue
+			if not (self._hasatom(i, "C4'")
+			and self._hasatom(i, "C3'")
+			and self._hasatom(i, "C5'")):
+				continue
+			c4 = self.GetAtomCoord(
+				i, "C4'").copy()
+			c3 = self.GetAtomCoord(
+				i, "C3'").copy()
+			c5 = self.GetAtomCoord(
+				i, "C5'").copy()
+			F = _local_frame(c4, c3, c5)
+			if F is None: continue
+			Finv = F.T
+			saved = ring_local[i]
+			if i in _mutated:
+				restore = nts2[i][2]
+			else:
+				restore = nts2[i][2] + nts2[i][3]
+			for ai in restore:
+				aname = self.data[
+					'Atoms'][ai][0]
+				if aname in saved:
+					coords[ai] = \
+						c4 + Finv @ saved[aname]
+		self.data['Coordinates'] = coords
+		coords = self.data['Coordinates']
+		for ch in set(
+		v[1] for v in nts2.values()):
+			ref_pts, new_pts, aids = [], [], []
+			for i in range(N):
+				if nts2[i][1] != ch: continue
+				if ref_C1[i] is None: continue
+				ref_pts.append(ref_C1[i])
+				new_pts.append(self.GetAtomCoord(i, "C1'").copy())
+				for ai in (
+				nts2[i][2] + nts2[i][3]):
+					if ai not in aids:
+						aids.append(ai)
+			if len(ref_pts) < 3: continue
+			P = np.array(ref_pts, dtype=float)
+			Q = np.array(new_pts, dtype=float)
+			R, Qc, Pc = self._kabsch(P, Q)
+			for ai in aids:
+				coords[ai] = \
+					(coords[ai] - Qc) @ R + Pc
+		self.data['Coordinates'] = coords
+		coords = self.data['Coordinates']
+		for mi in _mutated:
+			if mi not in build_base_local:
+				continue
+			Fr, c1r = _sugarframe(mi)
+			if Fr is None: continue
+			Fri = Fr.T
+			bsaved = build_base_local[mi]
+			for ai in nts2[mi][3]:
+				aname = self.data[
+					'Atoms'][ai][0]
+				if aname in bsaved:
+					coords[ai] = \
+						c1r + Fri @ bsaved[aname]
+		self.data['Coordinates'] = coords
+		for mi in _mutated:
+			if mi >= len(nts2): continue
+			if mi not in CHIs: continue
+			cur = self.GetDihedral(mi, 'CHI')
+			target = CHIs[mi]
+			tri = nts2[mi][4]
+			ca = self.nucleotides[tri][
+				'Chi Angle Atoms']
+			piv_a = self.GetAtomIdx(mi, ca[1])
+			piv_b = self.GetAtomIdx(mi, ca[2])
+			ori = coords[piv_b].copy()
+			u = coords[piv_a] - coords[piv_b]
+			mag = np.linalg.norm(u)
+			if mag < 1e-10: continue
+			u = u / mag
+			RM0 = self._rotmat(-cur, u)
+			RM1 = self._rotmat(target, u)
+			for ai in nts2[mi][3]:
+				v = coords[ai] - ori
+				v = np.matmul(v, RM0)
+				v = np.matmul(v, RM1)
+				coords[ai] = v + ori
+		self.data['Coordinates'] = coords
+	def _update(self):
+		''' Update cached properties after structural changes '''
+		self.CalcMass()
+		self.CalcSize()
+		self.CalcFASTA()
+		self.CalcRg()
+		if self.data['Type'] == 'Protein': self.CalcDSSP()
+		else: self.data['SS'] = {}
+	def CalcMass(self):
 		''' Calculate mass of peptide in Da'''
-		mass = sum(self.Masses[x] for x in self.GetAtomList())
-		return round(mass, 3)
-	def GetSize(self):
-		''' Calculate length of peptide '''
-		return len(self.data['Amino Acids'])
-	def GetFASTA(self):
-		''' Return FASTA sequence of peptide as a string '''
-		return [x[0] for x in self.data['Amino Acids'].values()]
-	def GetSS(self):
-		''' Return secondary strucutre of each amino acid of the peptide '''
-		return [x[4] for x in self.data['Amino Acids'].values()]
-	def GetRg(self):
+		mass = round(sum(self.masses.get(x, 0.0) for x in self.GetAtomList()),3)
+		self.data['Mass'] = mass
+	def CalcSize(self):
+		''' Calculate length of each chain '''
+		source = (self.data['Amino Acids']
+			or self.data['Nucleotides'])
+		if not source:
+			self.data['Size'] = {}
+			return
+		size = {}
+		for v in source.values():
+			size[v[1]] = size.get(v[1], 0) + 1
+		self.data['Size'] = size
+	def CalcFASTA(self):
+		''' Return per-chain FASTA dict '''
+		source = (self.data['Amino Acids'] or self.data['Nucleotides'])
+		if not source:
+			self.data['FASTA'] = {}
+			return
+		fasta = {}
+		for v in source.values(): fasta.setdefault(v[1], []).append(v[0])
+		self.data['FASTA'] = {k: ''.join(v) for k, v in fasta.items()}
+	def CalcRg(self):
 		''' Calculate the radius of gyration of a peptide '''
-		mass  = np.array([self.Masses[e] for e in self.GetAtomList()])
+		mass  = np.array([self.masses.get(e, 0.0) for e in self.GetAtomList()])
 		tmass = mass.sum()
 		if tmass == 0: raise ZeroDivisionError('No atoms in pose')
 		coord = self.data['Coordinates']
 		xm    = coord * mass[:, np.newaxis]
 		rr    = np.sum(coord * xm)
 		mm    = np.sum((xm.sum(0) / tmass) ** 2)
-		return round(math.sqrt(rr / tmass - mm), 3)
-	def GetCharge(self, iterations=6):
+		rg = round(math.sqrt(max(0.0, rr/tmass - mm)), 3)
+		self.data['Rg'] = rg
+	def CalcCharge(self, iterations=6):
 		''' Calculate Gasteiger-Marsili partial charges to all atoms '''
 		PARAMS = {
 			'C3': (7.98,  9.18,  1.88),
@@ -745,8 +1338,7 @@ class Pose():
 		heavy_thresh[s_mask] = 2.1
 		bond_mask = (dm < heavy_thresh) & (dm > 0.0)
 		bonds = {i: [] for i in ids}
-		for ii, jj in np.argwhere(bond_mask):
-			bonds[ids[ii]].append(ids[jj])
+		for ii, jj in np.argwhere(bond_mask): bonds[ids[ii]].append(ids[jj])
 		heavy = ~is_H
 		short = (dm < 1.42) & (dm > 0)
 		sp2_mask = short & heavy[:, None] & heavy[None, :]
@@ -763,10 +1355,8 @@ class Pose():
 				if isp2:    return 'C2'
 				if nb <= 2: return 'C1'
 				return 'C3'
-			if el == 'N':
-				return 'N2' if isp2 else 'N3'
-			if el == 'O':
-				return 'O2' if isp2 else 'O3'
+			if el == 'N': return 'N2' if isp2 else 'N3'
+			if el == 'O': return 'O2' if isp2 else 'O3'
 			return 'C3'
 		charges = {i: self.data['Atoms'][i][2] for i in ids}
 		atype   = {i: PARAMS[_types(ii, i)] for ii, i in enumerate(ids)}
@@ -777,82 +1367,58 @@ class Pose():
 			delta = {i: 0.0 for i in ids}
 			for i in ids:
 				for j in bonds[i]:
-					if j <= i:
-						continue
-					if chi[j] >= chi[i]:
-						donor, acceptor = i, j
-					else:
-						donor, acceptor = j, i
+					if j <= i: continue
+					if chi[j] >= chi[i]: donor, acceptor = i, j
+					else: donor, acceptor = j, i
 					a, b, c = atype[donor]
 					ip = a + b + c
-					if ip == 0:
-						continue
-					dq = damp * (
-						chi[acceptor] - chi[donor]) / ip
+					if ip == 0: continue
+					dq = damp * (chi[acceptor] - chi[donor]) / ip
 					delta[donor]    += dq
 					delta[acceptor] -= dq
-			for i in ids:
-				charges[i] += delta[i]
-		for i in ids:
-			self.data['Atoms'][i][2] = round(charges[i], 4)
-	def GetDSSP(self):
-		''' Assign secondary structures using the DSSP algorithm '''
-		N = self.data['Size']
+			for i in ids: charges[i] += delta[i]
+		for i in ids: self.data['Atoms'][i][2] = round(charges[i], 4)
+	def CalcDSSP(self):
+		''' Assign secondary structures to each amino acid '''
+		if self.data['Amino Acids'] is None:
+			raise Exception('No protein loaded. ' 'Call Import() first')
+		N = len(self.data['Amino Acids'])
 		AAs      = self.data['Amino Acids']
 		chains   = [AAs[i][1]         for i in range(N)]
 		tricodes = [AAs[i][5].upper() for i in range(N)]
 		H_pos = [None] * N
 		for i in range(N):
-			if 'PRO' in tricodes[i]:
-				continue
-			if i == 0 or chains[i] != chains[i - 1]:
-				continue
-			for hname in ('1H', 'H'):
-				try:
-					H_pos[i] = self.GetAtomCoord(i, hname)
-					break
-				except Exception:
-					pass
-			else:
-				try:
-					Ni = self.GetAtomCoord(i, 'N')
-					Cp = self.GetAtomCoord(i - 1, 'C')
-					d  = Ni - Cp
-					nm = np.linalg.norm(d)
-					if nm > 0.001:
-						H_pos[i] = Ni + (d / nm) * 1.01
-				except Exception:
-					pass
+			if tricodes[i] == 'PRO': continue
+			if i == 0 or chains[i] != chains[i-1]: continue
+			if self._hasatom(i, 'H'): H_pos[i] = self.GetAtomCoord(i, 'H')
+			elif self._hasatom(i, '1H'): H_pos[i] = self.GetAtomCoord(i, '1H')
+			elif (self._hasatom(i, 'N')
+			and self._hasatom(i-1, 'C')
+			and self._hasatom(i-1, 'O')):
+				Ni = self.GetAtomCoord(i, 'N')
+				Cp = self.GetAtomCoord(i-1, 'C')
+				Op = self.GetAtomCoord(i-1, 'O')
+				co = Cp - Op
+				nm = np.linalg.norm(co)
+				if nm > 0.001: H_pos[i] = Ni + (co / nm)
 		hbond = set()
 		for i in range(N):
-			if H_pos[i] is None:
-				continue
-			try:
-				Ni = self.GetAtomCoord(i, 'N')
-			except Exception:
-				continue
+			if H_pos[i] is None: continue
+			Ni = self.GetAtomCoord(i, 'N')
 			Hi = H_pos[i]
 			for j in range(N):
-				if abs(i - j) <= 1:
-					continue
-				if chains[i] != chains[j]:
-					continue
-				try:
-					Cj = self.GetAtomCoord(j, 'C')
-					Oj = self.GetAtomCoord(j, 'O')
-				except Exception:
-					continue
+				if abs(i - j) <= 1: continue
+				if chains[i] != chains[j]: continue
+				if not self._hasatom(j, 'O'): continue
+				Cj = self.GetAtomCoord(j, 'C')
+				Oj = self.GetAtomCoord(j, 'O')
 				r_ON = np.linalg.norm(Oj - Ni)
 				r_CH = np.linalg.norm(Cj - Hi)
 				r_OH = np.linalg.norm(Oj - Hi)
 				r_CN = np.linalg.norm(Cj - Ni)
-				if min(r_ON, r_CH, r_OH, r_CN) < 0.001:
-					continue
-				E = 0.084 * (
-					1/r_ON + 1/r_CH
-					- 1/r_OH - 1/r_CN) * 332
-				if E < -0.5:
-					hbond.add((i, j))
+				if min(r_ON, r_CH, r_OH, r_CN) < 0.001: continue
+				E = 0.084 * (1/r_ON + 1/r_CH - 1/r_OH - 1/r_CN) * 332
+				if E < -0.5: hbond.add((i, j))
 		turn3 = [i+3 < N and (i+3, i) in hbond for i in range(N)]
 		turn4 = [i+4 < N and (i+4, i) in hbond for i in range(N)]
 		turn5 = [i+5 < N and (i+5, i) in hbond for i in range(N)]
@@ -865,23 +1431,19 @@ class Pose():
 		for i in range(N - 1):
 			if turn5[i] and turn5[i + 1]:
 				for k in range(i + 1, min(i + 6, N)):
-					if ss[k] not in ('H', 'E', 'B'):
-						ss[k] = 'I'
+					if ss[k] not in ('H', 'E', 'B'): ss[k] = 'I'
 		for i in range(N - 1):
 			if turn4[i] and turn4[i + 1]:
 				for k in range(i + 1, min(i + 5, N)):
-					if ss[k] != 'I':
-						ss[k] = 'H'
+					if ss[k] != 'I': ss[k] = 'H'
 		for i in range(N - 1):
 			if turn3[i] and turn3[i + 1]:
 				for k in range(i + 1, min(i + 4, N)):
-					if ss[k] not in ('H', 'E', 'B'):
-						ss[k] = 'G'
-		bridge = [None] * N
+					if ss[k] not in ('H', 'E', 'B'): ss[k] = 'G'
+		bridges = set()
 		for i in range(1, N - 1):
 			for k in range(i + 2, N - 1):
-				if chains[i] != chains[k]:
-					continue
+				if chains[i] != chains[k]: continue
 				ap = (
 					((i, k) in hbond
 					and (k, i) in hbond)
@@ -895,67 +1457,63 @@ class Pose():
 					or (k > 0 and i < N - 1
 					and (k - 1, i) in hbond
 					and (i, k + 1) in hbond))
-				if ap or pp:
-					if bridge[i] is None:
-						bridge[i] = k
-					if bridge[k] is None:
-						bridge[k] = i
-		for i in range(N):
-			if bridge[i] is not None:
-				if ss[i] not in ('H', 'G', 'I'):
-					ss[i] = 'B'
-		for i in range(N - 1):
-			if ss[i] == 'B' and ss[i + 1] == 'B':
-				k1 = bridge[i]
-				k2 = bridge[i + 1]
-				if k1 is not None and k2 is not None:
-					if abs(k1 - k2) == 1:
-						ss[i]  = 'E'
-						ss[i + 1] = 'E'
-						if ss[k1] not in ('H', 'G', 'I'):
-							ss[k1] = 'E'
-						if ss[k2] not in ('H', 'G', 'I'):
-							ss[k2] = 'E'
+				if ap or pp: bridges.add((i, k))
+		br_at = defaultdict(set)
+		for i, k in bridges:
+			br_at[i].add(k)
+			br_at[k].add(i)
+		for r in br_at:
+			if ss[r] not in ('H', 'G', 'I'): ss[r] = 'B'
+		changed = True
+		while changed:
+			changed = False
+			for i in range(N - 1):
+				if (ss[i] not in ('B', 'E')
+				or ss[i+1] not in ('B', 'E')): continue
+				for k1 in br_at.get(i, []):
+					for k2 in br_at.get(i+1, []):
+						if abs(k1 - k2) != 1: continue
+						for r in (i, i+1, k1, k2):
+							if ss[r] in ('H', 'G', 'I'): continue
+							if ss[r] != 'E':
+								ss[r] = 'E'
+								changed = True
 		for i in range(2, N - 2):
-			if ss[i] != 'L':
-				continue
-			try:
-				m2 = self.GetAtomCoord(i - 2, 'CA')
-				ci = self.GetAtomCoord(i,     'CA')
-				p2 = self.GetAtomCoord(i + 2, 'CA')
-			except Exception:
-				continue
-			v1   = ci - m2
-			v2   = p2 - ci
-			n1   = np.linalg.norm(v1)
-			n2   = np.linalg.norm(v2)
-			if n1 < 0.001 or n2 < 0.001:
-				continue
+			if ss[i] != 'L': continue
+			if (chains[i-2] != chains[i]
+			or chains[i+2] != chains[i]): continue
+			m2 = self.GetAtomCoord(i - 2, 'CA')
+			ci = self.GetAtomCoord(i,     'CA')
+			p2 = self.GetAtomCoord(i + 2, 'CA')
+			v1 = ci - m2
+			v2 = p2 - ci
+			n1 = np.linalg.norm(v1)
+			n2 = np.linalg.norm(v2)
+			if n1 < 0.001 or n2 < 0.001: continue
 			cos_k = np.dot(v1, v2) / (n1 * n2)
 			cos_k = max(-1.0, min(1.0, cos_k))
 			kappa = math.acos(cos_k) * 180.0 / math.pi
-			if kappa >= 70.0:
-				ss[i] = 'S'
+			if kappa >= 70.0: ss[i] = 'S'
 		PHI_LO, PHI_HI = -104.0, -46.0
 		PSI_LO, PSI_HI =  116.0, 174.0
 		ppii = [False] * N
 		for i in range(N):
-			if ss[i] != 'L':
-				continue
-			try:
-				phi = self.Angle(i, 'PHI')
-				psi = self.Angle(i, 'PSI')
-			except Exception:
-				continue
+			if ss[i] != 'L': continue
+			phi = self.GetDihedral(i, 'PHI')
+			psi = self.GetDihedral(i, 'PSI')
 			ppii[i] = PHI_LO <= phi <= PHI_HI and PSI_LO <= psi <= PSI_HI
 		for i in range(N - 2):
 			if ppii[i] and ppii[i + 1] and ppii[i + 2]:
 				for k in range(i, i + 3):
-					if ss[k] == 'L':
-						ss[k] = 'P'
+					if ss[k] == 'L': ss[k] = 'P'
 		for i in range(N): AAs[i][4] = ss[i]
-	def GetSASA(self, n_points=100, probe_radius=1.4):
-		''' Calculate Solvent Accessible Surface Area per residue '''
+		self._compiless()
+	def CalcSASA(self, n_points=100, probe_radius=1.4):
+		''' Calculate SASA per residue '''
+		if self.data['Amino Acids'] is None:
+			raise Exception(
+				'No protein loaded. '
+				'Call Import() first')
 		VDW = {
 			'H':  1.20, 'C':  1.70, 'N':  1.55, 'O':  1.52,
 			'S':  1.80, 'SE': 1.90, 'P':  1.80, 'F':  1.47,
@@ -969,7 +1527,7 @@ class Pose():
 		id_map = {ai: ii for ii, ai in enumerate(ids)}
 		n      = len(ids)
 		c      = coords[np.array(ids)]
-		radii = np.array([
+		radii  = np.array([
 			VDW.get(atoms[i][1].upper(),DEFAULT_VDW)+probe_radius for i in ids])
 		golden = (1 + np.sqrt(5)) / 2
 		pts    = np.arange(n_points)
@@ -997,26 +1555,24 @@ class Pose():
 			all_atoms = aa_info[2] + aa_info[3]
 			sasa = sum(atom_sasa[id_map[a]] for a in all_atoms if a in id_map)
 			self.data['Amino Acids'][aa_idx][6] = round(float(sasa), 5)
-	def GetInfo(self):
-		''' Print all basic info about a peptide '''
-		print('Sequence:\t{}'.format(self.data['FASTA']))
-		print('SS:\t\t{}'.format(''.join(self.GetSS())))
-		print('Mass:\t\t{:,} Da'.format(self.data['Mass']))
-		print('Size:\t\t{} residues'.format(self.data['Size']))
-		print('Rg:\t\t{} Å'.format(self.data['Rg']))
-		print('Energy:\t\t{}'.format(self.data['Energy']))
-	def GetAtomCoord(self, AA, atom):
-		''' Get specific atom coordinates '''
-		info = self.data['Amino Acids'][AA]
-		indexes = info[2] if atom in self.BB_ATOMS else info[3]
-		for i in indexes:
-			if self.data['Atoms'][i][0] == atom:
-				return self.data['Coordinates'][i]
-		raise Exception(f'Amino acid does not have the {atom} atom')
-	def GetAtomList(self, PDB=False):
-		''' Return list of all the atoms '''
-		idx = 0 if PDB else 1
-		return [x[idx] for x in self.data['Atoms'].values()]
+	def GetDistance(self, res1, atom1, res2, atom2):
+		''' Measure distance between any two atoms '''
+		A = self.GetAtomCoord(res1, atom1)
+		B = self.GetAtomCoord(res2, atom2)
+		mag = np.linalg.norm(B - A)
+		return mag
+	def GetAngle(self, AA1, atom1, AA2, atom2, AA3, atom3):
+		''' Measure the angle between three atoms '''
+		atom1 = self.GetAtomCoord(AA1, atom1)
+		atom2 = self.GetAtomCoord(AA2, atom2)
+		atom3 = self.GetAtomCoord(AA3, atom3)
+		A = atom2 - atom1
+		B = atom2 - atom3
+		denom = np.linalg.norm(A) * np.linalg.norm(B)
+		if denom < 1e-10: return 0.0
+		cos_theta = np.dot(A, B) / denom
+		cos_theta = max(-1.0, min(1.0, cos_theta))
+		return math.degrees(math.acos(cos_theta))
 	def GetAtomBonds(self, index1, index2):
 		''' Get the atom pair that participate in a bond from their index '''
 		bonds = self.data['Bonds'][index1]
@@ -1028,79 +1584,231 @@ class Pose():
 		atomB = self.data['Atoms'][index2][0]
 		elementB = self.data['Atoms'][index2][1]
 		return [atomA, elementA, atomB, elementB]
-	def GetIdentity(self, index, item, q=False):
+	def GetIdentity(self, index, item, charge=False):
 		''' Identify an atom, atom charge, or amino acid given its index '''
 		if item.upper() == 'ATOM':
 			Atom = self.data['Atoms'][index]
-			if q: return Atom[-1]
-			else: return Atom[0]
-		elif item.upper() == 'RESIDUE' or item.upper() == 'AMINO ACID':
-			AminoAcid = self.data['Amino Acids'][index][0]
-			return AminoAcid
+			if charge: return Atom[2]
+			else:      return Atom[0]
+		elif item.upper() in ('RESIDUE', 'AMINO ACID'):
+			if self.data['Amino Acids'] is None:
+				raise Exception(
+					'No protein loaded')
+			return self.data[
+				'Amino Acids'][index][0]
+		elif item.upper() in (
+		'NUCLEOTIDE', 'DNA', 'RNA'):
+			if self.data['Nucleotides'] is None:
+				raise Exception(
+					'No nucleotide loaded')
+			return self.data[
+				'Nucleotides'][index][0]
 		else:
 			raise Exception('Incorrect item')
-	def RotateDihedral(self, AA, theta, angle_type, chi_type=None):
-		''' Rotate φ/ψ/ω/χ angle at bond '''
-		AminoAcid = self.data['Amino Acids'][AA][0].upper()
+	def GetAtomCoord(self, res, atom):
+		''' Get specific atom coordinates '''
+		source = (self.data['Amino Acids']
+			or self.data['Nucleotides'])
+		info = source[res]
+		for i in info[2] + info[3]:
+			if self.data['Atoms'][i][0] == atom:
+				return self.data['Coordinates'][i]
+		raise Exception(
+			f'Atom {atom} not found in '
+			f'residue {res}')
+	def GetAtomIdx(self, res, atom):
+		''' Get atom coordinate index by name '''
+		source = (self.data['Amino Acids'] or self.data['Nucleotides'])
+		info = source[res]
+		for i in info[2] + info[3]:
+			if self.data['Atoms'][i][0] == atom: return i
+		raise Exception(
+			f'Atom {atom} not found in '
+			f'residue {res}')
+	def GetAtomList(self, PDB=False):
+		''' Return list of all the atoms '''
+		idx = 0 if PDB else 1
+		return [x[idx] for x in self.data['Atoms'].values()]
+	def GetInfo(self):
+		''' Print all basic info about a peptide '''
+		print(f"Energy:\t\t\t{self.data['Energy']}")
+		print(f"Mass:\t\t\t{self.data['Mass']:,} Da")
+		print(f"Rg:\t\t\t{self.data['Rg']} Å")
+		for i in self.data['FASTA'].items():
+			print(f'Sequence:\t\tChain: {i[0]}\tFASTA: {i[1]}')
+		for i in self.data['SS'].items():
+			print(f'Secondary Structure:\tChain: {i[0]}\tDSSP: {i[1]}')
+		for i in self.data['Size'].items():
+			print(f'Size:\t\t\tChain: {i[0]}\tLength: {i[1]}')
+	def GetDihedral(self, res, angle_type, chi_type=None):
+		''' Get amino acid φ/ψ/ω/χ and nucleotide α/β/γ/δ/ε/ζ/χ dihedrals '''
 		at = angle_type.upper()
-		BB    = self.data['Amino Acids'][AA][2]
-		atoms = self.data['Atoms']
-		if at == 'PHI':
-			ca_idx = next(i for i in BB if atoms[i][0] == 'CA')
-			split  = ca_idx + 1
-			ori    = self.GetAtomCoord(AA, 'CA')
-			self._rotbb(split, ori,
-				self.GetAtomCoord(AA, 'CA'), self.GetAtomCoord(AA, 'N'),
-				self.GetDihedral(AA, 'phi'), theta)
-		elif at == 'PSI':
-			c_idx = next(i for i in BB if atoms[i][0] == 'C')
-			split = c_idx + 1
-			ori   = self.GetAtomCoord(AA, 'C')
-			self._rotbb(split, ori,
-				self.GetAtomCoord(AA, 'C'), self.GetAtomCoord(AA, 'CA'),
-				self.GetDihedral(AA, 'psi'), theta)
-		elif at == 'OMEGA':
-			split = self.data['Amino Acids'][AA + 1][2][0]
-			ori   = self.GetAtomCoord(AA + 1, 'N')
-			self._rotbb(split, ori,
-				self.GetAtomCoord(AA + 1, 'N'), self.GetAtomCoord(AA, 'C'),
-				self.GetDihedral(AA, 'omega'), theta)
-		elif at == 'CHI':
-			assert type(chi_type) is int, 'Incorrect Chi angle type'
-			n_chi = len(self.AminoAcids[AminoAcid]['Chi Angle Atoms'])
-			if n_chi < chi_type:
+		mol = self.data['Type']
+		prv = self._prevres(res)
+		nxt = self._nextres(res)
+		gc = self.GetAtomCoord
+		if mol == 'Protein':
+			if at == 'PHI':
+				if prv is None: return 0.0
+				r1 = gc(prv, 'C')
+				r2 = gc(res, 'N')
+				r3 = gc(res, 'CA')
+				r4 = gc(res, 'C')
+			elif at == 'PSI':
+				if nxt is None: return 0.0
+				r1 = gc(res, 'N')
+				r2 = gc(res, 'CA')
+				r3 = gc(res, 'C')
+				r4 = gc(nxt, 'N')
+			elif at == 'OMEGA':
+				if nxt is None: return 180.0
+				r1 = gc(res, 'CA')
+				r2 = gc(res, 'C')
+				r3 = gc(nxt, 'N')
+				r4 = gc(nxt, 'CA')
+			elif at == 'CHI':
+				assert chi_type is not None, \
+					'Protein CHI needs chi_type'
+				sym = self.data['Amino Acids'][
+					res][0].upper()
+				ca = self.aminoacids[sym][
+					'Chi Angle Atoms'][chi_type-1]
+				r1 = gc(res, ca[0])
+				r2 = gc(res, ca[1])
+				r3 = gc(res, ca[2])
+				r4 = gc(res, ca[3])
+			else:
 				raise Exception(
-					f'{AminoAcid} at position {AA} '
-					f'has no Chi {chi_type} angle')
-			atoms = self.AminoAcids[AminoAcid]['Chi Angle Atoms'][chi_type-1]
-			A = self.GetAtomCoord(AA, atoms[1])
-			B = self.GetAtomCoord(AA, atoms[2])
-			ori = B
-			start = self.AminoAcids[AminoAcid]['Chi Angle Atoms'][chi_type-1][2]
-			L = self.AminoAcids[AminoAcid]['Sidechain Atoms']
-			i = [x[0] for x in L].index(start)
-			Sindex = self.data['Amino Acids'][AA][3][i]
-			Eindex = self.data['Amino Acids'][AA][3][-1]
-			before = self.data['Coordinates'][:Sindex]
-			side   = self.data['Coordinates'][Sindex:Eindex + 1]
-			after  = self.data['Coordinates'][Eindex + 1 :]
-			side = side - ori
-			u = A - B
-			lu = np.linalg.norm(u)
-			u = u / lu
-			current = self.GetDihedral(AA, 'chi', chi_type)
-			zeroing = 0 - current
-			RM = self._rotmat(zeroing, u)
-			side = np.matmul(side, RM)
-			RM = self._rotmat(theta, u)
-			side = np.matmul(side, RM)
-			side = side + ori
-			combine = np.append(before, side, axis=0)
-			combine = np.append(combine, after, axis=0)
-			self.data['Coordinates'] = combine
+					f'Unknown protein angle: '
+					f'{angle_type}')
+		elif mol in ('DNA', 'RNA'):
+			if at == 'ALPHA':
+				if prv is None: return 0.0
+				r1 = gc(prv, "O3'")
+				r2 = gc(res, 'P')
+				r3 = gc(res, "O5'")
+				r4 = gc(res, "C5'")
+			elif at == 'BETA':
+				r1 = gc(res, 'P')
+				r2 = gc(res, "O5'")
+				r3 = gc(res, "C5'")
+				r4 = gc(res, "C4'")
+			elif at == 'GAMMA':
+				r1 = gc(res, "O5'")
+				r2 = gc(res, "C5'")
+				r3 = gc(res, "C4'")
+				r4 = gc(res, "C3'")
+			elif at == 'DELTA':
+				r1 = gc(res, "C5'")
+				r2 = gc(res, "C4'")
+				r3 = gc(res, "C3'")
+				r4 = gc(res, "O3'")
+			elif at == 'EPSILON':
+				if nxt is None: return 0.0
+				r1 = gc(res, "C4'")
+				r2 = gc(res, "C3'")
+				r3 = gc(res, "O3'")
+				r4 = gc(nxt, 'P')
+			elif at == 'ZETA':
+				if nxt is None: return 0.0
+				r1 = gc(res, "C3'")
+				r2 = gc(res, "O3'")
+				r3 = gc(nxt, 'P')
+				r4 = gc(nxt, "O5'")
+			elif at == 'CHI':
+				tri = self.data['Nucleotides'][res][4]
+				ca = self.nucleotides[tri]['Chi Angle Atoms']
+				r1 = gc(res, ca[0])
+				r2 = gc(res, ca[1])
+				r3 = gc(res, ca[2])
+				r4 = gc(res, ca[3])
+			else:
+				raise Exception(
+					f'Unknown nucleotide angle'
+					f': {angle_type}')
+		else:
+			raise Exception(
+				'No structure loaded. '
+				'Call Import() first')
+		return self._dihedral(r1, r2, r3, r4)
+	def Import(self, filename, chain=None, model=1):
+		''' Import Protein/DNA/RNA from .pdb/.cif '''
+		if isinstance(chain, str): chain = [chain]
+		if chain is not None and not isinstance(chain, list):
+			raise Exception(
+				f'chain must be None or a list'
+				f', got {type(chain).__name__}')
+		ext = filename[-3:].upper()
+		if ext == 'PDB':   rows = self._parsepdb(filename, chain, model)
+		elif ext == 'CIF': rows = self._parsecif(filename, chain, model)
+		else:
+			raise Exception(
+				f'{filename}: unsupported format'
+				f' (use .pdb or .cif)')
+		if not rows:
+			raise Exception(
+				f'No ATOM records for chains '
+				f'{chain} in {filename}')
+		best = {}
+		for idx, row in enumerate(rows):
+			key = (row[2], row[3], row[0])
+			if key not in best or row[7] > rows[best[key]][7]: best[key] = idx
+		rows = [rows[i] for i in sorted(best.values())]
+		residues = defaultdict(list)
+		for row in rows: residues[(row[2], row[3])].append(row)
+		resnames = {a[0][1] for a in residues.values()}
+		mol = self._detecttype(resnames)
+		aa_tri = {v['Tricode'] for v in
+			self.aminoacids.values()
+			if 'Tricode' in v}
+		has_aa = bool(resnames & aa_tri)
+		nuc_names = {r for r in resnames
+			if r in self.nucleotides
+			or r in ('DT', 'T', 'U', 'A', 'G', 'C', 'DA', 'DG', 'DC')}
+		has_nuc = bool(nuc_names)
+		if has_aa and has_nuc:
+			raise Exception(
+				f'{filename} contains both '
+				f'protein and nucleotide '
+				f'residues. Import each '
+				f'molecule type separately '
+				f'using the chain parameter.')
+		self.data = { 'Type': mol, 'Energy': 0, 'Rg': 0, 'Mass': 0, 'Size': {},
+			'FASTA': {}, 'SS': {},
+			'Nucleotides': {} if mol != 'Protein' else None,
+			'Amino Acids': {} if mol == 'Protein' else None,
+			'Atoms': {}, 'Bonds': {}, 'Coordinates': np.zeros((0, 3))}
+		co = chain if chain is not None else sorted({k[0] for k in residues})
+		sk = sorted(residues,
+			key=lambda k: (co.index(k[0]) if k[0] in co else 99, k[1]))
+		if mol == 'Protein':
+			self._importprotein(
+				residues, sk, filename, chain)
+		else:
+			self._importnucleotide(
+				residues, sk, mol)
+		self._update()
+	def Export(self, filename):
+		''' Export structure to a .pdb or .cif file '''
+		ext = filename[-3:].upper()
+		if ext not in ('PDB', 'CIF'):
+			raise Exception(
+				f'{filename}: unsupported format'
+				f' (use .pdb or .cif)')
+		src = (self.data['Amino Acids'] or self.data['Nucleotides'])
+		if not src:
+			raise Exception(
+				'No structure loaded. '
+				'Call Import() first')
+		is_pro = self.data['Type'] == 'Protein'
+		ti = 5 if is_pro else 4
+		if ext == 'PDB': self._exportpdb(filename, src, ti)
+		else: self._exportcif(filename, src, ti)
 	def MovePose(self, theta=None, u=None, l=None, ori=None):
 		''' Rotate and/or translate the full pose rigidly '''
 		coords = self.data['Coordinates'].copy()
+		if len(coords) == 0:
+			raise Exception('No atoms to move')
 		if theta is not None and u is not None:
 			u = np.array(u, dtype=float)
 			mag = np.linalg.norm(u)
@@ -1121,84 +1829,125 @@ class Pose():
 					'translation direction is undefined')
 			coords = coords + (d / mag) * l
 		self.data['Coordinates'] = coords
-	def AdjustAngle(self, AA1, atom1, AA2, atom2, AA3, atom3, theta):
-		''' Change angle between three atoms '''
-		atoms = self.data['Atoms']
-		BB = self.data['Amino Acids'][AA2][2]
-		atom2i = None
-		for i in BB:
-			if atoms[i][0] == atom2: atom2i = i
-		if atom2i == None:
-			raise Exception('Chosen atom not in backbone')
-		before = self.data['Coordinates'][:atom2i]
-		after  = self.data['Coordinates'][atom2i:]
-		A = self.GetAtomCoord(AA3, atom3) - self.GetAtomCoord(AA1, atom1)
-		B = self.GetAtomCoord(AA3, atom3) - self.GetAtomCoord(AA2, atom2)
+	def AdjustDistance(self, res1, atom1, res2, atom2, length):
+		''' Change distance between two atoms '''
+		Ai = self.GetAtomIdx(res1, atom1)
+		Bi = self.GetAtomIdx(res2, atom2)
+		coords = self.data['Coordinates']
+		v = coords[Bi] - coords[Ai]
+		mag = np.linalg.norm(v)
+		if mag < 1e-10: return
+		shift = v * (length / mag) - v
+		for idx in self._downstreamatoms(
+		res1, atom1, res2, atom2):
+			coords[idx] += shift
+		self.data['Coordinates'] = coords
+	def AdjustAngle(self, res1, atom1, res2, atom2, res3, atom3, theta):
+		''' Change angle between three atoms, res2/atom2 is the pivot '''
+		A = (self.GetAtomCoord(res3, atom3)- self.GetAtomCoord(res1, atom1))
+		B = (self.GetAtomCoord(res3, atom3)- self.GetAtomCoord(res2, atom2))
 		u = np.cross(B, A)
 		lu = np.linalg.norm(u)
+		if lu < 1e-10: return
 		u = u / lu
-		ori = self.GetAtomCoord(AA2, atom2)
-		after = after - ori
+		ori = self.GetAtomCoord(res2, atom2).copy()
 		RM = self._rotmat(theta, u)
-		after = np.matmul(after, RM)
-		after = after + ori
-		combine = np.append(before, after, axis=0)
-		self.data['Coordinates'] = combine
-	def AdjustDistance(self, AA1, atom1, AA2, atom2, length):
-		''' Change the distance between any two atoms '''
-		if (atom1 not in {'N', 'CA', 'C', 'O'}
-		or  atom2 not in {'N', 'CA', 'C', 'O'}):
-			index = (self.data['Amino Acids'][AA1][2]
-					+ self.data['Amino Acids'][AA1][3])
-			atoms_in = self.data['Atoms']
-			Ai = next(i for i in index if atoms_in[i][0] == atom1)
-			Bi = next(i for i in index if atoms_in[i][0] == atom2)
-			coordinates = self.data['Coordinates']
-			vectors = {}
-			for k, v in self.data['Bonds'].items():
-				vectors[k] = [coordinates[x] - coordinates[k] for x in v]
-			Bidx = next(
-				i for i, b in enumerate(self.data['Bonds'][Ai])
-				if b == Bi)
-			v = vectors[Ai][Bidx]
-			mag = np.linalg.norm(v)
-			v = v*(length/mag)
-			vectors[Ai][Bidx] = v
-			temp = {}
-			Bond_Coord = {0: self.data['Coordinates'][0]}
-			for i in range(len(vectors)):
-				temp[i] = vs = [Bond_Coord[i] + x for x in vectors[i]]
-				for b, v in zip(self.data['Bonds'][i], vs):
-					Bond_Coord[b] = v
-			coordinates = [0] * len(temp)
-			for k, vs in temp.items():
-				for b, v in zip(self.data['Bonds'][k], vs):
-					coordinates[b] = v
-			coordinates = np.array(coordinates)
-			self.data['Coordinates'] = coordinates
+		coords = self.data['Coordinates']
+		for idx in self._downstreamatoms(
+		res2, atom2, res3, atom3):
+			v = coords[idx] - ori
+			coords[idx] = np.matmul(v, RM) + ori
+		self.data['Coordinates'] = coords
+	def RotateDihedral(self, res, theta, angle_type, chi_type=None):
+		''' Set a dihedral angle to theta degrees '''
+		pivots = self._dihedralpivots( res, angle_type, chi_type)
+		if pivots is None: return
+		ra, aa, rb, ab = pivots
+		current = self.GetDihedral(res, angle_type, chi_type)
+		piv_a = self.GetAtomIdx(ra, aa)
+		piv_b = self.GetAtomIdx(rb, ab)
+		coords = self.data['Coordinates']
+		ori = coords[piv_b].copy()
+		u = coords[piv_a] - coords[piv_b]
+		mag = np.linalg.norm(u)
+		if mag < 1e-10: return
+		u = u / mag
+		RM_zero = self._rotmat(-current, u)
+		RM_new = self._rotmat(theta, u)
+		for idx in self._downstreamatoms(
+		ra, aa, rb, ab):
+			v = coords[idx] - ori
+			v = np.matmul(v, RM_zero)
+			v = np.matmul(v, RM_new)
+			coords[idx] = v + ori
+		self.data['Coordinates'] = coords
+	def Build(self, sequence, chain='A', fmt='Protein'):
+		''' Build protein/DNA/RNA from sequence '''
+		fmt = {'protein': 'Protein',
+			'dna': 'DNA', 'rna': 'RNA'
+			}.get(fmt.lower(), fmt)
+		if fmt == 'Protein':
+			self._buildprotein(sequence, chain)
+		elif fmt in ('DNA', 'RNA'):
+			self._buildnucleotide(sequence, fmt)
 		else:
-			A = self.GetAtomCoord(AA1, atom1)
-			B = self.GetAtomCoord(AA2, atom2)
-			mag = math.sqrt(np.sum((B-A)**2))
-			mut = length/mag
-			sc1 = {x[0] for x in self.AminoAcids[
-				self.data['Amino Acids'][AA1][0].upper()
-				]['Sidechain Atoms']}
-			sc2 = {x[0] for x in self.AminoAcids[
-				self.data['Amino Acids'][AA2][0].upper()
-				]['Sidechain Atoms']}
-			if atom1 in sc1 or atom2 in sc2:
+			raise Exception(
+				f'Unknown format: {fmt}')
+		self.CalcCharge()
+		if fmt == 'Protein':
+			self.CalcSASA()
+		self._update()
+	def ReBuild(self, sequence=None, D_AA=False, _mutated=None):
+		''' Rebuild a structure from internal coords '''
+		mol = self.data['Type']
+		if mol == 'Protein': self._rebuildprotein(sequence, D_AA)
+		elif mol in ('DNA', 'RNA'): self._rebuildnucleotide(sequence, _mutated)
+		else:
+			raise Exception(
+				'No structure loaded. '
+				'Call Import() first')
+		self._update()
+	def Mutate(self, index, residue):
+		''' Mutate a residue or nucleotide '''
+		mol = self.data['Type']
+		if mol == 'Protein':
+			AAs = self.data['Amino Acids']
+			if index not in AAs:
 				raise Exception(
-					'GetDistance adjustments allowed only for backbone')
-			crds = self.data['Coordinates']
-			Aindex = np.argwhere((crds == A).all(axis=1))[0][0]
-			Bindex = np.argwhere((crds == B).all(axis=1))[0][0]
-			before = crds[:Bindex]
-			after  = crds[Bindex:]
-			nB = (B-A) * mut
-			after = after - (B-A) + nB
-			self.data['Coordinates'] = np.concatenate((before, after))
-	def Mutate(self, index, AA):
-		''' Mutate an amino acid to a different amino acid '''
-		seq = ''.join(self.GetFASTA())
-		self.ReBuild(seq[:index] + AA + seq[index+1:])
+					f'Residue {index} not found')
+			ch = AAs[index][1]
+			fasta = self.data['FASTA']
+			chain_idxs = [i for i in
+				sorted(AAs)
+				if AAs[i][1] == ch]
+			pos = chain_idxs.index(index)
+			seq = list(fasta[ch])
+			seq[pos] = residue
+			new_fasta = dict(fasta)
+			new_fasta[ch] = ''.join(seq)
+			self.ReBuild(sequence=new_fasta)
+		elif mol in ('DNA', 'RNA'):
+			nts = self.data['Nucleotides']
+			if index not in nts:
+				raise Exception(
+					f'Nucleotide {index} '
+					f'not found')
+			fasta = self.data['FASTA']
+			first_ch = sorted(
+				fasta.keys())[0]
+			seq = list(fasta[first_ch])
+			N = len(seq)
+			seq[index] = residue.upper()
+			chains = sorted(set(
+				v[1] for v in nts.values()))
+			mutated = {index}
+			if len(chains) > 1:
+				mutated.add(
+					2 * N - 1 - index)
+			self.ReBuild(
+				sequence=''.join(seq),
+				_mutated=mutated)
+		else:
+			raise Exception(
+				'No structure loaded. '
+				'Call Import() first')
