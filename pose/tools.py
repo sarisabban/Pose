@@ -100,8 +100,14 @@ def Parameterise(filename, unicode, tricode):
 		x, y, z = round(v[0], 3), round(v[1], 3), round(v[2], 3)
 		return f'[{x:6.3f},{y:7.3f},{z:7.3f}]'
 	def fmt_atom(a):
-		name, el, q, o, t = a
-		return f'["{name}", "{el}", {float(q):.1f}, {float(o):.1f}, {float(t):.1f}]'
+		if len(a) == 5:
+			name, el, q, o, t = a
+			return (f'["{name}", "{el}", '
+				f'{float(q):.1f}, {float(o):.1f}, {float(t):.1f}]')
+		else:
+			name, el, q, o = a
+			return (f'["{name}", "{el}", '
+				f'{int(q)}, {int(o)}]')
 	def fmt_chi(c):
 		return '[' + ', '.join(f'"{x}"' for x in c) + ']'
 	def format_entry(key, e, is_last):
@@ -115,9 +121,14 @@ def Parameterise(filename, unicode, tricode):
 					L.append(row + (',' if vi < len(val)-1 else '],'))
 			elif field == 'Tricode':
 				L.append(f'    "Tricode": "{val}",')
+			elif field == 'Type':
+				L.append(f'    "Type": "{val}",')
 			elif field == 'Fused':
-				L.append(f'    "Fused": {"true" if val else "false"},')
-			elif field in ('Sidechain Atoms', 'Backbone Atoms'):
+				L.append(
+					'    "Fused": '
+					f'{"true" if val else "false"},')
+			elif field in ('Sidechain Atoms',
+				'Backbone Atoms', 'Base Atoms'):
 				L.append(f'    "{field}": [')
 				for ai, a in enumerate(val):
 					row = f'        {fmt_atom(a)}'
@@ -143,13 +154,22 @@ def Parameterise(filename, unicode, tricode):
 						L.append(row + '}}' + sep)
 		return '\n'.join(L)
 	def format_db(db):
-		L     = ['{']
-		items = list(db.items())
-		for i, (k, v) in enumerate(items):
-			L.append(format_entry(k, v, is_last=(i == len(items)-1)))
-			if i < len(items) - 1:
-				L.append('')
-		L.append('')
+		L = ['{']
+		sections = list(db.items())
+		for si, (sec_name, entries) in enumerate(sections):
+			sec_last = (si == len(sections) - 1)
+			L.append(f'"{sec_name}": {{')
+			items = list(entries.items())
+			for i, (k, v) in enumerate(items):
+				L.append(format_entry(
+					k, v, is_last=(i == len(items)-1)))
+				if i < len(items) - 1:
+					L.append('')
+			sec_close = '}' if sec_last else '},'
+			# Replace the trailing }} of the last entry
+			# with }}} (or }}},) to close the section too
+			L[-1] = L[-1] + sec_close
+			L.append('')
 		L.append('}')
 		return '\n'.join(L)
 	unicode = unicode.upper()
@@ -273,16 +293,18 @@ def Parameterise(filename, unicode, tricode):
 		'database.json')
 	with open(db_path) as f:
 		db = json.load(f)
-	if unicode in db:
+	if unicode in db['Amino Acids']:
 		print(f'Warning: "{unicode}" already exists... overwriting.')
-	db[unicode] = entry
+	db['Amino Acids'][unicode] = entry
 	with open(db_path, 'w') as f:
 		f.write(format_db(db))
-	print(f'Added {tricode} as "{unicode}" to AminoAcids.json')
+	print(f'Added {tricode} as "{unicode}" to database.json')
 
-def RMSD(pose1, pose2, alg='align'):
+def RMSD(pose1, pose2, alg='align', export=None):
 	'''
-	Calculate RMSD between two poses using CA atoms only.
+	Calculate RMSD between two poses (protein or nucleic acid).
+	Auto-detects molecule type via pose.data['Type'].
+	Proteins align on CA atoms, nucleic acids on C1' atoms.
 	Alignment algorithms:
 		align      - sequence alignment + iterative Kabsch (default)
 		kabsch     - SVD-based optimal rotation, all residues
@@ -291,33 +313,32 @@ def RMSD(pose1, pose2, alg='align'):
 	'''
 	if alg not in ('align', 'kabsch', 'quaternion', 'simple'):
 		raise Exception('Unknown algorithm: ' + str(alg))
-	def get_CA(pose):
-		coords = []
-		AAs = pose.data['Amino Acids']
-		atoms = pose.data['Atoms']
-		crds = pose.data['Coordinates']
-		for res_idx in sorted(AAs.keys()):
-			for atom_idx in AAs[res_idx][2]:
-				if atoms[atom_idx][0] == 'CA':
-					coords.append(crds[atom_idx].copy().astype(float))
-					break
-		return(np.array(coords))
+	t1 = pose1.data['Type']
+	t2 = pose2.data['Type']
+	p1 = t1 == 'Protein'
+	p2 = t2 == 'Protein'
+	if p1 != p2:
+		raise Exception(
+			f'Cannot align {t1} with {t2}: '
+			'cannot mix protein and nucleic acid')
+	is_pro = p1
+	rk = 'Amino Acids' if is_pro else 'Nucleotides'
+	ra = 'CA' if is_pro else "C1'"
 	def kabsch_R(Pc, Qc):
 		H = Pc.T @ Qc
 		U, S, Vt = np.linalg.svd(H)
 		d = np.sign(np.linalg.det(Vt.T @ U.T))
-		return(Vt.T @ np.diag(np.array([1.0, 1.0, d])) @ U.T)
+		return(Vt.T @ np.diag(
+			np.array([1.0, 1.0, d])) @ U.T)
 	if alg == 'align':
-		rk1 = sorted(pose1.data['Amino Acids'].keys())
-		rk2 = sorted(pose2.data['Amino Acids'].keys())
+		rk1 = sorted(pose1.data[rk].keys())
+		rk2 = sorted(pose2.data[rk].keys())
 		seq1 = ''.join(
-			pose1.data['Amino Acids'][k][0].upper()
-			for k in rk1)
+			pose1.data[rk][k][0].upper() for k in rk1)
 		seq2 = ''.join(
-			pose2.data['Amino Acids'][k][0].upper()
-			for k in rk2)
+			pose2.data[rk][k][0].upper() for k in rk2)
 		m, n = len(seq1), len(seq2)
-		match, mis, gap = 1.0, -0.5, -1.0
+		gap = -1.0
 		dp = np.zeros((m+1, n+1))
 		for i in range(1, m+1):
 			dp[i, 0] = i * gap
@@ -325,32 +346,47 @@ def RMSD(pose1, pose2, alg='align'):
 			dp[0, j] = j * gap
 		for i in range(1, m+1):
 			for j in range(1, n+1):
-				s = match if seq1[i-1]==seq2[j-1] else mis
+				s = (_blosum(seq1[i-1], seq2[j-1])
+					if is_pro else
+					(1.0 if seq1[i-1]==seq2[j-1]
+					else -0.5))
 				dp[i, j] = max(
 					dp[i-1, j-1] + s,
 					dp[i-1, j] + gap,
 					dp[i, j-1] + gap)
 		pairs, i, j = [], m, n
 		while i > 0 and j > 0:
-			s = match if seq1[i-1]==seq2[j-1] else mis
-			if abs(dp[i,j] - (dp[i-1,j-1]+s)) < 1e-9:
+			s = (_blosum(seq1[i-1], seq2[j-1])
+				if is_pro else
+				(1.0 if seq1[i-1]==seq2[j-1]
+				else -0.5))
+			if abs(dp[i,j]-(dp[i-1,j-1]+s)) < 1e-9:
 				pairs.append((i-1, j-1))
 				i -= 1; j -= 1
-			elif abs(dp[i,j] - (dp[i-1,j]+gap)) < 1e-9:
+			elif abs(dp[i,j]-(dp[i-1,j]+gap)) < 1e-9:
 				i -= 1
 			else:
 				j -= 1
 		pairs = list(reversed(pairs))
 		if len(pairs) < 3:
-			raise Exception('Too few aligned residue pairs')
-		def get_CA_res(pose, res_key):
-			for idx in pose.data['Amino Acids'][res_key][2]:
-				if pose.data['Atoms'][idx][0] == 'CA':
-					return(pose.data['Coordinates'][idx].copy().astype(float))
-		P_aln = np.array(
-			[get_CA_res(pose1, rk1[i]) for i,j in pairs])
-		Q_aln = np.array(
-			[get_CA_res(pose2, rk2[j]) for i,j in pairs])
+			raise Exception(
+				'Too few aligned residue pairs')
+		P_aln, Q_aln = [], []
+		for ii, jj in pairs:
+			for idx in pose1.data[rk][rk1[ii]][2]:
+				if pose1.data['Atoms'][idx][0] == ra:
+					P_aln.append(
+						pose1.data['Coordinates']
+						[idx].copy().astype(float))
+					break
+			for idx in pose2.data[rk][rk2[jj]][2]:
+				if pose2.data['Atoms'][idx][0] == ra:
+					Q_aln.append(
+						pose2.data['Coordinates']
+						[idx].copy().astype(float))
+					break
+		P_aln = np.array(P_aln)
+		Q_aln = np.array(Q_aln)
 		mask = np.ones(len(pairs), dtype=bool)
 		for _ in range(5):
 			Pm = P_aln[mask]
@@ -359,128 +395,91 @@ def RMSD(pose1, pose2, alg='align'):
 			t_Q = Qm.mean(axis=0)
 			R = kabsch_R(Pm - t_P, Qm - t_Q)
 			dists = np.sqrt((
-				((P_aln - t_P) - (Q_aln - t_Q) @ R)**2
+				((P_aln-t_P)-(Q_aln-t_Q) @ R)**2
 				).sum(axis=1))
 			new_mask = dists < 2.0
-			if (np.array_equal(new_mask, mask) or new_mask.sum() < 3): break
+			if (np.array_equal(new_mask, mask)
+					or new_mask.sum() < 3):
+				break
 			mask = new_mask
 		Pm = P_aln[mask]
 		Qm = Q_aln[mask]
-		Pc = Pm - Pm.mean(axis=0)
-		Qc = Qm - Qm.mean(axis=0)
+		t_P = Pm.mean(axis=0)
+		t_Q = Qm.mean(axis=0)
+		Pc = Pm - t_P
+		Qc = Qm - t_Q
 		R = kabsch_R(Pc, Qc)
 		diff = Pc - Qc @ R
 		rmsd = np.sqrt(np.mean((diff**2).sum(axis=1)))
 	else:
-		P_full = get_CA(pose1)
-		Q_full = get_CA(pose2)
-		if len(P_full) == 0 or len(Q_full) == 0:
-			raise Exception('No CA atoms found in one or both poses')
-		n = min(len(P_full), len(Q_full))
-		P = P_full[:n]
-		Q = Q_full[:n]
-		P = P - P.mean(axis=0)
-		Q = Q - Q.mean(axis=0)
+		coords1, coords2 = [], []
+		for res_idx in sorted(pose1.data[rk].keys()):
+			for ai in pose1.data[rk][res_idx][2]:
+				if pose1.data['Atoms'][ai][0] == ra:
+					coords1.append(
+						pose1.data['Coordinates']
+						[ai].copy().astype(float))
+					break
+		for res_idx in sorted(pose2.data[rk].keys()):
+			for ai in pose2.data[rk][res_idx][2]:
+				if pose2.data['Atoms'][ai][0] == ra:
+					coords2.append(
+						pose2.data['Coordinates']
+						[ai].copy().astype(float))
+					break
+		if not coords1 or not coords2:
+			raise Exception(
+				f'No {ra} atoms found in one or both poses')
+		n = min(len(coords1), len(coords2))
+		P = np.array(coords1[:n])
+		Q = np.array(coords2[:n])
+		t_P = P.mean(axis=0)
+		t_Q = Q.mean(axis=0)
+		P = P - t_P
+		Q = Q - t_Q
 		if alg == 'simple':
+			R = np.eye(3)
 			diff = P - Q
-			rmsd = np.sqrt(np.mean((diff**2).sum(axis=1)))
 		elif alg == 'kabsch':
 			R = kabsch_R(P, Q)
 			diff = P - (Q @ R)
-			rmsd = np.sqrt(np.mean((diff**2).sum(axis=1)))
 		elif alg == 'quaternion':
 			H = P.T @ Q
-			R11,R12,R13 = H[0,0], H[0,1], H[0,2]
-			R21,R22,R23 = H[1,0], H[1,1], H[1,2]
-			R31,R32,R33 = H[2,0], H[2,1], H[2,2]
+			R11,R12,R13 = H[0,0],H[0,1],H[0,2]
+			R21,R22,R23 = H[1,0],H[1,1],H[1,2]
+			R31,R32,R33 = H[2,0],H[2,1],H[2,2]
 			F = np.array([
-				[R11+R22+R33, R23-R32,     R31-R13,     R12-R21],
-				[R23-R32,     R11-R22-R33, R12+R21,     R13+R31],
-				[R31-R13,     R12+R21,    -R11+R22-R33, R23+R32],
-				[R12-R21,     R13+R31,     R23+R32,    -R11-R22+R33]])
+				[R11+R22+R33, R23-R32,
+					R31-R13, R12-R21],
+				[R23-R32, R11-R22-R33,
+					R12+R21, R13+R31],
+				[R31-R13, R12+R21,
+					-R11+R22-R33, R23+R32],
+				[R12-R21, R13+R31,
+					R23+R32, -R11-R22+R33]])
 			_, vecs = np.linalg.eigh(F)
 			q0,q1,q2,q3 = vecs[:,-1]
 			R = np.array([
-				[q0**2+q1**2-q2**2-q3**2, 2*(q1*q2-q0*q3), 2*(q1*q3+q0*q2)],
-				[2*(q1*q2+q0*q3), q0**2-q1**2+q2**2-q3**2, 2*(q2*q3-q0*q1)],
-				[2*(q1*q3-q0*q2), 2*(q2*q3+q0*q1), q0**2-q1**2-q2**2+q3**2]])
+				[q0**2+q1**2-q2**2-q3**2,
+					2*(q1*q2-q0*q3),
+					2*(q1*q3+q0*q2)],
+				[2*(q1*q2+q0*q3),
+					q0**2-q1**2+q2**2-q3**2,
+					2*(q2*q3-q0*q1)],
+				[2*(q1*q3-q0*q2),
+					2*(q2*q3+q0*q1),
+					q0**2-q1**2-q2**2+q3**2]])
 			diff = P - (Q @ R)
-			rmsd = np.sqrt(np.mean((diff**2).sum(axis=1)))
-	return(round(float(rmsd), 5))
-
-def RMSD_N(pose1, pose2, alg='kabsch'):
-	'''
-	Calculate RMSD between two nucleic acid poses using C1' atoms.
-	Alignment algorithms:
-		kabsch     - SVD-based optimal rotation (default)
-		quaternion - eigenvalue-based optimal rotation
-		simple     - translation only, no rotation
-	'''
-	if alg not in ('kabsch', 'quaternion', 'simple'):
-		raise Exception('Unknown algorithm: ' + str(alg))
-	def get_C1p(pose):
-		coords = []
-		nts = pose.data['Nucleotides']
-		atoms = pose.data['Atoms']
-		crds = pose.data['Coordinates']
-		for nt_idx in sorted(nts.keys()):
-			for atom_idx in nts[nt_idx][2]:
-				if atoms[atom_idx][0] == "C1'":
-					coords.append(
-						crds[atom_idx].copy().astype(float))
-					break
-		return(np.array(coords))
-	def kabsch_R(Pc, Qc):
-		H = Pc.T @ Qc
-		U, S, Vt = np.linalg.svd(H)
-		d = np.sign(np.linalg.det(Vt.T @ U.T))
-		return(Vt.T @ np.diag(
-			np.array([1.0, 1.0, d])) @ U.T)
-	P_full = get_C1p(pose1)
-	Q_full = get_C1p(pose2)
-	if len(P_full) == 0 or len(Q_full) == 0:
-		raise Exception(
-			"No C1' atoms found in one or both poses")
-	n = min(len(P_full), len(Q_full))
-	P = P_full[:n]
-	Q = Q_full[:n]
-	P = P - P.mean(axis=0)
-	Q = Q - Q.mean(axis=0)
-	if alg == 'simple':
-		diff = P - Q
 		rmsd = np.sqrt(np.mean((diff**2).sum(axis=1)))
-	elif alg == 'kabsch':
-		R = kabsch_R(P, Q)
-		diff = P - (Q @ R)
-		rmsd = np.sqrt(np.mean((diff**2).sum(axis=1)))
-	elif alg == 'quaternion':
-		H = P.T @ Q
-		R11, R12, R13 = H[0,0], H[0,1], H[0,2]
-		R21, R22, R23 = H[1,0], H[1,1], H[1,2]
-		R31, R32, R33 = H[2,0], H[2,1], H[2,2]
-		F = np.array([
-			[R11+R22+R33, R23-R32,
-				R31-R13, R12-R21],
-			[R23-R32, R11-R22-R33,
-				R12+R21, R13+R31],
-			[R31-R13, R12+R21,
-				-R11+R22-R33, R23+R32],
-			[R12-R21, R13+R31,
-				R23+R32, -R11-R22+R33]])
-		_, vecs = np.linalg.eigh(F)
-		q0, q1, q2, q3 = vecs[:, -1]
-		R = np.array([
-			[q0**2+q1**2-q2**2-q3**2,
-				2*(q1*q2-q0*q3),
-				2*(q1*q3+q0*q2)],
-			[2*(q1*q2+q0*q3),
-				q0**2-q1**2+q2**2-q3**2,
-				2*(q2*q3-q0*q1)],
-			[2*(q1*q3-q0*q2),
-				2*(q2*q3+q0*q1),
-				q0**2-q1**2-q2**2+q3**2]])
-		diff = P - (Q @ R)
-		rmsd = np.sqrt(np.mean((diff**2).sum(axis=1)))
+	if export is not None:
+		orig = pose2.data['Coordinates'].copy()
+		pose2.data['Coordinates'] = \
+			(orig - t_Q) @ R + t_P
+		fn  = export[:-4]
+		ext = export[-4:]
+		pose1.Export(fn + '_1' + ext)
+		pose2.Export(fn + '_2' + ext)
+		pose2.data['Coordinates'] = orig
 	return(round(float(rmsd), 5))
 
 # BLOSUM62 scoring matrix — shared by BLAST() and MSA()
