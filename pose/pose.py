@@ -278,13 +278,13 @@ class Pose():
 				result.update(
 					src[res2][2][pos:])
 				result.update(src[res2][3])
+				for ri, info in src.items():
+					if info[1] != chain: continue
+					if ri > res2:
+						result.update(info[2] + info[3])
 			else:
 				pos = src[res2][3].index(Bi)
 				result.update(src[res2][3][pos:])
-			for ri, info in src.items():
-				if info[1] != chain: continue
-				if ri > res2:
-					result.update(info[2] + info[3])
 		else:
 			for ri, info in src.items():
 				if info[1] != chain: continue
@@ -1747,7 +1747,7 @@ class Pose():
 		self.data['Coordinates'] = coords
 	def RotateDihedral(self, res, theta, angle_type, chi_type=None):
 		''' Set a dihedral angle to theta degrees '''
-		pivots = self._dihedralpivots( res, angle_type, chi_type)
+		pivots = self._dihedralpivots(res, angle_type, chi_type)
 		if pivots is None: return
 		ra, aa, rb, ab = pivots
 		current = self.GetDihedral(res, angle_type, chi_type)
