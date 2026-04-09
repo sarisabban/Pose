@@ -17,7 +17,7 @@ A bare-metal Python library for building and manipulating protein and nucleic ac
 
 <img src="pose/Video1.gif" width="25%"/><img src="pose/Video2.gif" width="25%"/><img src="pose/Video3.gif" width="25%"/><img src="pose/Video4.gif" width="25%"/>
 
-<img src="pose/Video5.gif" width="25%"/><img src="pose/Video6.gif" width="25%"/>
+<img src="pose/Video5.gif" width="25%"/><img src="pose/Video6.gif" width="25%"/><img src="pose/Video7.gif"/><img src="pose/Video8.gif" width="25%"/>
 
 ---
 
