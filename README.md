@@ -16,8 +16,7 @@ A bare-metal Python library for building and manipulating protein and nucleic ac
 ![License: GPL v2](https://img.shields.io/badge/license-GPL%20v2-green)
 
 <img src="pose/Video1.gif" width="25%"/><img src="pose/Video2.gif" width="25%"/><img src="pose/Video3.gif" width="25%"/><img src="pose/Video4.gif" width="25%"/>
-
-<img src="pose/Video5.gif" width="25%"/><img src="pose/Video6.gif" width="25%"/><img src="pose/Video7.gif"/><img src="pose/Video8.gif" width="25%"/>
+<img src="pose/Video5.gif" width="25%"/><img src="pose/Video6.gif" width="25%"/><img src="pose/Video7.gif" width="25%"/><img src="pose/Video8.gif" width="25%"/>
 
 ---
 
