@@ -200,11 +200,10 @@ class Pose():
 		if BB == 'Backbone' or BB == 'Backbone start':
 			n = 3
 			nBBb[0][0] = length+1
-			BBb = nBBb
 		else:
 			n = 1
 			nBBb[0][0] = length-1
-			BBb = nBBb
+		BBb = nBBb
 		for i in reversed(range(len(BBb))):
 			if i > n+1:
 				newvals = [x if x<=n else x+length-1 for x in BBb[i]]
@@ -223,9 +222,7 @@ class Pose():
 	def _bondtreenotfused(self, BB, SC):
 		''' Construct amino acid bond graph by adding sidechain to backbone '''
 		SC = SC.upper()
-		if self._isfused(SC):
-			BBb = self._bondtreefused(BB, SC)
-			return BBb
+		if self._isfused(SC): return self._bondtreefused(BB, SC)
 		BBb = {int(k): v for k, v in
 			copy.deepcopy(self.aminoacids[BB]['Bonds']).items()}
 		SCb = {int(k): v for k, v in
@@ -259,12 +256,10 @@ class Pose():
 			self.data['Bonds'] = BBb
 			return
 		i_max = max(BT)
-		if not new_chain:
-			BT[i_max-1] += [i_max+1]
+		if not new_chain: BT[i_max-1] += [i_max+1]
 		for i in range(len(BBb)):
 			K = i+length
-			v = BBb[i]
-			V = [x+length for x in v]
+			V = [x+length for x in BBb[i]]
 			if i == 0 and not new_chain:
 				V.append(i_max-1)
 			BT[K] = V
@@ -326,10 +321,8 @@ class Pose():
 			if not e:
 				s = a.lstrip('0123456789')
 				e = s[0] if s else a[0]
-			occ = float(line[54:60]) \
-				if len(line) >= 60 else 1.0
-			bfc = float(line[60:66]) \
-				if len(line) >= 66 else 0.0
+			occ = float(line[54:60]) if len(line) >= 60 else 1.0
+			bfc = float(line[60:66]) if len(line) >= 66 else 0.0
 			rows.append((
 				a, line[17:20].strip(),
 				ch, int(line[22:26]),
@@ -360,8 +353,7 @@ class Pose():
 				i = j
 			else:
 				j = i
-				while j < n and line[j] not in \
-				(' ', '\t'):
+				while j < n and line[j] not in (' ', '\t'):
 					j += 1
 				tokens.append(line[i:j])
 				i = j
@@ -371,14 +363,11 @@ class Pose():
 		C, ci = {}, 0
 		for idx, line in enumerate(lines):
 			if line.strip() != 'loop_': continue
-			nxt = lines[idx+1].strip() \
-				if idx+1 < len(lines) else ''
+			nxt = lines[idx+1].strip() if idx+1 < len(lines) else ''
 			if not nxt.startswith('_atom_site.'):
 				continue
 			i = idx + 1
-			while i < len(lines) and \
-			lines[i].strip().startswith(
-				'_atom_site.'):
+			while i < len(lines) and lines[i].strip().startswith('_atom_site.'):
 				cn = lines[i].strip().split('.')[1]
 				C[cn] = ci
 				ci += 1
@@ -390,10 +379,7 @@ class Pose():
 		with open(filename) as f:
 			lines = f.readlines()
 		C, start = self._cifcols(lines)
-		if not C:
-			raise Exception(
-				f'No _atom_site loop in '
-				f'{filename}')
+		if not C: raise Exception(f'No _atom_site loop in {filename}')
 		i_mdl = C.get('pdbx_PDB_model_num')
 		i_alt = C.get('label_alt_id')
 		rows, found = [], []
@@ -409,8 +395,7 @@ class Pose():
 				if mnum not in found:
 					found.append(mnum)
 				if mnum != model: continue
-			alt = f[i_alt] \
-				if i_alt is not None else '.'
+			alt = f[i_alt] if i_alt is not None else '.'
 			if alt not in ('.','A','1',''): continue
 			raw_seq = f[C['auth_seq_id']]
 			try: seqid = int(raw_seq)
@@ -425,23 +410,19 @@ class Pose():
 				float(f[C['occupancy']]),
 				float(f[C['B_iso_or_equiv']]),
 				f[C['type_symbol']]))
-		if i_mdl is not None and found \
-		and model not in found:
+		if i_mdl is not None and found and model not in found:
 			raise Exception(
 				f'Model {model} not found in '
 				f'{filename}. Available: {found}')
 		return rows
 	def _detecttype(self, resnames):
 		''' Auto-detect molecule type from residues '''
-		aa = {v['Tricode'] for v in
-			self.aminoacids.values()
-			if 'Tricode' in v}
+		aa = {v['Tricode'] for v in self.aminoacids.values() if 'Tricode' in v}
 		if resnames & aa: return 'Protein'
 		if resnames & {'DT', 'T'}: return 'DNA'
 		if 'U' in resnames: return 'RNA'
-		nt = {self.nucleotides[r]['Type']
-			for r in resnames
-			if r in self.nucleotides}
+		nt = {self.nucleotides[r]['Type'] \
+			for r in resnames if r in self.nucleotides}
 		return 'RNA' if 'RNA' in nt else 'DNA'
 	def _buildresidues(self, residues, sk):
 		''' Build Atoms/Aminos/Coords from residues '''
@@ -460,13 +441,11 @@ class Pose():
 			BB, SC = [], []
 			for r in uniq:
 				Co.append([r[4], r[5], r[6]])
-				At[count] = [
-					r[0], r[9], 0.0, r[7], r[8]]
+				At[count] = [r[0], r[9], 0.0, r[7], r[8]]
 				(BB if r[0] in self.probbatoms
 					else SC).append(count)
 				count += 1
-			Am[ai] = [
-				sym, ch, BB, SC, 'L', tri, 0]
+			Am[ai] = [sym, ch, BB, SC, 'L', tri, 0]
 			ai += 1
 		return At, Am, np.array(Co)
 	def _validatechain(self, At, Am, Co, filename, chain):
@@ -514,17 +493,13 @@ class Pose():
 				bb = 'Backbone end'
 			else: bb = 'Backbone middle'
 			new = prev is not None and ch != prev
-			self._bondtree(
-				bb, Am[i][0], new_chain=new)
+			self._bondtree(bb, Am[i][0], new_chain=new)
 			prev = ch
 	def _importprotein(self, residues, sk, filename, chain):
 		''' Populate self.data for protein '''
-		At, Am, Co = self._buildresidues(
-			residues, sk)
+		At, Am, Co = self._buildresidues(residues, sk)
 		if not Am:
-			raise Exception(
-				f'No recognized residues in '
-				f'{filename}')
+			raise Exception(f'No recognized residues in {filename}')
 		self._validatechain(At, Am, Co, filename, chain)
 		self.data['Coordinates'] = Co
 		self.data['Amino Acids'] = Am
@@ -697,8 +672,7 @@ class Pose():
 			self.data['Nucleotides'] = None
 			self.data['Atoms'] = {}
 			self.data['Bonds'] = {}
-			self.data['Coordinates'] = \
-				np.zeros((0, 3))
+			self.data['Coordinates'] = np.zeros((0, 3))
 		aa_db = self.aminoacids
 		Eadj = (0.400, 1.472, 0)
 		Oadj = (0.812, 0.940, 0)
@@ -743,8 +717,7 @@ class Pose():
 			else:
 				bb = 'Backbone end' if i == n-1 else 'Backbone middle'
 				bb_idx = 4
-			bb_atoms = aa_db[bb][
-				'Backbone Atoms'][:bb_idx]
+			bb_atoms = aa_db[bb]['Backbone Atoms'][:bb_idx]
 			if self._isfused(aa):
 				bb_atoms = [b for j, b in enumerate(bb_atoms) if j != 1]
 			sc_atoms = aa_db[aa_u]['Sidechain Atoms']
@@ -760,8 +733,8 @@ class Pose():
 			if LD: tri = 'D' + tri[1:]
 			ai = aa_start + i
 			self.data['Amino Acids'][ai] = [aa, chain, BBi, SCi, 'L', tri, 0]
-		self.data['Coordinates'] = np.append(
-			self.data['Coordinates'], all_co, axis=0)
+		self.data['Coordinates'] = \
+			np.append(self.data['Coordinates'], all_co, axis=0)
 		for i, aa in enumerate(sequence):
 			ai = aa_start + i
 			if n == 1 or i == 0:
@@ -842,19 +815,15 @@ class Pose():
 			self.data['Nucleotides'][ni] = [sym, chain, bbi, bsi, tricode]
 			nt_ch[chain].append(ni)
 			ni += 1
-		if chains is None:
-			chains = ['A', 'B']
+		chains = chains or ['A', 'B']
 		chain_a = chains[0]
 		for i, base in enumerate(sequence):
 			add_nt(tri[base], chain_a, i, False)
 		if len(chains) > 1:
 			chain_b = chains[1]
-			comp_seq = ''.join(
-				comp[b]
-				for b in reversed(sequence))
+			comp_seq = ''.join(comp[b] for b in reversed(sequence))
 			for j, base in enumerate(comp_seq):
-				add_nt(tri[base], chain_b,
-					N - 1 - j, True)
+				add_nt(tri[base], chain_b, N - 1 - j, True)
 		self.data['Coordinates'] = np.array(Co)
 		self._phosphobonds(nt_ch)
 	def _kabsch(self, P, Q):
@@ -873,8 +842,7 @@ class Pose():
 		fasta = self.data['FASTA']
 		if sequence is None:
 			sequence = fasta
-		if isinstance(sequence, str) \
-		and len(fasta) > 1:
+		if isinstance(sequence, str) and len(fasta) > 1:
 			raise Exception(
 				'Multi-chain protein requires '
 				'sequence as dict, e.g. '
@@ -885,9 +853,7 @@ class Pose():
 			sequence = full_seq
 		if isinstance(sequence, dict):
 			for ch in sequence:
-				if ch in fasta \
-				and len(sequence[ch]) \
-				!= len(fasta[ch]):
+				if ch in fasta and len(sequence[ch]) != len(fasta[ch]):
 					raise Exception(
 						f'Chain {ch}: sequence '
 						f'length '
@@ -908,20 +874,12 @@ class Pose():
 			info = AAs[i]
 			for ai in info[2] + info[3]:
 				aname = self.data['Atoms'][ai][0]
-				orig_coords[(i, aname)] = \
-					self.data[
-						'Coordinates'][ai].copy()
+				orig_coords[(i, aname)] = self.data['Coordinates'][ai].copy()
 		def _bb_frame(coords, i, src):
 			info = src[i]
-			n_i = next(a for a in info[2]
-				if self.data['Atoms'][a][0]
-				== 'N')
-			ca_i = next(a for a in info[2]
-				if self.data['Atoms'][a][0]
-				== 'CA')
-			c_i = next(a for a in info[2]
-				if self.data['Atoms'][a][0]
-				== 'C')
+			n_i = next(a for a in info[2] if self.data['Atoms'][a][0] == 'N')
+			ca_i = next(a for a in info[2] if self.data['Atoms'][a][0] == 'CA')
+			c_i = next(a for a in info[2] if self.data['Atoms'][a][0] == 'C')
 			n = coords[n_i].copy()
 			ca = coords[ca_i].copy()
 			c = coords[c_i].copy()
@@ -932,9 +890,7 @@ class Pose():
 			nm = np.linalg.norm(e2)
 			if nm < 1e-10: return None, None
 			e2 = e2 / nm
-			F = np.array(
-				[e1, e2, np.cross(e1, e2)])
-			return F, n
+			return np.array([e1, e2, np.cross(e1, e2)]), n
 		self.data = {
 			'Type': None, 'Energy': 0,
 			'Rg': 0, 'Mass': 0, 'Size': {},
@@ -944,8 +900,7 @@ class Pose():
 			'Atoms': {}, 'Bonds': {},
 			'Coordinates': np.zeros((0, 3))}
 		if isinstance(sequence, dict):
-			for ch, seq in sorted(
-			sequence.items()):
+			for ch, seq in sorted(sequence.items()):
 				self._buildprotein(seq, ch)
 		else:
 			ch0 = sorted(fasta.keys())[0]
@@ -958,8 +913,7 @@ class Pose():
 				and (i, 'CA') in orig_coords
 				and (i, 'C') in orig_coords)
 			if not has_orig: continue
-			F_new, ori_new = _bb_frame(
-				coords, i, AAs2)
+			F_new, ori_new = _bb_frame(coords, i, AAs2)
 			if F_new is None: continue
 			on = orig_coords[(i, 'N')]
 			oca = orig_coords[(i, 'CA')]
@@ -971,19 +925,15 @@ class Pose():
 			nm = np.linalg.norm(e2)
 			if nm < 1e-10: continue
 			e2 = e2 / nm
-			F_orig = np.array(
-				[e1, e2, np.cross(e1, e2)])
+			F_orig = np.array([e1, e2, np.cross(e1, e2)])
 			F_orig_inv = F_orig.T
 			for ai in AAs2[i][2] + AAs2[i][3]:
 				aname = self.data['Atoms'][ai][0]
 				if (i, aname) in orig_coords:
-					coords[ai] = \
-						orig_coords[(i, aname)]
+					coords[ai] = orig_coords[(i, aname)]
 				else:
-					local = F_new @ (
-						coords[ai] - ori_new)
-					coords[ai] = \
-						on + F_orig_inv @ local
+					local = F_new @ (coords[ai] - ori_new)
+					coords[ai] = on + F_orig_inv @ local
 		self.data['Coordinates'] = coords
 		self.CalcCharge()
 		self.CalcDSSP()
@@ -1002,10 +952,7 @@ class Pose():
 		N = len(nts)
 		fasta = self.data['FASTA']
 		first_ch = sorted(fasta.keys())[0]
-		if sequence is None:
-			seq_a = fasta[first_ch]
-		else:
-			seq_a = sequence
+		seq_a = fasta[first_ch] if sequence is None else sequence
 		orig_len = len(fasta[first_ch])
 		if len(seq_a) != orig_len:
 			raise Exception(
@@ -1026,9 +973,7 @@ class Pose():
 			prv = self._prevres(i)
 			nxt = self._nextres(i)
 			has_P = self._hasatom(i, 'P')
-			if prv is not None \
-			and self._hasatom(prv, "O3'") \
-			and has_P:
+			if prv is not None and self._hasatom(prv, "O3'") and has_P:
 				ALPHAs[i] = self.GetDihedral(i, 'ALPHA')
 			if has_P:
 				BETAs[i] = self.GetDihedral(i, 'BETA')
@@ -1052,12 +997,8 @@ class Pose():
 				aC3O3P[i] = self.GetAngle(i, "C3'", i, "O3'", nxt, 'P')
 				aO3PO5[i] = self.GetAngle(i, "O3'", nxt, 'P', nxt, "O5'")
 				bO3P[i] = self.GetDistance(i, "O3'", nxt, 'P')
-		ref_C1 = []
-		for i in range(N):
-			if self._hasatom(i, "C1'"):
-				ref_C1.append(self.GetAtomCoord(i, "C1'").copy())
-			else:
-				ref_C1.append(None)
+		ref_C1 = [self.GetAtomCoord(i, "C1'").copy() if self._hasatom(i, "C1'")
+			else None for i in range(N)]
 		def _local_frame(c4, c3, c5):
 			e1 = c3 - c4
 			e1 = e1 / np.linalg.norm(e1)
@@ -1089,8 +1030,7 @@ class Pose():
 			ring_local[i] = saved
 		orig_chains = sorted(set(
 			v[1] for v in nts.values()))
-		self._buildnucleotide(
-			seq_a, fmt, chains=orig_chains)
+		self._buildnucleotide(seq_a, fmt, chains=orig_chains)
 		self.CalcCharge()
 		nts2 = self.data['Nucleotides']
 		if _mutated is None:
@@ -1101,15 +1041,10 @@ class Pose():
 				if old_syms[i] != new_syms[i]}
 		def _sugarframe(mi):
 			info = nts2[mi]
-			ai_o4 = next((a for a in info[2]
-				if self.data['Atoms'][a][0]
-				== "O4'"), None)
-			ai_c1 = next((a for a in info[2]
-				if self.data['Atoms'][a][0]
-				== "C1'"), None)
-			ai_c2 = next((a for a in info[2]
-				if self.data['Atoms'][a][0]
-				== "C2'"), None)
+			At = self.data['Atoms']
+			ai_o4 = next((a for a in info[2] if At[a][0] == "O4'"), None)
+			ai_c1 = next((a for a in info[2] if At[a][0] == "C1'"), None)
+			ai_c2 = next((a for a in info[2] if At[a][0] == "C2'"), None)
 			if None in (ai_o4, ai_c1, ai_c2):
 				return None, None
 			co = self.data['Coordinates']
@@ -1125,9 +1060,7 @@ class Pose():
 			nm2 = np.linalg.norm(e2)
 			if nm2 < 1e-10: return None, None
 			e2 = e2 / nm2
-			F = np.array(
-				[e1, e2, np.cross(e1, e2)])
-			return F, c1
+			return np.array([e1, e2, np.cross(e1, e2)]), c1
 		build_base_local = {}
 		for mi in _mutated:
 			if mi >= len(nts2): continue
@@ -1135,30 +1068,20 @@ class Pose():
 			if Fb is None: continue
 			saved = {}
 			for ai in nts2[mi][3]:
-				aname = self.data[
-					'Atoms'][ai][0]
-				saved[aname] = Fb @ (
-					self.data['Coordinates'][ai]
-					- c1b)
+				aname = self.data['Atoms'][ai][0]
+				saved[aname] = Fb @ (self.data['Coordinates'][ai] - c1b)
 			build_base_local[mi] = saved
 		for i in range(N):
-			if i in ALPHAs:
-				self.RotateDihedral(i, ALPHAs[i], 'ALPHA')
-			if i in BETAs:
-				self.RotateDihedral(i, BETAs[i], 'BETA')
+			if i in ALPHAs: self.RotateDihedral(i, ALPHAs[i], 'ALPHA')
+			if i in BETAs: self.RotateDihedral(i, BETAs[i], 'BETA')
 			self.RotateDihedral(i, GAMMAs[i], 'GAMMA')
 			self.RotateDihedral(i, DELTAs[i], 'DELTA')
 			self.RotateDihedral(i, CHIs[i], 'CHI')
-			if i in bPO5:
-				self.AdjustDistance(i, 'P', i, "O5'", bPO5[i])
-			if i in bO5C5:
-				self.AdjustDistance(i, "O5'", i, "C5'", bO5C5[i])
-			if i in bC5C4:
-				self.AdjustDistance(i, "C5'", i, "C4'", bC5C4[i])
-			if i in bC4C3:
-				self.AdjustDistance(i, "C4'", i, "C3'", bC4C3[i])
-			if i in bC3O3:
-				self.AdjustDistance(i, "C3'", i, "O3'", bC3O3[i])
+			if i in bPO5: self.AdjustDistance(i, 'P', i, "O5'", bPO5[i])
+			if i in bO5C5: self.AdjustDistance(i, "O5'", i, "C5'", bO5C5[i])
+			if i in bC5C4: self.AdjustDistance(i, "C5'", i, "C4'", bC5C4[i])
+			if i in bC4C3: self.AdjustDistance(i, "C4'", i, "C3'", bC4C3[i])
+			if i in bC3O3: self.AdjustDistance(i, "C3'", i, "O3'", bC3O3[i])
 			if i in aPO5C5:
 				cur = self.GetAngle(i, 'P', i, "O5'", i, "C5'")
 				self.AdjustAngle(i, 'P', i, "O5'", i, "C5'", cur - aPO5C5[i])
@@ -1173,12 +1096,9 @@ class Pose():
 				self.AdjustAngle(i, "C4'", i, "C3'", i, "O3'", cur - aC4C3O3[i])
 			nxt = self._nextres(i)
 			if nxt is not None:
-				if i in EPSILONs:
-					self.RotateDihedral(i, EPSILONs[i], 'EPSILON')
-				if i in ZETAs:
-					self.RotateDihedral(i, ZETAs[i], 'ZETA')
-				if i in bO3P:
-					self.AdjustDistance(i, "O3'", nxt, 'P', bO3P[i])
+				if i in EPSILONs: self.RotateDihedral(i, EPSILONs[i], 'EPSILON')
+				if i in ZETAs: self.RotateDihedral(i, ZETAs[i], 'ZETA')
+				if i in bO3P: self.AdjustDistance(i, "O3'", nxt, 'P', bO3P[i])
 				if i in aC3O3P:
 					cur = self.GetAngle(i, "C3'", i, "O3'", nxt, 'P')
 					self.AdjustAngle(
@@ -1194,62 +1114,46 @@ class Pose():
 			and self._hasatom(i, "C3'")
 			and self._hasatom(i, "C5'")):
 				continue
-			c4 = self.GetAtomCoord(
-				i, "C4'").copy()
-			c3 = self.GetAtomCoord(
-				i, "C3'").copy()
-			c5 = self.GetAtomCoord(
-				i, "C5'").copy()
+			c4 = self.GetAtomCoord(i, "C4'").copy()
+			c3 = self.GetAtomCoord(i, "C3'").copy()
+			c5 = self.GetAtomCoord(i, "C5'").copy()
 			F = _local_frame(c4, c3, c5)
 			if F is None: continue
 			Finv = F.T
 			saved = ring_local[i]
-			if i in _mutated:
-				restore = nts2[i][2]
-			else:
-				restore = nts2[i][2] + nts2[i][3]
+			if i in _mutated: restore = nts2[i][2]
+			else: restore = nts2[i][2] + nts2[i][3]
 			for ai in restore:
-				aname = self.data[
-					'Atoms'][ai][0]
-				if aname in saved:
-					coords[ai] = \
-						c4 + Finv @ saved[aname]
+				aname = self.data['Atoms'][ai][0]
+				if aname in saved: coords[ai] = c4 + Finv @ saved[aname]
 		self.data['Coordinates'] = coords
 		coords = self.data['Coordinates']
-		for ch in set(
-		v[1] for v in nts2.values()):
+		for ch in set(v[1] for v in nts2.values()):
 			ref_pts, new_pts, aids = [], [], []
 			for i in range(N):
 				if nts2[i][1] != ch: continue
 				if ref_C1[i] is None: continue
 				ref_pts.append(ref_C1[i])
 				new_pts.append(self.GetAtomCoord(i, "C1'").copy())
-				for ai in (
-				nts2[i][2] + nts2[i][3]):
+				for ai in nts2[i][2] + nts2[i][3]:
 					if ai not in aids:
 						aids.append(ai)
 			if len(ref_pts) < 3: continue
 			P = np.array(ref_pts, dtype=float)
 			Q = np.array(new_pts, dtype=float)
 			R, Qc, Pc = self._kabsch(P, Q)
-			for ai in aids:
-				coords[ai] = \
-					(coords[ai] - Qc) @ R + Pc
+			for ai in aids: coords[ai] = (coords[ai] - Qc) @ R + Pc
 		self.data['Coordinates'] = coords
 		coords = self.data['Coordinates']
 		for mi in _mutated:
-			if mi not in build_base_local:
-				continue
+			if mi not in build_base_local: continue
 			Fr, c1r = _sugarframe(mi)
 			if Fr is None: continue
 			Fri = Fr.T
 			bsaved = build_base_local[mi]
 			for ai in nts2[mi][3]:
-				aname = self.data[
-					'Atoms'][ai][0]
-				if aname in bsaved:
-					coords[ai] = \
-						c1r + Fri @ bsaved[aname]
+				aname = self.data['Atoms'][ai][0]
+				if aname in bsaved: coords[ai] = c1r + Fri @ bsaved[aname]
 		self.data['Coordinates'] = coords
 		for mi in _mutated:
 			if mi >= len(nts2): continue
@@ -1257,8 +1161,7 @@ class Pose():
 			cur = self.GetDihedral(mi, 'CHI')
 			target = CHIs[mi]
 			tri = nts2[mi][4]
-			ca = self.nucleotides[tri][
-				'Chi Angle Atoms']
+			ca = self.nucleotides[tri]['Chi Angle Atoms']
 			piv_a = self.GetAtomIdx(mi, ca[1])
 			piv_b = self.GetAtomIdx(mi, ca[2])
 			ori = coords[piv_b].copy()
@@ -1288,8 +1191,7 @@ class Pose():
 		self.data['Mass'] = mass
 	def CalcSize(self):
 		''' Calculate length of each chain '''
-		source = (self.data['Amino Acids']
-			or self.data['Nucleotides'])
+		source = (self.data['Amino Acids'] or self.data['Nucleotides'])
 		if not source:
 			self.data['Size'] = {}
 			return
@@ -1565,8 +1467,7 @@ class Pose():
 		''' Measure distance between any two atoms '''
 		A = self.GetAtomCoord(res1, atom1)
 		B = self.GetAtomCoord(res2, atom2)
-		mag = np.linalg.norm(B - A)
-		return mag
+		return np.linalg.norm(B - A)
 	def GetAngle(self, AA1, atom1, AA2, atom2, AA3, atom3):
 		''' Measure the angle between three atoms '''
 		atom1 = self.GetAtomCoord(AA1, atom1)
@@ -1583,13 +1484,9 @@ class Pose():
 		''' Get the atom pair that participate in a bond from their index '''
 		bonds = self.data['Bonds'][index1]
 		if index2 not in bonds:
-			error = 'Requested two atoms are not bonded'
-			raise Exception(error)
-		atomA = self.data['Atoms'][index1][0]
-		elementA = self.data['Atoms'][index1][1]
-		atomB = self.data['Atoms'][index2][0]
-		elementB = self.data['Atoms'][index2][1]
-		return [atomA, elementA, atomB, elementB]
+			raise Exception('Requested two atoms are not bonded')
+		A = self.data['Atoms']
+		return [A[index1][0], A[index1][1], A[index2][0], A[index2][1]]
 	def GetIdentity(self, index, item, charge=False):
 		''' Identify an atom, atom charge, or amino acid given its index '''
 		if item.upper() == 'ATOM':
@@ -1598,39 +1495,30 @@ class Pose():
 			else:      return Atom[0]
 		elif item.upper() in ('RESIDUE', 'AMINO ACID'):
 			if self.data['Amino Acids'] is None:
-				raise Exception(
-					'No protein loaded')
-			return self.data[
-				'Amino Acids'][index][0]
+				raise Exception('No protein loaded')
+			return self.data['Amino Acids'][index][0]
 		elif item.upper() in (
 		'NUCLEOTIDE', 'DNA', 'RNA'):
 			if self.data['Nucleotides'] is None:
-				raise Exception(
-					'No nucleotide loaded')
-			return self.data[
-				'Nucleotides'][index][0]
+				raise Exception('No nucleotide loaded')
+			return self.data['Nucleotides'][index][0]
 		else:
 			raise Exception('Incorrect item')
 	def GetAtomCoord(self, res, atom):
 		''' Get specific atom coordinates '''
-		source = (self.data['Amino Acids']
-			or self.data['Nucleotides'])
+		source = (self.data['Amino Acids'] or self.data['Nucleotides'])
 		info = source[res]
 		for i in info[2] + info[3]:
 			if self.data['Atoms'][i][0] == atom:
 				return self.data['Coordinates'][i]
-		raise Exception(
-			f'Atom {atom} not found in '
-			f'residue {res}')
+		raise Exception(f'Atom {atom} not found in residue {res}')
 	def GetAtomIdx(self, res, atom):
 		''' Get atom coordinate index by name '''
 		source = (self.data['Amino Acids'] or self.data['Nucleotides'])
 		info = source[res]
 		for i in info[2] + info[3]:
 			if self.data['Atoms'][i][0] == atom: return i
-		raise Exception(
-			f'Atom {atom} not found in '
-			f'residue {res}')
+		raise Exception(f'Atom {atom} not found in residue {res}')
 	def GetAtomList(self, PDB=False):
 		''' Return list of all the atoms '''
 		idx = 0 if PDB else 1
@@ -1647,7 +1535,7 @@ class Pose():
 		for i in self.data['Size'].items():
 			print(f'Size:\t\t\tChain: {i[0]}\tLength: {i[1]}')
 	def GetDihedral(self, res, angle_type, chi_type=None):
-		''' Get amino acid φ/ψ/ω/χ and nucleotide α/β/γ/δ/ε/ζ/χ dihedrals '''
+		''' Get dihedral angles (phi/psi/omega/chi or alpha-zeta) '''
 		at = angle_type.upper()
 		mol = self.data['Type']
 		prv = self._prevres(res)
@@ -1673,12 +1561,9 @@ class Pose():
 				r3 = gc(nxt, 'N')
 				r4 = gc(nxt, 'CA')
 			elif at == 'CHI':
-				assert chi_type is not None, \
-					'Protein CHI needs chi_type'
-				sym = self.data['Amino Acids'][
-					res][0].upper()
-				ca = self.aminoacids[sym][
-					'Chi Angle Atoms'][chi_type-1]
+				assert chi_type is not None, 'Protein CHI needs chi_type'
+				sym = self.data['Amino Acids'][res][0].upper()
+				ca = self.aminoacids[sym]['Chi Angle Atoms'][chi_type-1]
 				r1 = gc(res, ca[0])
 				r2 = gc(res, ca[1])
 				r3 = gc(res, ca[2])
@@ -1764,9 +1649,8 @@ class Pose():
 		for row in rows: residues[(row[2], row[3])].append(row)
 		resnames = {a[0][1] for a in residues.values()}
 		mol = self._detecttype(resnames)
-		aa_tri = {v['Tricode'] for v in
-			self.aminoacids.values()
-			if 'Tricode' in v}
+		aa_tri = \
+			{v['Tricode'] for v in self.aminoacids.values() if 'Tricode' in v}
 		has_aa = bool(resnames & aa_tri)
 		nuc_names = {r for r in resnames
 			if r in self.nucleotides
@@ -1788,11 +1672,8 @@ class Pose():
 		sk = sorted(residues,
 			key=lambda k: (co.index(k[0]) if k[0] in co else 99, k[1]))
 		if mol == 'Protein':
-			self._importprotein(
-				residues, sk, filename, chain)
-		else:
-			self._importnucleotide(
-				residues, sk, mol)
+			self._importprotein(residues, sk, filename, chain)
+		else: self._importnucleotide(residues, sk, mol)
 		self._update()
 	def Export(self, filename):
 		''' Export structure to a .pdb or .cif file '''
@@ -1896,12 +1777,9 @@ class Pose():
 			self._buildprotein(sequence, chain)
 		elif fmt in ('DNA', 'RNA'):
 			self._buildnucleotide(sequence, fmt)
-		else:
-			raise Exception(
-				f'Unknown format: {fmt}')
+		else: raise Exception(f'Unknown format: {fmt}')
 		self.CalcCharge()
-		if fmt == 'Protein':
-			self.CalcSASA()
+		if fmt == 'Protein': self.CalcSASA()
 		self._update()
 	def ReBuild(self, sequence=None, D_AA=False, _mutated=None):
 		''' Rebuild a structure from internal coords '''
@@ -1919,13 +1797,10 @@ class Pose():
 		if mol == 'Protein':
 			AAs = self.data['Amino Acids']
 			if index not in AAs:
-				raise Exception(
-					f'Residue {index} not found')
+				raise Exception(f'Residue {index} not found')
 			ch = AAs[index][1]
 			fasta = self.data['FASTA']
-			chain_idxs = [i for i in
-				sorted(AAs)
-				if AAs[i][1] == ch]
+			chain_idxs = [i for i in sorted(AAs) if AAs[i][1] == ch]
 			pos = chain_idxs.index(index)
 			seq = list(fasta[ch])
 			seq[pos] = residue
@@ -1935,31 +1810,21 @@ class Pose():
 		elif mol in ('DNA', 'RNA'):
 			nts = self.data['Nucleotides']
 			if index not in nts:
-				raise Exception(
-					f'Nucleotide {index} '
-					f'not found')
+				raise Exception(f'Nucleotide {index} not found')
 			ch = nts[index][1]
 			fasta = self.data['FASTA']
-			chain_idxs = [i for i in
-				sorted(nts)
-				if nts[i][1] == ch]
+			chain_idxs = [i for i in sorted(nts) if nts[i][1] == ch]
 			pos = chain_idxs.index(index)
-			first_ch = sorted(
-				fasta.keys())[0]
+			first_ch = sorted(fasta.keys())[0]
 			seq = list(fasta[first_ch])
 			N = len(seq)
 			if ch == first_ch:
 				seq[pos] = residue.upper()
 			else:
-				comp = {'A':'T', 'T':'A',
-					'G':'C', 'C':'G',
-					'U':'A', 'A':'U'}
 				if self.data['Type'] == 'DNA':
-					comp = {'A':'T', 'T':'A',
-						'G':'C', 'C':'G'}
+					comp = {'A':'T', 'T':'A', 'G':'C', 'C':'G'}
 				else:
-					comp = {'A':'U', 'U':'A',
-						'G':'C', 'C':'G'}
+					comp = {'A':'U', 'U':'A', 'G':'C', 'C':'G'}
 				bp = N - 1 - pos
 				seq[bp] = comp.get(
 					residue.upper(),
@@ -1968,11 +1833,8 @@ class Pose():
 				v[1] for v in nts.values()))
 			mutated = {index}
 			if len(chains) > 1:
-				mutated.add(
-					2 * N - 1 - index)
-			self.ReBuild(
-				sequence=''.join(seq),
-				_mutated=mutated)
+				mutated.add(2 * N - 1 - index)
+			self.ReBuild(sequence=''.join(seq), _mutated=mutated)
 		else:
 			raise Exception(
 				'No structure loaded. '
