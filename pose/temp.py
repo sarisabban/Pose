@@ -2,13 +2,15 @@
 
 import os
 import re
+import sys
 import math
 import numpy as np
 
 np.seterr(all='ignore')
 
+
+
 class Molecule():
-	''' Data structure for an organic molecule '''
 	def __init__(self):
 		self.masses = {
 			'H':1.008, 'He':4.003, 'Li':6.941, 'Be':9.012,
@@ -39,6 +41,17 @@ class Molecule():
 			'Fr':223.020, 'Ra':226.025, 'Ac':227.028,
 			'Th':232.038, 'Pa':231.036, 'U':238.029,
 			'Np':237, 'Pu':244}
+		self.elements = {
+			'He', 'Li', 'Be', 'Ne', 'Na', 'Mg', 'Al', 'Si',
+			'Cl', 'Ar', 'Ca', 'Sc', 'Ti', 'Cr', 'Mn', 'Fe',
+			'Co', 'Ni', 'Cu', 'Zn', 'Ga', 'Ge', 'As', 'Se',
+			'Br', 'Kr', 'Rb', 'Sr', 'Zr', 'Nb', 'Mo', 'Tc',
+			'Ru', 'Rh', 'Pd', 'Ag', 'Cd', 'In', 'Sn', 'Sb',
+			'Te', 'Xe', 'Cs', 'Ba', 'La', 'Ce', 'Pr', 'Nd',
+			'Pm', 'Sm', 'Eu', 'Gd', 'Tb', 'Dy', 'Ho', 'Er',
+			'Tm', 'Yb', 'Lu', 'Hf', 'Ta', 'Re', 'Os', 'Ir',
+			'Pt', 'Au', 'Hg', 'Tl', 'Pb', 'Bi', 'Po', 'At',
+			'Rn', 'Fr', 'Ra', 'Ac', 'Th', 'Pa', 'Np', 'Pu'}
 		self.data = {
 			'Type':'Molecule', 'Energy':0,
 			'Rg':0, 'Mass':0,
@@ -47,8 +60,19 @@ class Molecule():
 			'Coordinates':np.zeros((0, 3))}
 		self._bond_orders = {}
 		self._formal_charges = {}
+	def _invalidate(self):
+		self.data['Rg'] = None
+		self.data['Energy'] = None
+	def _check_idx(self, *idxs):
+		n = len(self.data['Coordinates'])
+		for i in idxs:
+			if i < 0 or i >= n:
+				raise IndexError(
+					f'Atom index {i} out of'
+					f' range [0, {n})')
 	def _rotmat(self, theta, u):
-		''' Rodrigues rotation: axis u, angle theta deg '''
+		mg = np.linalg.norm(u)
+		if mg > 1e-10: u = u / mg
 		ux, uy, uz = u[0], u[1], u[2]
 		S = math.sin(math.radians(theta))
 		C = math.cos(math.radians(theta))
@@ -63,20 +87,20 @@ class Molecule():
 				uz*uy*(1-C)+ux*S,
 				C+uz**2*(1-C)]])
 	def _downstream(self, idx1, idx2):
-		''' BFS from idx2 not crossing edge to idx1 '''
+		if idx1 == idx2:
+			raise ValueError(
+				'_downstream: idx1 == idx2')
 		visited = {idx2}
 		queue = [idx2]
 		qi = 0
 		while qi < len(queue):
 			cur = queue[qi]; qi += 1
 			for nb in self.data['Bonds'].get(cur, []):
-				if nb == idx1 or nb in visited:
-					continue
+				if nb == idx1 or nb in visited: continue
 				visited.add(nb)
 				queue.append(nb)
 		return visited
 	def _place(self, C, B, A, length, angle, dih):
-		''' Z-matrix: place atom D bonded to C '''
 		bc = C - B
 		nm = np.linalg.norm(bc)
 		if nm > 1e-10: bc = bc / nm
@@ -97,8 +121,23 @@ class Molecule():
 			+ np.sin(angle) * (
 				np.cos(dih) * inp
 				+ np.sin(dih) * nv))
+	def _cif_tokenize(self, s):
+		tokens = []; i = 0; n = len(s)
+		while i < n:
+			if s[i] in (' ', '\t'):
+				i += 1; continue
+			if s[i] in ("'", '"'):
+				q = s[i]; j = i + 1
+				while j < n and s[j] != q: j += 1
+				tokens.append(s[i+1:j])
+				i = j + 1
+			else:
+				j = i
+				while j < n and s[j] not in (
+					' ', '\t'): j += 1
+				tokens.append(s[i:j]); i = j
+		return tokens
 	def _bond_len(self, e1, e2, order):
-		''' Idealised bond length in Angstroms '''
 		BL = {
 			('C','C',1):1.54, ('C','C',2):1.34,
 			('C','C',3):1.20, ('C','C',1.5):1.40,
@@ -118,11 +157,10 @@ class Molecule():
 			('P','O',1):1.63, ('P','O',2):1.48,
 			('B','H',1):1.19, ('B','O',1):1.36,
 			('B','C',1):1.56, ('B','N',1):1.42}
-		k1 = (e1, e2, order)
-		k2 = (e2, e1, order)
-		return BL.get(k1, BL.get(k2, 1.50))
+		return BL.get(
+			(e1, e2, order),
+			BL.get((e2, e1, order), 1.50))
 	def _formula(self):
-		''' Molecular formula in Hill system '''
 		counts = {}
 		for v in self.data['Atoms'].values():
 			e = v[1]
@@ -139,132 +177,176 @@ class Molecule():
 				e + (str(n) if n > 1 else ''))
 		self.data['Formula'] = ''.join(parts)
 	def Import(self, filename):
-		''' Import from PDB/CIF/SDF/MOL/XYZ/MOL2 '''
 		ext = os.path.splitext(filename)[1].lower()
 		with open(filename) as f: lines = f.readlines()
-		atoms = {}
-		coords = []
-		bonds = {}
-		bords = {}
-		idx = 0
+		atoms = {}; coords = []; bonds = {}
+		bords = {}; idx = 0
 		if ext == '.pdb':
 			for line in lines:
 				rec = line[:6].strip()
-				if rec not in ('ATOM', 'HETATM'):
-					continue
-				name = line[12:16].strip()
-				x = float(line[30:38])
-				y = float(line[38:46])
-				z = float(line[46:54])
-				el = (line[76:78].strip()
-					if len(line) > 76 else '')
-				if not el:
-					el = re.sub(
-						r'\d', '', name).strip()
-					if len(el) > 1:
-						el = (el[0].upper()
-							+ el[1:].lower())
-					else:
-						el = el.upper()
-				atoms[idx] = [name, el, 0.0]
-				coords.append([x, y, z])
-				bonds[idx] = []
-				idx += 1
+				if rec == 'ENDMDL': break
+				if rec in ('ATOM', 'HETATM'):
+					name = line[12:16].strip()
+					x = float(line[30:38])
+					y = float(line[38:46])
+					z = float(line[46:54])
+					el = (line[76:78].strip()
+						if len(line) > 76 else '')
+					if not el:
+						raw = line[12:16]
+						if (len(raw) >= 2
+							and raw[0].isalpha()):
+							cand = (
+								raw[0].upper()
+								+ raw[1].lower())
+							if cand in self.elements:
+								el = cand
+							else:
+								el = raw[0].upper()
+						else:
+							el = re.sub(
+								r'[\d\s]', '',
+								raw).strip()
+							if el:
+								el = el[0].upper()
+							else: el = 'X'
+					atoms[idx] = [name, el, 0.0]
+					coords.append([x, y, z])
+					bonds[idx] = []
+					idx += 1
+				elif rec == 'CONECT':
+					vals = [
+						int(line[k:k + 5])
+						for k in range(
+							6, len(line.rstrip()), 5)
+						if line[k:k + 5].strip()]
+					if vals:
+						a1 = vals[0] - 1
+						for v in vals[1:]:
+							a2 = v - 1
+							if (a1 < 0 or a2 < 0
+								or a1 >= idx
+								or a2 >= idx):
+								continue
+							if a2 not in bonds.get(
+								a1, []):
+								bonds.setdefault(
+									a1, []).append(a2)
+							if a1 not in bonds.get(
+								a2, []):
+								bonds.setdefault(
+									a2, []).append(a1)
+							k = (min(a1, a2),
+								max(a1, a2))
+							bords[k] = bords.get(
+								k, 0) + 1
+				normed = {}
+				for (a, b), bo in bords.items():
+					if bo > 3: bo = 3
+					normed[(a, b)] = bo
+					normed[(b, a)] = bo
+				bords = normed
 		elif ext == '.cif':
-			# Parse all loop_ sections
 			loops = []
-			cur_cols = []
-			cur_rows = []
-			in_loop = False
+			cur_cols = []; cur_rows = []
+			in_loop = False; in_semi = False
+			semi_buf = []
 			for line in lines:
 				s = line.strip()
+				if in_semi:
+					if s == ';':
+						in_semi = False
+						if (in_loop and cur_rows
+							and cur_cols):
+							cur_rows[-1].append(
+								'\n'.join(semi_buf))
+						semi_buf = []
+					else:
+						semi_buf.append(
+							line.rstrip())
+					continue
+				if s.startswith(';'):
+					in_semi = True
+					semi_buf = [s[1:]]
+					continue
 				if s.startswith('loop_'):
 					if in_loop and cur_cols:
 						loops.append(
 							(cur_cols, cur_rows))
-					cur_cols = []
-					cur_rows = []
-					in_loop = True
-					continue
+					cur_cols = []; cur_rows = []
+					in_loop = True; continue
 				if in_loop and s.startswith('_'):
-					cur_cols.append(s)
-					continue
+					cur_cols.append(s); continue
 				if in_loop and cur_cols:
-					if (not s
-						or s.startswith('#')
+					if (not s or s.startswith('#')
 						or s.startswith('loop_')):
 						loops.append(
 							(cur_cols, cur_rows))
-						cur_cols = []
-						cur_rows = []
-						in_loop = (
-							s.startswith('loop_'))
+						cur_cols = []; cur_rows = []
+						in_loop = s.startswith(
+							'loop_')
 						continue
-					cur_rows.append(s.split())
+					cur_rows.append(self._cif_tokenize(s))
 			if in_loop and cur_cols:
-				loops.append(
-					(cur_cols, cur_rows))
-			# Find atom loop
-			APFX = ('_atom_site.',
-				'_atom_site_',
-				'_chem_comp_atom.')
-			acols = None
-			arows = None
+				loops.append((cur_cols, cur_rows))
+			APFX = ('_atom_site.', '_atom_site_', '_chem_comp_atom.')
+			acols = arows = None
 			for cols, rows in loops:
 				if any(c.startswith(p)
-					for c in cols
-					for p in APFX):
-					acols = cols
-					arows = rows
-					break
+					for c in cols for p in APFX):
+					acols = cols; arows = rows; break
 			if acols and arows:
 				cm = {}
 				for i, c in enumerate(acols):
-					for p in APFX:
-						c = c.replace(p, '')
+					for p in APFX: c = c.replace(p, '')
 					cm[c.lower()] = i
-				xi = cm.get(
-					'cartn_x',
+				xi = cm.get('cartn_x',
 					cm.get('model_cartn_x',
 					cm.get('x')))
-				yi = cm.get(
-					'cartn_y',
+				yi = cm.get('cartn_y',
 					cm.get('model_cartn_y',
 					cm.get('y')))
-				zi = cm.get(
-					'cartn_z',
+				zi = cm.get('cartn_z',
 					cm.get('model_cartn_z',
 					cm.get('z')))
-				ei = cm.get(
-					'type_symbol',
+				ei = cm.get('type_symbol',
 					cm.get('symbol'))
-				ni = cm.get(
-					'atom_id',
+				ni = cm.get('atom_id',
 					cm.get('label_atom_id',
-					cm.get('label',
-					cm.get('id'))))
+					cm.get('label', cm.get('id'))))
+				if xi is None or yi is None \
+					or zi is None:
+					raise ValueError(
+						'CIF: coordinate columns'
+						' not found')
 				name_map = {}
-				for r in arows:
-					el = (r[ei]
-						if ei is not None
-						else 'C')
-					nm = (r[ni]
-						if ni is not None
-						else f'{el}{idx}')
+				for ri, r in enumerate(arows):
+					ncol = max(
+						xi, yi, zi,
+						ei if ei is not None else 0,
+						ni if ni is not None else 0
+					) + 1
+					if len(r) < ncol:
+						raise ValueError(
+							f'CIF atom row {ri}:'
+							f' expected {ncol}'
+							f' fields, got'
+							f' {len(r)}')
+					el = r[ei] if ei is not None \
+						else 'C'
+					nm = r[ni] if ni is not None \
+						else f'{el}{idx}'
 					x = float(r[xi])
 					y = float(r[yi])
 					z = float(r[zi])
 					atoms[idx] = [nm, el, 0.0]
 					coords.append([x, y, z])
 					bonds[idx] = []
-					name_map[nm] = idx
-					idx += 1
-			# Find bond loop
+					name_map[nm] = idx; idx += 1
 			BPFX = ('_chem_comp_bond.',)
 			for cols, rows in loops:
 				if not any(c.startswith(p)
-					for c in cols
-					for p in BPFX):
+					for c in cols for p in BPFX):
 					continue
 				bm = {}
 				for i, c in enumerate(cols):
@@ -276,67 +358,131 @@ class Molecule():
 				voi = bm.get('value_order')
 				if ai1 is None or ai2 is None:
 					continue
-				vom = {'SING': 1, 'DOUB': 2,
-					'TRIP': 3, 'AROM': 1.5}
+				vom = {'SING':1, 'DOUB':2,
+					'TRIP':3, 'AROM':1.5}
 				for r in rows:
-					n1 = r[ai1]
-					n2 = r[ai2]
+					n1, n2 = r[ai1], r[ai2]
 					if (n1 not in name_map
 						or n2 not in name_map):
 						continue
-					a1 = name_map[n1]
-					a2 = name_map[n2]
+					a1, a2 = name_map[n1], name_map[n2]
 					bo = (vom.get(r[voi], 1)
-						if voi is not None
-						else 1)
-					bonds[a1].append(a2)
-					bonds[a2].append(a1)
+						if voi is not None else 1)
+					if a2 not in bonds[a1]:
+						bonds[a1].append(a2)
+					if a1 not in bonds[a2]:
+						bonds[a2].append(a1)
 					bords[(a1, a2)] = bo
 					bords[(a2, a1)] = bo
 				break
 		elif ext in ('.sdf', '.mol'):
-			hdr = (lines[3]
-				if len(lines) > 3 else '')
-			na = int(hdr[0:3])
-			nb = int(hdr[3:6])
-			for i in range(na):
-				ln = lines[4 + i]
-				x = float(ln[0:10])
-				y = float(ln[10:20])
-				z = float(ln[20:30])
-				el = ln[31:34].strip()
-				atoms[idx] = [
-					f'{el}{idx}', el, 0.0]
-				coords.append([x, y, z])
-				bonds[idx] = []
-				idx += 1
-			bt_map = {1:1, 2:2, 3:3, 4:1.5}
-			for i in range(nb):
-				ln = lines[4 + na + i]
-				a1 = int(ln[0:3]) - 1
-				a2 = int(ln[3:6]) - 1
-				bt = int(ln[6:9])
-				bonds[a1].append(a2)
-				bonds[a2].append(a1)
-				bo = bt_map.get(bt, 1)
-				bords[(a1, a2)] = bo
-				bords[(a2, a1)] = bo
-		elif ext == '.xyz':
-			na = int(lines[0].strip())
-			for i in range(na):
-				parts = lines[2 + i].split()
-				el = parts[0]
-				if len(el) > 1:
-					el = (el[0].upper()
-						+ el[1:].lower())
-				x = float(parts[1])
-				y = float(parts[2])
-				z = float(parts[3])
-				atoms[idx] = [
-					f'{el}{idx}', el, 0.0]
-				coords.append([x, y, z])
-				bonds[idx] = []
-				idx += 1
+			if len(lines) < 4:
+				raise ValueError(
+					'SDF/MOL: file has fewer'
+					' than 4 lines')
+			hdr = lines[3]
+			if 'V3000' in hdr:
+				section = None
+				for li, line in enumerate(lines):
+					s = line.strip()
+					if 'BEGIN ATOM' in s:
+						section = 'ATOM'; continue
+					elif 'END ATOM' in s:
+						section = None; continue
+					elif 'BEGIN BOND' in s:
+						section = 'BOND'; continue
+					elif 'END BOND' in s:
+						section = None; continue
+					if not s.startswith('M  V30'):
+						continue
+					p = s[7:].split()
+					if section == 'ATOM':
+						if len(p) < 5:
+							raise ValueError(
+								f'V3000 atom line'
+								f' {li}: expected'
+								f' >=5 fields,'
+								f' got {len(p)}')
+						el = p[1]
+						x = float(p[2])
+						y = float(p[3])
+						z = float(p[4])
+						atoms[idx] = [
+							f'{el}{idx}',
+							el, 0.0]
+						coords.append([x, y, z])
+						bonds[idx] = []
+						idx += 1
+					elif section == 'BOND':
+						if len(p) < 4:
+							raise ValueError(
+								f'V3000 bond line'
+								f' {li}: expected'
+								f' >=4 fields,'
+								f' got {len(p)}')
+						bt = int(p[1])
+						a1 = int(p[2]) - 1
+						a2 = int(p[3]) - 1
+						if a2 not in bonds.get(
+							a1, []):
+							bonds.setdefault(
+								a1,
+								[]).append(a2)
+						if a1 not in bonds.get(
+							a2, []):
+							bonds.setdefault(
+								a2,
+								[]).append(a1)
+						bt_map = {
+							1:1, 2:2, 3:3, 4:1.5}
+						bo = bt_map.get(bt, 1)
+						bords[(a1, a2)] = bo
+						bords[(a2, a1)] = bo
+			else:
+				na = int(hdr[0:3])
+				nb = int(hdr[3:6])
+				if len(lines) < 4 + na + nb:
+					raise ValueError(
+						f'SDF/MOL: file has'
+						f' {len(lines)} lines but'
+						f' header declares'
+						f' {na} atoms + {nb}'
+						f' bonds')
+				for i in range(na):
+					ln = lines[4 + i]
+					if len(ln) < 34:
+						raise ValueError(
+							f'SDF atom line'
+							f' {4+i}: too short'
+							f' ({len(ln)} chars)')
+					x = float(ln[0:10])
+					y = float(ln[10:20])
+					z = float(ln[20:30])
+					el = ln[31:34].strip()
+					atoms[idx] = [
+						f'{el}{idx}', el, 0.0]
+					coords.append([x, y, z])
+					bonds[idx] = []; idx += 1
+				bt_map = {1:1, 2:2, 3:3, 4:1.5}
+				for i in range(nb):
+					ln = lines[4 + na + i]
+					if len(ln) < 9:
+						raise ValueError(
+							f'SDF bond line'
+							f' {4+na+i}:'
+							f' too short'
+							f' ({len(ln)}'
+							f' chars)')
+					a1 = int(ln[0:3]) - 1
+					a2 = int(ln[3:6]) - 1
+					bt = int(ln[6:9])
+					if a2 not in bonds[a1]:
+						bonds[a1].append(a2)
+					if a1 not in bonds[a2]:
+						bonds[a2].append(a1)
+					bo = bt_map.get(bt, 1)
+					bords[(a1, a2)] = bo
+					bords[(a2, a1)] = bo
 		elif ext == '.mol2':
 			section = None
 			for line in lines:
@@ -346,28 +492,41 @@ class Molecule():
 				if not s: continue
 				if section == '@<TRIPOS>ATOM':
 					p = s.split()
+					if len(p) < 6:
+						raise ValueError(
+							f'MOL2 ATOM: expected'
+							f' >=6 fields, got'
+							f' {len(p)}')
 					nm = p[1]
-					x = float(p[2])
-					y = float(p[3])
-					z = float(p[4])
-					at = p[5]
-					el = at.split('.')[0]
+					x, y, z = (
+						float(p[2]),
+						float(p[3]),
+						float(p[4]))
+					el = p[5].split('.')[0]
 					if len(el) > 1:
-						el = (el[0].upper()
-							+ el[1:].lower())
+						el = el[0].upper() \
+							+ el[1:].lower()
 					ch = (float(p[8])
 						if len(p) > 8 else 0.0)
 					atoms[idx] = [nm, el, ch]
 					coords.append([x, y, z])
-					bonds[idx] = []
-					idx += 1
+					bonds[idx] = []; idx += 1
 				elif section == '@<TRIPOS>BOND':
 					p = s.split()
+					if len(p) < 4:
+						raise ValueError(
+							f'MOL2 BOND: expected'
+							f' >=4 fields, got'
+							f' {len(p)}')
 					a1 = int(p[1]) - 1
 					a2 = int(p[2]) - 1
 					bt = p[3]
-					bonds[a1].append(a2)
-					bonds[a2].append(a1)
+					if a2 not in bonds.get(a1, []):
+						bonds.setdefault(
+							a1, []).append(a2)
+					if a1 not in bonds.get(a2, []):
+						bonds.setdefault(
+							a2, []).append(a1)
 					bm = {'1':1, '2':2, '3':3,
 						'ar':1.5, 'am':1}
 					bo = bm.get(bt, 1)
@@ -376,56 +535,55 @@ class Molecule():
 		else:
 			raise Exception(
 				f'Unsupported format: {ext}')
-		# Infer bonds from distances if needed
 		has_bonds = any(bonds[i] for i in bonds)
-		if not has_bonds and ext in (
-			'.pdb', '.cif', '.xyz'):
-			c = np.array(coords)
-			n = len(c)
+		if not has_bonds and ext in ('.pdb', '.cif'):
+			c = np.array(coords); n = len(c)
 			if n > 0:
-				dm = np.sqrt(
-					((c[:, None, :]
-					- c[None, :, :]) ** 2
-					).sum(2))
 				els = [atoms[i][1]
 					for i in range(n)]
-				for i in range(n):
-					for j in range(i + 1, n):
-						ei, ej = els[i], els[j]
-						th = 1.9
-						if ei == 'H' or ej == 'H':
-							th = 1.3
-						elif (ei in ('S', 'Se')
-							or ej in ('S', 'Se')):
-							th = 2.1
-						if 0 < dm[i][j] < th:
-							bonds[i].append(j)
-							bonds[j].append(i)
-							d = dm[i][j]
-							bo = 1
-							pr = tuple(sorted(
-								[ei, ej]))
-							if pr == ('C', 'C'):
-								if d < 1.27:
-									bo = 3
-								elif d < 1.42:
-									bo = 2
-							elif pr == ('C', 'N'):
-								if d < 1.20:
-									bo = 3
-								elif d < 1.35:
-									bo = 2
-							elif pr == ('C', 'O'):
-								if d < 1.30:
-									bo = 2
-							elif pr == ('N', 'N'):
-								if d < 1.30:
-									bo = 2
-							elif pr == ('N', 'O'):
-								if d < 1.30:
-									bo = 2
-							bords[(i, j)] = bo
-							bords[(j, i)] = bo
+				MAX_D = 2.2
+				try:
+					from scipy.spatial import (
+						cKDTree)
+					tree = cKDTree(c)
+					pairs = tree.query_pairs(MAX_D)
+				except ImportError:
+					pairs = set()
+					for i in range(n):
+						for j in range(i+1, n):
+							d = np.linalg.norm(
+								c[i] - c[j])
+							if d < MAX_D:
+								pairs.add((i, j))
+				for i, j in pairs:
+					ei, ej = els[i], els[j]
+					th = 1.9
+					if ei == 'H' or ej == 'H':
+						th = 1.3
+					elif (ei in ('S', 'Se')
+						or ej in ('S', 'Se')):
+						th = 2.1
+					d = np.linalg.norm(
+						c[i] - c[j])
+					if not (0 < d < th): continue
+					bonds[i].append(j)
+					bonds[j].append(i)
+					bo = 1
+					pr = tuple(sorted([ei, ej]))
+					if pr == ('C', 'C'):
+						if d < 1.27: bo = 3
+						elif d < 1.42: bo = 2
+					elif pr == ('C', 'N'):
+						if d < 1.20: bo = 3
+						elif d < 1.35: bo = 2
+					elif pr == ('C', 'O'):
+						if d < 1.30: bo = 2
+					elif pr == ('N', 'N'):
+						if d < 1.30: bo = 2
+					elif pr == ('N', 'O'):
+						if d < 1.30: bo = 2
+					bords[(i, j)] = bo
+					bords[(j, i)] = bo
 		self.data['Atoms'] = atoms
 		self.data['Bonds'] = bonds
 		self.data['Coordinates'] = (
@@ -440,13 +598,17 @@ class Molecule():
 		self.CalcSMILES()
 		self.CalcSMARTS()
 	def Export(self, filename):
-		''' Export to PDB/CIF/SDF/MOL/XYZ/MOL2 '''
 		ext = os.path.splitext(filename)[1].lower()
 		A = self.data['Atoms']
 		C = self.data['Coordinates']
 		B = self.data['Bonds']
 		with open(filename, 'w') as f:
 			if ext == '.pdb':
+				if len(A) > 99999:
+					raise ValueError(
+						f'PDB format: {len(A)}'
+						f' atoms exceeds 99999'
+						f' serial limit')
 				for i in sorted(A):
 					a = A[i]; c = C[i]
 					nm = a[0]
@@ -455,12 +617,20 @@ class Molecule():
 						f'HETATM{i+1:>5} '
 						f'{nm:<4} LIG A'
 						f'   1    '
-						f'{c[0]:>8.3f}'
-						f'{c[1]:>8.3f}'
-						f'{c[2]:>8.3f}'
+						f'{c[0]:>8.4f}'
+						f'{c[1]:>8.4f}'
+						f'{c[2]:>8.4f}'
 						f'  1.00  0.00'
 						f'          '
 						f'{a[1]:>2}\n')
+				for i in sorted(B):
+					row = [i + 1] + [j+1 for j in B[i]]
+					for k in range(0, len(row), 5):
+						chunk = row[k:k + 5]
+						line = f'CONECT{chunk[0]:>5}'
+						for v in chunk[1:]:
+							line += f'{v:>5}'
+						f.write(line + '\n')
 				f.write('END\n')
 			elif ext == '.cif':
 				f.write('data_molecule\nloop_\n')
@@ -476,16 +646,41 @@ class Molecule():
 					a = A[i]; c = C[i]
 					f.write(
 						f'{i+1} {a[1]} {a[0]} '
-						f'{c[0]:.3f} '
-						f'{c[1]:.3f} '
-						f'{c[2]:.3f}\n')
+						f'{c[0]:.4f} '
+						f'{c[1]:.4f} '
+						f'{c[2]:.4f}\n')
+				bp = set()
+				for i in sorted(B):
+					for j in B[i]:
+						if i < j: bp.add((i, j))
+				if bp:
+					bm = {1:'SING', 2:'DOUB',
+						3:'TRIP', 1.5:'AROM'}
+					f.write('loop_\n')
+					for h in (
+						'_chem_comp_bond.atom_id_1',
+						'_chem_comp_bond.atom_id_2',
+						'_chem_comp_bond.'
+						'value_order'):
+						f.write(h + '\n')
+					for i, j in sorted(bp):
+						bo = self._bond_orders.get(
+							(i, j), 1)
+						f.write(
+							f'{A[i][0]} {A[j][0]}'
+							f' {bm.get(bo,"SING")}\n')
 			elif ext in ('.sdf', '.mol'):
 				bp = set()
 				for i in sorted(B):
 					for j in B[i]:
 						if i < j: bp.add((i, j))
-				na = len(A)
-				nb = len(bp)
+				na = len(A); nb = len(bp)
+				if na > 999 or nb > 999:
+					raise ValueError(
+						f'SDF V2000 limit:'
+						f' {na} atoms,'
+						f' {nb} bonds'
+						f' (max 999 each)')
 				nm = self.data['SMILES'] or ''
 				f.write(f'{nm}\n')
 				f.write('     Molecule\n\n')
@@ -507,31 +702,24 @@ class Molecule():
 				for i, j in sorted(bp):
 					bo = self._bond_orders.get(
 						(i, j), 1)
-					bt = bm.get(bo, 1)
 					f.write(
 						f'{i+1:>3}{j+1:>3}'
-						f'{bt:>3}'
+						f'{bm.get(bo, 1):>3}'
 						'  0  0  0  0\n')
 				f.write('M  END\n$$$$\n')
-			elif ext == '.xyz':
-				f.write(f'{len(A)}\n')
-				f.write(
-					f'{self.data["SMILES"] or ""}'
-					'\n')
-				for i in sorted(A):
-					a = A[i]; c = C[i]
-					f.write(
-						f'{a[1]:<2}'
-						f' {c[0]:>12.6f}'
-						f' {c[1]:>12.6f}'
-						f' {c[2]:>12.6f}\n')
 			elif ext == '.mol2':
 				bp = set()
 				for i in sorted(B):
 					for j in B[i]:
 						if i < j: bp.add((i, j))
-				na = len(A)
-				nb = len(bp)
+				na = len(A); nb = len(bp)
+				mbo = {i: 0 for i in A}
+				for (a1, a2), bo in \
+					self._bond_orders.items():
+					if a1 in mbo and bo > mbo[a1]:
+						mbo[a1] = bo
+					if a2 in mbo and bo > mbo[a2]:
+						mbo[a2] = bo
 				f.write('@<TRIPOS>MOLECULE\n')
 				nm = self.data['SMILES'] or 'MOL'
 				f.write(f'{nm}\n')
@@ -539,482 +727,90 @@ class Molecule():
 				f.write('@<TRIPOS>ATOM\n')
 				for i in sorted(A):
 					a = A[i]; c = C[i]
+					el = a[1]
+					mb = mbo.get(i, 0)
+					if el in ('C', 'N', 'O', 'S'):
+						if mb >= 3:
+							st = el + '.1'
+						elif mb == 1.5:
+							st = el + '.ar'
+						elif mb >= 2:
+							st = el + '.2'
+						else:
+							st = el + '.3'
+					else: st = el
 					f.write(
 						f'{i+1:>4} {a[0]:<4}'
 						f' {c[0]:>10.4f}'
 						f' {c[1]:>10.4f}'
 						f' {c[2]:>10.4f}'
-						f' {a[1]:<4}'
+						f' {st:<6}'
 						f' 1 LIG'
 						f' {a[2]:.4f}\n')
 				f.write('@<TRIPOS>BOND\n')
-				bm = {1:'1', 2:'2', 3:'3',
-					1.5:'ar'}
+				bm = {1:'1', 2:'2', 3:'3', 1.5:'ar'}
 				for bi, (i, j) in enumerate(
 					sorted(bp), 1):
 					bo = self._bond_orders.get(
 						(i, j), 1)
-					bt = bm.get(bo, '1')
 					f.write(
 						f'{bi:>4} {i+1:>4}'
-						f' {j+1:>4} {bt}\n')
+						f' {j+1:>4}'
+						f' {bm.get(bo, "1")}\n')
 			else:
 				raise Exception(
 					f'Unsupported format: {ext}')
-	def Build(self, smiles):
-		''' Build molecule from SMILES string '''
-		self._bond_orders = {}
-		self._formal_charges = {}
-		# Phase 1: Tokenize
-		pat = re.compile(
-			r'(\[[^\[\]]*\])'
-			r'|(Cl|Br|[BCNOPSFIbcnops])'
-			r'|(\%\d{2}|\d)'
-			r'|([-=#:\\/])'
-			r'|([()])')
-		tokens = [m.group()
-			for m in pat.finditer(smiles)]
-		# Phase 2: Parse tokens
-		atoms = []
-		blist = []
-		stack = []
-		ring_opens = {}
-		prev = None
-		nxbo = None
-		ORG = {
-			'B', 'C', 'N', 'O', 'P', 'S', 'F',
-			'I', 'Cl', 'Br',
-			'b', 'c', 'n', 'o', 'p', 's'}
-		for tok in tokens:
-			if tok == '(':
-				stack.append(prev)
-				nxbo = None
-				continue
-			if tok == ')':
-				prev = stack.pop()
-				nxbo = None
-				continue
-			if tok in ('-', '=', '#', ':', '/', '\\'):
-				nxbo = {
-					'-':1, '=':2, '#':3,
-					':':1.5, '/':1, '\\':1}[tok]
-				continue
-			if re.fullmatch(r'\d|\%\d{2}', tok):
-				bo = (nxbo if nxbo is not None
-					else 1)
-				nxbo = None
-				if tok in ring_opens:
-					i, bo0 = ring_opens.pop(tok)
-					fb = bo if bo != 1 else bo0
-					blist.append((i, prev, fb))
-				else:
-					ring_opens[tok] = (prev, bo)
-				continue
-			# Atom token
-			if tok.startswith('['):
-				inner = tok[1:-1]
-				m = re.match(r'^(\d+)', inner)
-				if m: inner = inner[m.end():]
-				em = re.match(
-					r'^([A-Z][a-z]?)', inner)
-				if not em:
-					em = re.match(
-						r'^([a-z])', inner)
-				el = em.group(1).capitalize()
-				ar = em.group(1).islower()
-				inner = inner[em.end():]
-				chi = None
-				if inner.startswith('@@'):
-					chi = '@@'
-					inner = inner[2:]
-				elif inner.startswith('@'):
-					chi = '@'
-					inner = inner[1:]
-				hc = 0
-				hm = re.match(
-					r'^H(\d*)', inner)
-				if hm:
-					hc = (int(hm.group(1))
-						if hm.group(1) else 1)
-					inner = inner[hm.end():]
-				chg = 0
-				cm = re.match(
-					r'^([+\-])(\d*)', inner)
-				if cm:
-					sgn = (1
-						if cm.group(1) == '+'
-						else -1)
-					mg = (int(cm.group(2))
-						if cm.group(2) else 1)
-					chg = sgn * mg
-				props = {
-					'element': el,
-					'aromatic': ar,
-					'chirality': chi,
-					'hcount': hc,
-					'charge': chg,
-					'bracket': True}
-			elif (tok in ORG
-				or tok.capitalize() in ORG):
-				el = tok.capitalize()
-				ar = tok.islower()
-				props = {
-					'element': el,
-					'aromatic': ar,
-					'chirality': None,
-					'hcount': -1,
-					'charge': 0,
-					'bracket': False}
-			else:
-				continue
-			idx = len(atoms)
-			props['idx'] = idx
-			atoms.append(props)
-			if prev is not None:
-				bo = nxbo
-				if bo is None:
-					bo = (1.5
-						if atoms[prev]['aromatic']
-						and props['aromatic']
-						else 1)
-				blist.append((prev, idx, bo))
-			nxbo = None
-			prev = idx
-		# Phase 3: Add implicit H
-		VAL = {
-			'B':3, 'C':4, 'N':3, 'O':2,
-			'P':3, 'S':2, 'F':1, 'Cl':1,
-			'Br':1, 'I':1}
-		bsum = {a['idx']: 0.0 for a in atoms}
-		for i, j, bo in blist:
-			bsum[i] += bo
-			bsum[j] += bo
-		for a in list(atoms):
-			if a['element'] == 'H': continue
-			if a['bracket']:
-				nh = a['hcount']
-			else:
-				v = VAL.get(a['element'], 0)
-				nh = max(0,
-					int(v - bsum[a['idx']]))
-			for _ in range(nh):
-				hi = len(atoms)
-				atoms.append({
-					'idx': hi, 'element': 'H',
-					'aromatic': False,
-					'chirality': None,
-					'hcount': 0, 'charge': 0,
-					'bracket': True})
-				blist.append((a['idx'], hi, 1))
-		# Phase 4: Hybridize
-		maxbo = {a['idx']: 0 for a in atoms}
-		for i, j, bo in blist:
-			if bo > maxbo[i]: maxbo[i] = bo
-			if bo > maxbo[j]: maxbo[j] = bo
-		for a in atoms:
-			if maxbo[a['idx']] >= 3:
-				a['hyb'] = 'sp'
-			elif (maxbo[a['idx']] >= 1.5
-				or a['aromatic']):
-				a['hyb'] = 'sp2'
-			else:
-				a['hyb'] = 'sp3'
-		# Phase 5: Find rings (iterative DFS)
-		hvy = {a['idx'] for a in atoms
-			if a['element'] != 'H'}
-		adj_h = {i: [] for i in hvy}
-		for i, j, _ in blist:
-			if i in hvy and j in hvy:
-				adj_h[i].append(j)
-				adj_h[j].append(i)
-		found = []
-		vis = {}
-		on_s = set()
-		for st in sorted(hvy):
-			if st in vis: continue
-			stk = [(st, -1, 0)]
-			path = []
-			while stk:
-				nd, pr, ni = stk[-1]
-				nbs = adj_h.get(nd, [])
-				if ni == 0:
-					vis[nd] = pr
-					on_s.add(nd)
-					path.append(nd)
-				if ni < len(nbs):
-					stk[-1] = (nd, pr, ni + 1)
-					nb = nbs[ni]
-					if nb != pr and nb in on_s:
-						ci = path.index(nb)
-						found.append(
-							list(path[ci:]))
-					elif (nb != pr
-						and nb not in vis):
-						stk.append(
-							(nb, nd, 0))
-				else:
-					path.pop()
-					on_s.discard(nd)
-					stk.pop()
-		rings = []
-		seen_r = set()
-		for r in sorted(found, key=len):
-			k = frozenset(r)
-			if k not in seen_r:
-				seen_r.add(k)
-				rings.append(r)
-		# Phase 6: 3D coordinate generation
-		# Use RDKit ETKDG + MMFF94 if available,
-		# fall back to distance geometry
-		N = len(atoms)
-		try:
-			from rdkit import Chem
-			from rdkit.Chem import AllChem
-			mol = Chem.MolFromSmiles(smiles)
-			mol = Chem.AddHs(mol)
-			ps = AllChem.ETKDGv3()
-			ps.randomSeed = 42
-			AllChem.EmbedMolecule(mol, ps)
-			AllChem.MMFFOptimizeMolecule(mol)
-			conf = mol.GetConformer()
-			# Map RDKit atoms to our atoms
-			# by matching element + order
-			coords = []
-			for i in range(mol.GetNumAtoms()):
-				p = conf.GetAtomPosition(i)
-				coords.append(np.array(
-					[p.x, p.y, p.z]))
-		except Exception:
-			# Fallback: distance geometry
-			aix = {a['idx']: a for a in atoms}
-			adj = {a['idx']: [] for a in atoms}
-			bom = {}
-			for i, j, bo in blist:
-				adj[i].append(j)
-				adj[j].append(i)
-				bom[(i, j)] = bo
-				bom[(j, i)] = bo
-			bl_ij = {}
-			for i, j, bo in blist:
-				d = self._bond_len(
-					aix[i]['element'],
-					aix[j]['element'], bo)
-				bl_ij[(i, j)] = d
-				bl_ij[(j, i)] = d
-			bset = set()
-			for i, j, bo in blist:
-				bset.add((min(i,j), max(i,j)))
-			sp = {}
-			for s in range(N):
-				dist = {s: 0}
-				que = [s]
-				qi = 0
-				while qi < len(que):
-					c = que[qi]; qi += 1
-					for nb in adj[c]:
-						if nb not in dist:
-							dist[nb] = dist[c]+1
-							que.append(nb)
-				sp[s] = dist
-			HA = {'sp': math.radians(180.),
-				'sp2': math.radians(120.),
-				'sp3': math.radians(109.5)}
-			lo = np.full((N, N), 0.0)
-			hi = np.full((N, N), 100.0)
-			np.fill_diagonal(hi, 0.0)
-			for i, j, bo in blist:
-				d = bl_ij[(i, j)]
-				lo[i][j] = lo[j][i] = d*0.98
-				hi[i][j] = hi[j][i] = d*1.02
-			for b in range(N):
-				nbs = adj[b]
-				for ii in range(len(nbs)):
-					for jj in range(ii+1,
-						len(nbs)):
-						a, c = nbs[ii], nbs[jj]
-						ang = HA[aix[b].get(
-							'hyb', 'sp3')]
-						da = bl_ij.get(
-							(a, b), 1.5)
-						dc = bl_ij.get(
-							(b, c), 1.5)
-						d13 = math.sqrt(
-							da**2 + dc**2
-							- 2*da*dc
-							* math.cos(ang))
-						lo[a][c] = d13*0.95
-						lo[c][a] = d13*0.95
-						hi[a][c] = d13*1.05
-						hi[c][a] = d13*1.05
-			VDW = {'H':1.2, 'C':1.7,
-				'N':1.55, 'O':1.52,
-				'S':1.8, 'P':1.8,
-				'F':1.47, 'Cl':1.75,
-				'Br':1.85, 'I':1.98}
-			for i in range(N):
-				ri = VDW.get(
-					aix[i]['element'], 1.7)
-				for j in range(i+1, N):
-					if hi[i][j] < 99: continue
-					rj = VDW.get(
-						aix[j]['element'], 1.7)
-					lo[i][j] = max(lo[i][j],
-						ri + rj - 0.5)
-					lo[j][i] = lo[i][j]
-					plen = sp[i].get(j, 10)
-					hi[i][j] = min(hi[i][j],
-						plen * 1.5)
-					hi[j][i] = hi[i][j]
-			for k in range(N):
-				for i in range(N):
-					if i == k: continue
-					for j in range(i+1, N):
-						if j == k: continue
-						ub = hi[i][k]+hi[k][j]
-						if ub < hi[i][j]:
-							hi[i][j] = ub
-							hi[j][i] = ub
-						lb = (lo[i][k]
-							- hi[k][j])
-						if lb > lo[i][j]:
-							lo[i][j] = lb
-							lo[j][i] = lb
-			lo = np.minimum(lo, hi)
-			rng = np.random.default_rng(42)
-			D = np.zeros((N, N))
-			for i in range(N):
-				for j in range(i+1, N):
-					lb = max(lo[i][j], 0.01)
-					ub = max(hi[i][j], lb)
-					D[i][j] = rng.uniform(
-						lb, ub)
-					D[j][i] = D[i][j]
-			D2 = D ** 2
-			Hm = (np.eye(N)
-				- np.ones((N, N)) / N)
-			G = -0.5 * Hm @ D2 @ Hm
-			ev, evc = np.linalg.eigh(G)
-			ix = np.argsort(ev)[::-1]
-			ev = np.maximum(ev[ix[:3]], 0)
-			ca = evc[:, ix[:3]] * np.sqrt(ev)
-			# Refinement
-			for _ in range(500):
-				for i, j, bo in blist:
-					dv = ca[j] - ca[i]
-					d = np.linalg.norm(dv)
-					if d < 0.01: continue
-					ideal = bl_ij[(i, j)]
-					er = ((d - ideal)
-						* 0.4 * dv / d)
-					ca[i] += er
-					ca[j] -= er
-				for i in range(N):
-					for j in range(i+1, N):
-						if (min(i,j),
-							max(i,j)) in bset:
-							continue
-						dv = ca[j] - ca[i]
-						d = np.linalg.norm(dv)
-						mn = lo[i][j]
-						if d < mn and d > 0.01:
-							ps = ((mn - d)
-								* 0.2 * dv / d)
-							ca[i] -= ps
-							ca[j] += ps
-			coords = [ca[i] for i in range(N)]
-		# Phase 7: Populate self.data
-		self.data = {
-			'Type': 'Molecule',
-			'Energy': None,
-			'Rg': None, 'Mass': None,
-			'SMILES': smiles,
-			'Formula': None,
-			'Atoms': {}, 'Bonds': {},
-			'Coordinates': np.array(coords)}
-		for a in atoms:
-			i = a['idx']
-			el = a['element']
-			self.data['Atoms'][i] = [
-				f'{el}{i}', el, 0.0]
-			self._formal_charges[i] = a.get(
-				'charge', 0)
-		for i in range(N):
-			self.data['Bonds'][i] = []
-		for i, j, bo in blist:
-			self.data['Bonds'][i].append(j)
-			self.data['Bonds'][j].append(i)
-			self._bond_orders[(i, j)] = bo
-			self._bond_orders[(j, i)] = bo
-		# Finalize
-		self.CalcCharge()
-		self.CalcMass()
-		self.CalcRg()
-		self._formula()
-		self.CalcSMILES()
-		self.CalcSMARTS()
 	def CalcSMILES(self):
-		''' Convert molecular graph to SMILES '''
 		A = self.data['Atoms']
 		B = self.data['Bonds']
 		heavy = sorted(
-			i for i, v in A.items()
-			if v[1] != 'H')
+			i for i, v in A.items() if v[1] != 'H')
 		if not heavy:
-			self.data['SMILES'] = ''
-			return ''
+			self.data['SMILES'] = ''; return ''
 		hs = set(heavy)
 		adj = {i: [j for j in B.get(i, [])
 			if j in hs] for i in heavy}
-		hcount = {i: sum(
-			1 for j in B.get(i, [])
+		hcount = {i: sum(1 for j in B.get(i, [])
 			if A[j][1] == 'H') for i in heavy}
-		# Spanning tree via DFS
 		visited = set()
 		parent = {}
 		children = {i: [] for i in heavy}
 		roots = []
 		for s in heavy:
 			if s in visited: continue
-			roots.append(s)
-			visited.add(s)
+			roots.append(s); visited.add(s)
 			stk = [s]
 			while stk:
-				node = stk[-1]
-				pushed = False
+				node = stk[-1]; pushed = False
 				for nb in adj[node]:
 					if nb not in visited:
 						visited.add(nb)
 						parent[nb] = node
 						children[node].append(nb)
 						stk.append(nb)
-						pushed = True
-						break
+						pushed = True; break
 				if not pushed: stk.pop()
-		# Back edges
 		te = set()
 		for n, p in parent.items():
 			te.add(frozenset((n, p)))
 		back = []
 		for i in heavy:
 			for j in adj[i]:
-				if (i < j
-					and frozenset((i, j))
-					not in te):
+				if i < j and frozenset((i, j)) \
+					not in te:
 					back.append((i, j))
 		ring_at = {}
 		for d, (a, b) in enumerate(back, 1):
 			bo = self._bond_orders.get(
 				(a, b),
-				self._bond_orders.get(
-					(b, a), 1))
+				self._bond_orders.get((b, a), 1))
 			ring_at.setdefault(
 				a, []).append((d, bo))
 			ring_at.setdefault(
 				b, []).append((d, bo))
 		seen_d = set()
 		def tok(i):
-			el = A[i][1]
-			nh = hcount[i]
+			el = A[i][1]; nh = hcount[i]
 			q = self._formal_charges.get(i, 0)
 			s = '[' + el
 			if nh:
@@ -1029,11 +825,11 @@ class Molecule():
 			return s + ']'
 		def gen(node):
 			s = tok(node)
-			for d, bo in ring_at.get(
-				node, []):
+			for d, bo in ring_at.get(node, []):
 				if d not in seen_d:
 					if bo == 2: s += '='
 					elif bo == 3: s += '#'
+					elif bo == 1.5: s += ':'
 				seen_d.add(d)
 				s += (str(d) if d < 10
 					else f'%{d:02d}')
@@ -1046,34 +842,52 @@ class Molecule():
 				bsym = ''
 				if bo == 2: bsym = '='
 				elif bo == 3: bsym = '#'
+				elif bo == 1.5: bsym = ':'
 				if i < len(ch) - 1:
-					s += ('(' + bsym
-						+ gen(c) + ')')
+					s += '(' + bsym + gen(c) + ')'
 				else:
 					s += bsym + gen(c)
 			return s
-		result = '.'.join(
-			gen(r) for r in roots)
+		lim = sys.getrecursionlimit()
+		need = len(heavy) + 100
+		if need > lim:
+			sys.setrecursionlimit(need)
+		result = '.'.join(gen(r) for r in roots)
+		sys.setrecursionlimit(lim)
 		self.data['SMILES'] = result
 		return result
 	def CalcSMARTS(self):
-		''' Convert molecular graph to SMARTS '''
 		ANUM = {
 			'H':1, 'He':2, 'Li':3, 'Be':4,
 			'B':5, 'C':6, 'N':7, 'O':8,
 			'F':9, 'Ne':10, 'Na':11, 'Mg':12,
 			'Al':13, 'Si':14, 'P':15, 'S':16,
 			'Cl':17, 'Ar':18, 'K':19, 'Ca':20,
-			'Fe':26, 'Cu':29, 'Zn':30,
-			'Se':34, 'Br':35, 'I':53}
+			'Sc':21, 'Ti':22, 'V':23, 'Cr':24,
+			'Mn':25, 'Fe':26, 'Co':27, 'Ni':28,
+			'Cu':29, 'Zn':30, 'Ga':31, 'Ge':32,
+			'As':33, 'Se':34, 'Br':35, 'Kr':36,
+			'Rb':37, 'Sr':38, 'Y':39, 'Zr':40,
+			'Nb':41, 'Mo':42, 'Tc':43, 'Ru':44,
+			'Rh':45, 'Pd':46, 'Ag':47, 'Cd':48,
+			'In':49, 'Sn':50, 'Sb':51, 'Te':52,
+			'I':53, 'Xe':54, 'Cs':55, 'Ba':56,
+			'La':57, 'Ce':58, 'Pr':59, 'Nd':60,
+			'Pm':61, 'Sm':62, 'Eu':63, 'Gd':64,
+			'Tb':65, 'Dy':66, 'Ho':67, 'Er':68,
+			'Tm':69, 'Yb':70, 'Lu':71, 'Hf':72,
+			'Ta':73, 'W':74, 'Re':75, 'Os':76,
+			'Ir':77, 'Pt':78, 'Au':79, 'Hg':80,
+			'Tl':81, 'Pb':82, 'Bi':83, 'Po':84,
+			'At':85, 'Rn':86, 'Fr':87, 'Ra':88,
+			'Ac':89, 'Th':90, 'Pa':91, 'U':92,
+			'Np':93, 'Pu':94}
 		A = self.data['Atoms']
 		B = self.data['Bonds']
 		heavy = sorted(
-			i for i, v in A.items()
-			if v[1] != 'H')
+			i for i, v in A.items() if v[1] != 'H')
 		if not heavy:
-			self.data['SMILES'] = ''
-			return ''
+			self.data['SMARTS'] = ''; return ''
 		hs = set(heavy)
 		adj = {i: [j for j in B.get(i, [])
 			if j in hs] for i in heavy}
@@ -1083,21 +897,17 @@ class Molecule():
 		roots = []
 		for s in heavy:
 			if s in visited: continue
-			roots.append(s)
-			visited.add(s)
+			roots.append(s); visited.add(s)
 			stk = [s]
 			while stk:
-				node = stk[-1]
-				pushed = False
+				node = stk[-1]; pushed = False
 				for nb in adj[node]:
 					if nb not in visited:
 						visited.add(nb)
 						parent[nb] = node
-						children[node].append(
-							nb)
+						children[node].append(nb)
 						stk.append(nb)
-						pushed = True
-						break
+						pushed = True; break
 				if not pushed: stk.pop()
 		te = set()
 		for n, p in parent.items():
@@ -1105,16 +915,14 @@ class Molecule():
 		back = []
 		for i in heavy:
 			for j in adj[i]:
-				if (i < j
-					and frozenset((i, j))
-					not in te):
+				if i < j and frozenset((i, j)) \
+					not in te:
 					back.append((i, j))
 		ring_at = {}
 		for d, (a, b) in enumerate(back, 1):
 			bo = self._bond_orders.get(
 				(a, b),
-				self._bond_orders.get(
-					(b, a), 1))
+				self._bond_orders.get((b, a), 1))
 			ring_at.setdefault(
 				a, []).append((d, bo))
 			ring_at.setdefault(
@@ -1123,10 +931,8 @@ class Molecule():
 		def gen(node):
 			el = A[node][1]
 			an = ANUM.get(el, 0)
-			s = (f'[#{an}]' if an
-				else f'[{el}]')
-			for d, bo in ring_at.get(
-				node, []):
+			s = f'[#{an}]' if an else f'[{el}]'
+			for d, bo in ring_at.get(node, []):
 				if d not in seen_d:
 					if bo == 1: s += '-'
 					elif bo == 2: s += '='
@@ -1146,34 +952,38 @@ class Molecule():
 				elif bo == 3: bsym = '#'
 				elif bo == 1.5: bsym = ':'
 				if i < len(ch) - 1:
-					s += ('(' + bsym
-						+ gen(c) + ')')
+					s += '(' + bsym + gen(c) + ')'
 				else:
 					s += bsym + gen(c)
 			return s
-		result = '.'.join(
-			gen(r) for r in roots)
+		lim = sys.getrecursionlimit()
+		need = len(heavy) + 100
+		if need > lim:
+			sys.setrecursionlimit(need)
+		result = '.'.join(gen(r) for r in roots)
+		sys.setrecursionlimit(lim)
 		self.data['SMARTS'] = result
 		return result
 	def CalcRg(self):
-		''' Radius of gyration '''
 		A = self.data['Atoms']
-		if not A:
-			self.data['Rg'] = 0.0; return
+		if not A: self.data['Rg'] = 0.0; return
 		mass = np.array([
 			self.masses.get(A[i][1], 0.0)
 			for i in sorted(A)])
 		tm = mass.sum()
-		if tm == 0:
-			self.data['Rg'] = 0.0; return
+		if tm == 0: self.data['Rg'] = 0.0; return
 		co = self.data['Coordinates']
+		if len(mass) != co.shape[0]:
+			raise ValueError(
+				f'CalcRg: {len(mass)} atoms'
+				f' but {co.shape[0]}'
+				f' coordinates')
 		xm = co * mass[:, np.newaxis]
 		rr = np.sum(co * xm)
 		mm = np.sum((xm.sum(0) / tm) ** 2)
 		self.data['Rg'] = round(
 			math.sqrt(max(0.0, rr / tm - mm)), 3)
 	def CalcCharge(self, iterations=6):
-		''' Gasteiger-Marsili partial charges '''
 		PARAMS = {
 			'C3': (7.98, 9.18, 1.88),
 			'C2': (8.79, 9.32, 1.51),
@@ -1184,34 +994,34 @@ class Molecule():
 			'N3': (11.54, 10.82, 1.36),
 			'N2': (12.87, 11.15, 0.85),
 			'S': (10.14, 9.13, 1.38),
-			'Se': (9.00, 8.00, 1.10)}
+			'Se': (9.00, 8.00, 1.10),
+			'F': (14.66, 13.85, 2.31),
+			'Cl': (11.00, 9.69, 1.35),
+			'Br': (10.08, 8.47, 1.16),
+			'I': (9.90, 7.96, 0.96),
+			'P': (8.90, 8.24, 0.96),
+			'B': (5.80, 6.00, 1.56)}
 		A = self.data['Atoms']
 		B = self.data['Bonds']
 		ids = sorted(A.keys())
 		if not ids: return
 		mbo = {i: 0 for i in ids}
-		for (a, b), bo in \
-			self._bond_orders.items():
-			if a in mbo and bo > mbo[a]:
-				mbo[a] = bo
-			if b in mbo and bo > mbo[b]:
-				mbo[b] = bo
+		for (a, b), bo in self._bond_orders.items():
+			if a in mbo and bo > mbo[a]: mbo[a] = bo
+			if b in mbo and bo > mbo[b]: mbo[b] = bo
 		atype = {}
 		for i in ids:
 			el = A[i][1].upper()
-			if el == 'H':
-				atype[i] = PARAMS['H']
+			if el == 'H': atype[i] = PARAMS['H']
 			elif el in ('S', 'SE'):
 				atype[i] = PARAMS.get(
-					el.capitalize(),
-					PARAMS['S'])
+					el.capitalize(), PARAMS['S'])
 			elif el == 'C':
 				if mbo[i] >= 3:
 					atype[i] = PARAMS['C1']
 				elif mbo[i] >= 1.5:
 					atype[i] = PARAMS['C2']
-				else:
-					atype[i] = PARAMS['C3']
+				else: atype[i] = PARAMS['C3']
 			elif el == 'N':
 				atype[i] = (PARAMS['N2']
 					if mbo[i] >= 1.5
@@ -1220,13 +1030,22 @@ class Molecule():
 				atype[i] = (PARAMS['O2']
 					if mbo[i] >= 1.5
 					else PARAMS['O3'])
-			else:
-				atype[i] = PARAMS['C3']
+			elif el in ('F', 'CL', 'BR', 'I'):
+				atype[i] = PARAMS.get(
+					el.capitalize(),
+					PARAMS['Cl'])
+			elif el == 'P':
+				atype[i] = PARAMS['P']
+			elif el == 'B':
+				atype[i] = PARAMS['B']
+			else: atype[i] = None
 		charges = {i: 0.0 for i in ids}
 		for n in range(iterations):
 			damp = 1.0 / (2 ** (n + 1))
 			chi = {}
 			for i in ids:
+				if atype[i] is None:
+					chi[i] = 0.0; continue
 				a, b, c = atype[i]
 				qv = charges[i]
 				chi[i] = a + qv * (b + c * qv)
@@ -1234,46 +1053,41 @@ class Molecule():
 			for i in ids:
 				for j in B.get(i, []):
 					if j <= i: continue
+					if (atype[i] is None
+						or atype[j] is None):
+						continue
 					if chi[j] >= chi[i]:
 						donor, acc = i, j
-					else:
-						donor, acc = j, i
+					else: donor, acc = j, i
 					a, b, c = atype[donor]
 					ip = a + b + c
 					if ip == 0: continue
-					dq = (damp
-						* (chi[acc]
-						- chi[donor]) / ip)
+					dq = damp * (chi[acc]
+						- chi[donor]) / ip
 					delta[donor] += dq
 					delta[acc] -= dq
-			for i in ids:
-				charges[i] += delta[i]
-		for i in ids:
-			A[i][2] = round(charges[i], 4)
+			for i in ids: charges[i] += delta[i]
+		for i in ids: A[i][2] = round(charges[i], 4)
 	def CalcMass(self):
-		''' Molecular mass in Da '''
 		A = self.data['Atoms']
 		self.data['Mass'] = round(sum(
 			self.masses.get(v[1], 0.0)
 			for v in A.values()), 3)
 	def GetDistance(self, idx1, idx2):
-		''' Distance between two atoms in A '''
+		self._check_idx(idx1, idx2)
 		C = self.data['Coordinates']
-		return np.linalg.norm(
-			C[idx2] - C[idx1])
+		return np.linalg.norm(C[idx2] - C[idx1])
 	def GetAngle(self, idx1, idx2, idx3):
-		''' Angle with idx2 as pivot, degrees '''
+		self._check_idx(idx1, idx2, idx3)
 		C = self.data['Coordinates']
 		a = C[idx2] - C[idx1]
 		b = C[idx2] - C[idx3]
-		d = (np.linalg.norm(a)
-			* np.linalg.norm(b))
+		d = np.linalg.norm(a) * np.linalg.norm(b)
 		if d < 1e-10: return 0.0
-		ct = max(-1.0,
-			min(1.0, np.dot(a, b) / d))
+		ct = max(-1.0, min(1.0, np.dot(a, b) / d))
 		return math.degrees(math.acos(ct))
 	def GetDihedral(self, idx1, idx2, idx3, idx4):
-		''' Dihedral angle for 4 atoms, degrees '''
+		self._check_idx(idx1, idx2, idx3, idx4)
 		C = self.data['Coordinates']
 		u1 = C[idx2] - C[idx1]
 		u2 = C[idx3] - C[idx2]
@@ -1283,22 +1097,19 @@ class Molecule():
 		c23 = np.cross(u2, u3)
 		a = np.dot(u2, np.cross(c12, c23))
 		b = mg * np.dot(c12, c23)
-		return (math.atan2(a, b)
-			* 180 / math.pi)
+		return math.atan2(a, b) * 180 / math.pi
 	def GetAtomCoord(self, idx):
-		''' Coordinates of atom idx '''
+		self._check_idx(idx)
 		return self.data['Coordinates'][idx]
 	def GetAtomList(self):
-		''' List of all atom elements '''
-		return [v[1] for v
-			in self.data['Atoms'].values()]
+		return [v[1]
+			for v in self.data['Atoms'].values()]
 	def GetAtomBonds(self, idx):
-		''' Names of atoms bonded to idx '''
 		A = self.data['Atoms']
-		return [A[j][0] for j
-			in self.data['Bonds'].get(idx, [])]
+		return [A[j][0]
+			for j in self.data['Bonds'].get(idx, [])]
 	def AdjustDistance(self, idx1, idx2, length):
-		''' Change distance between two atoms '''
+		self._check_idx(idx1, idx2)
 		C = self.data['Coordinates']
 		v = C[idx2] - C[idx1]
 		mg = np.linalg.norm(v)
@@ -1306,8 +1117,9 @@ class Molecule():
 		shift = v * (length / mg) - v
 		for i in self._downstream(idx1, idx2):
 			C[i] += shift
+		self._invalidate()
 	def AdjustAngle(self, idx1, idx2, idx3, theta):
-		''' Change angle, idx2 is pivot '''
+		self._check_idx(idx1, idx2, idx3)
 		C = self.data['Coordinates']
 		a = C[idx3] - C[idx1]
 		b = C[idx3] - C[idx2]
@@ -1318,11 +1130,11 @@ class Molecule():
 		ori = C[idx2].copy()
 		RM = self._rotmat(theta, u)
 		for i in self._downstream(idx2, idx3):
-			v = C[i] - ori
-			C[i] = np.matmul(v, RM) + ori
+			C[i] = np.matmul(C[i] - ori, RM) + ori
+		self._invalidate()
 	def RotateDihedral(
 		self, idx1, idx2, idx3, idx4, theta):
-		''' Set dihedral to theta degrees '''
+		self._check_idx(idx1, idx2, idx3, idx4)
 		C = self.data['Coordinates']
 		current = self.GetDihedral(
 			idx1, idx2, idx3, idx4)
@@ -1336,30 +1148,30 @@ class Molecule():
 		for i in self._downstream(idx2, idx3):
 			v = C[i] - ori
 			v = np.matmul(v, RM_zero)
-			v = np.matmul(v, RM_new)
-			C[i] = v + ori
-	def MovePose(self, theta=None, u=None, l=None, ori=None):
-		''' Rotate and/or translate molecule '''
+			C[i] = np.matmul(v, RM_new) + ori
+		self._invalidate()
+	def MovePose(
+		self, theta=None, u=None, l=None, ori=None):
 		C = self.data['Coordinates'].copy()
 		if len(C) == 0: return
 		if theta is not None and u is not None:
 			u = np.array(u, dtype=float)
 			mg = np.linalg.norm(u)
-			if mg < 1e-10: return
-			u = u / mg
-			pivot = C.mean(axis=0)
-			R = self._rotmat(theta, u)
-			C = np.matmul(C - pivot, R) + pivot
+			if mg > 1e-10:
+				u = u / mg
+				pivot = C.mean(axis=0)
+				R = self._rotmat(theta, u)
+				C = np.matmul(C - pivot, R) + pivot
 		if l is not None and ori is not None:
 			ori = np.array(ori, dtype=float)
 			cent = C.mean(axis=0)
 			d = ori - cent
 			mg = np.linalg.norm(d)
-			if mg < 1e-10: return
-			C = C + (d / mg) * l
+			if mg > 1e-10:
+				C = C + (d / mg) * l
 		self.data['Coordinates'] = C
+		self._invalidate()
 	def GetInfo(self):
-		''' Print molecule info + skeletal formula '''
 		d = self.data
 		print(f"Energy:  {d['Energy']}")
 		print(f"Mass:    {d['Mass']} Da")
@@ -1367,33 +1179,25 @@ class Molecule():
 		print(f"Formula: {d['Formula']}")
 		print(f"SMILES:  {d['SMILES']}")
 		print(f"SMARTS:  {d['SMARTS']}")
-		A = d['Atoms']
-		B = d['Bonds']
+		A = d['Atoms']; B = d['Bonds']
 		heavy = [i for i, v in A.items()
 			if v[1] != 'H']
 		if len(heavy) < 2 or len(heavy) >= 200:
 			return
-		Cr = d['Coordinates']
-		hs = set(heavy)
-		# PCA for best 2D projection
+		Cr = d['Coordinates']; hs = set(heavy)
 		hc = Cr[heavy]
 		hc0 = hc - hc.mean(axis=0)
 		_, _, Vt = np.linalg.svd(
 			hc0, full_matrices=False)
 		proj = hc0 @ Vt[:2].T
-		# Braille: 2x4 dots per char cell
-		# ~14 sub-pixels per bond
-		hi = {v: k
-			for k, v in enumerate(heavy)}
+		hi = {v: k for k, v in enumerate(heavy)}
 		bls = []
 		for i in heavy:
 			for j in B.get(i, []):
 				if j in hs and j > i:
 					bls.append(np.linalg.norm(
-						proj[hi[i]]
-						- proj[hi[j]]))
-		mbl = (np.median(bls)
-			if bls else 1.0)
+						proj[hi[i]] - proj[hi[j]]))
+		mbl = np.median(bls) if bls else 1.0
 		if mbl < 0.01: mbl = 1.0
 		sc = 14.0 / mbl
 		spx = {}; spy = {}
@@ -1404,20 +1208,15 @@ class Molecule():
 		yv = list(spy.values())
 		xmn, ymx = min(xv), max(yv)
 		for i in heavy:
-			spx[i] = int(round(
-				spx[i] - xmn)) + 4
-			spy[i] = int(round(
-				ymx - spy[i])) + 4
+			spx[i] = int(round(spx[i] - xmn)) + 4
+			spy[i] = int(round(ymx - spy[i])) + 4
 		PW = max(spx.values()) + 5
 		PH = max(spy.values()) + 5
-		canvas = [[False] * PW
-			for _ in range(PH)]
-		# Draw bonds on sub-pixel canvas
+		canvas = [[False]*PW for _ in range(PH)]
 		drawn = set()
 		for i in heavy:
 			for j in B.get(i, []):
-				if j not in hs or j <= i:
-					continue
+				if j not in hs or j <= i: continue
 				if (i, j) in drawn: continue
 				drawn.add((i, j))
 				x0, y0 = spx[i], spy[i]
@@ -1426,22 +1225,16 @@ class Molecule():
 					(i, j),
 					self._bond_orders.get(
 						(j, i), 1))
-				bx = x1 - x0
-				by = y1 - y0
-				mg = math.sqrt(
-					bx * bx + by * by)
+				bx = x1 - x0; by = y1 - y0
+				mg = math.sqrt(bx*bx + by*by)
 				if mg > 0:
-					pdx = -by / mg
-					pdy = bx / mg
-				else:
-					pdx, pdy = 0.0, 1.0
+					pdx = -by / mg; pdy = bx / mg
+				else: pdx, pdy = 0.0, 1.0
 				offs = [(0, 0)]
 				if bo >= 2:
-					offs.append(
-						(pdx * 2, pdy * 2))
+					offs.append((pdx*2, pdy*2))
 				if bo >= 3:
-					offs.append(
-						(-pdx * 2, -pdy * 2))
+					offs.append((-pdx*2, -pdy*2))
 				for ox, oy in offs:
 					ax0 = int(round(x0 + ox))
 					ay0 = int(round(y0 + oy))
@@ -1450,42 +1243,32 @@ class Molecule():
 					ddx = abs(ax1 - ax0)
 					ddy = abs(ay1 - ay0)
 					ssx = (1 if ax0 < ax1
-						else (-1
-						if ax0 > ax1
+						else (-1 if ax0 > ax1
 						else 0))
 					ssy = (1 if ay0 < ay1
-						else (-1
-						if ay0 > ay1
+						else (-1 if ay0 > ay1
 						else 0))
-					if not ddx and not ddy:
-						continue
+					if not ddx and not ddy: continue
 					err = ddx - ddy
 					cx, cy = ax0, ay0
 					while True:
 						if (0 <= cx < PW
 							and 0 <= cy < PH):
 							canvas[cy][cx] = True
-						if (cx == ax1
-							and cy == ay1):
+						if cx == ax1 and cy == ay1:
 							break
 						e2 = 2 * err
 						if e2 > -ddy:
-							err -= ddy
-							cx += ssx
+							err -= ddy; cx += ssx
 						if e2 < ddx:
-							err += ddx
-							cy += ssy
-		# Convert to braille characters
+							err += ddx; cy += ssy
 		DOTS = {(0,0):0x01, (1,0):0x08,
 			(0,1):0x02, (1,1):0x10,
 			(0,2):0x04, (1,2):0x20,
 			(0,3):0x40, (1,3):0x80}
-		CW = (PW + 1) // 2
-		CH = (PH + 3) // 4
-		grid = [[' '] * CW
-			for _ in range(CH)]
-		colr = [['' ] * CW
-			for _ in range(CH)]
+		CW = (PW + 1) // 2; CH = (PH + 3) // 4
+		grid = [[' ']*CW for _ in range(CH)]
+		colr = [['']*CW for _ in range(CH)]
 		for cy in range(CH):
 			for cx in range(CW):
 				code = 0
@@ -1496,26 +1279,18 @@ class Molecule():
 						and canvas[py][px]):
 						code |= bit
 				if code:
-					grid[cy][cx] = chr(
-						0x2800 + code)
-		# Colour all braille dots grey
-		GRY = '\033[90m'
-		RST = '\033[0m'
+					grid[cy][cx] = chr(0x2800+code)
+		GRY = '\033[90m'; RST = '\033[0m'
 		for cy in range(CH):
 			for cx in range(CW):
 				if grid[cy][cx] != ' ':
 					colr[cy][cx] = GRY
-		# Overlay atom index labels
-		ACOL = {'C': '\033[32m',
-			'N': '\033[34m',
-			'O': '\033[31m',
-			'P': '\033[38;5;208m',
-			'S': '\033[33m',
-			'H': '\033[37m'}
+		ACOL = {'C':'\033[32m', 'N':'\033[34m',
+			'O':'\033[31m', 'P':'\033[38;5;208m',
+			'S':'\033[33m', 'H':'\033[37m'}
 		DCOL = '\033[35m'
 		for i in heavy:
-			cx = spx[i] // 2
-			cy = spy[i] // 4
+			cx = spx[i] // 2; cy = spy[i] // 4
 			el = A[i][1]
 			c = ACOL.get(el, DCOL)
 			lbl = str(i)
@@ -1525,16 +1300,11 @@ class Molecule():
 					if 0 <= px < CW:
 						grid[cy][px] = ch
 						colr[cy][px] = c
-		# Print with ANSI colors
 		for r in range(CH):
 			out = []
 			for c in range(CW):
-				cc = colr[r][c]
-				ch = grid[r][c]
-				if cc:
-					out.append(
-						cc + ch + RST)
-				else:
-					out.append(ch)
+				cc = colr[r][c]; ch = grid[r][c]
+				if cc: out.append(cc + ch + RST)
+				else: out.append(ch)
 			line = ''.join(out).rstrip()
 			if line: print(line)
