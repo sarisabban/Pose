@@ -8,8 +8,6 @@ import numpy as np
 
 np.seterr(all='ignore')
 
-
-
 class Molecule():
 	def __init__(self):
 		self.masses = {
@@ -177,8 +175,12 @@ class Molecule():
 				e + (str(n) if n > 1 else ''))
 		self.data['Formula'] = ''.join(parts)
 	def Import(self, filename):
-		ext = os.path.splitext(filename)[1].lower()
-		with open(filename) as f: lines = f.readlines()
+		if isinstance(filename, str) and '\n' in filename:
+			lines = filename.splitlines()
+			ext = 'string'
+		else:
+			ext = os.path.splitext(filename)[1].lower()
+			with open(filename) as f: lines = f.readlines()
 		atoms = {}; coords = []; bonds = {}
 		bords = {}; idx = 0
 		if ext == '.pdb':
@@ -530,6 +532,33 @@ class Molecule():
 					bm = {'1':1, '2':2, '3':3,
 						'ar':1.5, 'am':1}
 					bo = bm.get(bt, 1)
+					bords[(a1, a2)] = bo
+					bords[(a2, a1)] = bo
+		elif ext == 'string':
+			hdr = lines[3] if len(lines) > 3 else ''
+			if 'V2000' in hdr:
+				na = int(hdr[0:3])
+				nb = int(hdr[3:6])
+				for i in range(na):
+					ln = lines[4 + i]
+					x = float(ln[0:10])
+					y = float(ln[10:20])
+					z = float(ln[20:30])
+					el = ln[31:34].strip()
+					atoms[idx] = [
+						f'{el}{idx}', el, 0.0]
+					coords.append([x, y, z])
+					bonds[idx] = []
+					idx += 1
+				bt_map = {1:1, 2:2, 3:3, 4:1.5}
+				for i in range(nb):
+					ln = lines[4 + na + i]
+					a1 = int(ln[0:3]) - 1
+					a2 = int(ln[3:6]) - 1
+					bt = int(ln[6:9])
+					bonds[a1].append(a2)
+					bonds[a2].append(a1)
+					bo = bt_map.get(bt, 1)
 					bords[(a1, a2)] = bo
 					bords[(a2, a1)] = bo
 		else:
