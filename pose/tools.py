@@ -1512,86 +1512,153 @@ def _has_self_dimer(s, k=4):
 	tail = s[-k:]
 	return tail in rc
 
+# PCR primer-design relaxation tiers, tried in order until one
+# produces a usable pair. Tier 0 is the ideal target; lower tiers
+# progressively drop gates so that PCR() always returns a pair for
+# any chemically valid template (>= 36 bp).
+_PCR_TIERS = [
+	{'label':'Ideal',       'len':(18,25),
+		'gc':(40.0, 60.0),  'tm':(55.0, 65.0),
+		'clamp':True,  'max_run':4,
+		'no_hairpin':True,  'no_dimer':True,  'dtm':2.0},
+	{'label':'Good',        'len':(18,28),
+		'gc':(35.0, 65.0),  'tm':(50.0, 68.0),
+		'clamp':True,  'max_run':5,
+		'no_hairpin':True,  'no_dimer':True,  'dtm':3.0},
+	{'label':'Fair',        'len':(18,30),
+		'gc':(25.0, 75.0),  'tm':(45.0, 72.0),
+		'clamp':False, 'max_run':5,
+		'no_hairpin':False, 'no_dimer':True,  'dtm':5.0},
+	{'label':'Poor',        'len':(18,30),
+		'gc':None,          'tm':None,
+		'clamp':False, 'max_run':None,
+		'no_hairpin':False, 'no_dimer':False, 'dtm':8.0},
+	{'label':'Last resort', 'len':(18,30),
+		'gc':None,          'tm':None,
+		'clamp':False, 'max_run':None,
+		'no_hairpin':False, 'no_dimer':False, 'dtm':float('inf')}]
+
 def PCR(dna_sequence):
 	'''
-	Design ideal forward and reverse PCR primers for a DNA template.
+	Design forward and reverse PCR primers for a DNA template.
 
-	Constraints applied to each candidate (length 18-25):
+	Uses a 5-tier relaxation strategy so that any chemically valid
+	template (A/C/G/T only, length >= 36 bp) always yields a primer
+	pair. Tier 0 ('Ideal') applies the standard constraints:
+	    - length 18-25
 	    - GC% in [40, 60]
 	    - Nearest-neighbor (SantaLucia 1998) Tm in [55, 65] degC
-	    - 3' end is G or C (GC clamp)
-	    - No run of 4 identical bases
-	    - No internal palindrome of >= 4 (hairpin)
+	    - 3' GC clamp
+	    - no run of 4 identical bases
+	    - no internal palindrome of >= 4 (hairpin)
 	    - 3' tail not contained in self reverse complement
-	Forward and reverse Tm must agree within 2 degC.
+	    - |Tm_fwd - Tm_rev| <= 2 degC
+	If no pair satisfies tier 0, the search moves to Good, Fair,
+	Poor, then Last-resort tiers, each dropping or widening gates.
+	When the result comes from any tier below Ideal, a warning is
+	printed to stdout naming the tier and what was relaxed.
 
 	Parameters
 	----------
 	dna_sequence : str
-	    Template DNA sequence (A/C/G/T).
+	    Template DNA sequence (A/C/G/T only).
 
 	Returns
 	-------
 	tuple : (forward, reverse)
 	    forward : str  forward primer (5' end of template).
-	    reverse : str  reverse primer (reverse complement of 3' end).
+	    reverse : str  reverse primer (revcomp of 3' end).
 	'''
 	seq = dna_sequence.upper()
 	for ch in seq:
 		if ch not in 'ACGT':
 			raise Exception(
 				f'Illegal base {ch!r} in template')
-	if len(seq) < 60:
+	if len(seq) < 36:
 		raise Exception(
-			'Template too short for primer design (<60 bp)')
-	def _candidates(region):
+			'Template too short for primer design (<36 bp)')
+	rc = _revcomp(seq)
+	max_off = max(0, min(60, len(seq) - 18))
+	def _candidates(region, tier):
 		out = []
-		for L in range(18, 26):
+		lo, hi = tier['len']
+		for L in range(lo, hi + 1):
 			if L > len(region): continue
 			cand = region[:L]
-			if cand[-1] not in 'GC': continue
+			if tier['clamp'] and cand[-1] not in 'GC':
+				continue
 			gc = _gc_pct(cand)
-			if not (40.0 <= gc <= 60.0): continue
-			if _has_run(cand, 4): continue
-			if _has_hairpin(cand, 4): continue
-			if _has_self_dimer(cand, 5): continue
+			if tier['gc'] is not None:
+				glo, ghi = tier['gc']
+				if not (glo <= gc <= ghi): continue
+			if tier['max_run'] is not None:
+				if _has_run(cand, tier['max_run']):
+					continue
+			if tier['no_hairpin'] and _has_hairpin(cand, 4):
+				continue
+			if tier['no_dimer'] and _has_self_dimer(cand, 5):
+				continue
 			tm = _tm_nn(cand)
-			if not (55.0 <= tm <= 65.0): continue
+			if tier['tm'] is not None:
+				tlo, thi = tier['tm']
+				if not (tlo <= tm <= thi): continue
 			out.append((cand, tm, gc))
 		return out
-	# Forward: walk 5' end with a small offset window
-	fwd_pool = []
-	for off in range(0, min(15, len(seq) - 25)):
-		fwd_pool.extend(
-			[(off,) + c for c in _candidates(seq[off:])])
-	# Reverse: walk 3' end (in revcomp space)
-	rc = _revcomp(seq)
-	rev_pool = []
-	for off in range(0, min(15, len(rc) - 25)):
-		rev_pool.extend(
-			[(off,) + c for c in _candidates(rc[off:])])
-	if not fwd_pool: raise Exception('No valid forward primer')
-	if not rev_pool: raise Exception('No valid reverse primer')
-	# Pick the pair with closest Tm match, prefer Tm near 60
-	best, best_score = None, float('inf')
-	for off1, fwd, tmf, gcf in fwd_pool:
-		for off2, rev, tmr, gcr in rev_pool:
-			dT = abs(tmf - tmr)
-			if dT > 2.0: continue
-			score = (
-				dT * 5.0
-				+ abs(tmf - 60.0)
-				+ abs(tmr - 60.0)
-				+ abs(gcf - 50.0) * 0.1
-				+ abs(gcr - 50.0) * 0.1
-				+ (off1 + off2) * 0.05)
-			if score < best_score:
-				best_score = score
-				best = (fwd, rev)
-	if best is None:
+	def _pool(source, tier):
+		pool = []
+		for off in range(0, max_off + 1):
+			pool.extend(
+				(off,) + c for c in _candidates(
+					source[off:], tier))
+		return pool
+	chosen = None
+	chosen_tier = None
+	for ti, tier in enumerate(_PCR_TIERS):
+		fwd_pool = _pool(seq, tier)
+		rev_pool = _pool(rc,  tier)
+		if not fwd_pool or not rev_pool: continue
+		best, best_score = None, float('inf')
+		dtm_max = tier['dtm']
+		for off1, fwd, tmf, gcf in fwd_pool:
+			for off2, rev, tmr, gcr in rev_pool:
+				dT = abs(tmf - tmr)
+				if dT > dtm_max: continue
+				score = (
+					dT * 5.0
+					+ abs(tmf - 60.0)
+					+ abs(tmr - 60.0)
+					+ abs(gcf - 50.0) * 0.1
+					+ abs(gcr - 50.0) * 0.1
+					+ (off1 + off2) * 0.05)
+				if score < best_score:
+					best_score = score
+					best = (fwd, rev, tmf, tmr, gcf, gcr)
+		if best is not None:
+			chosen = best
+			chosen_tier = ti
+			break
+	if chosen is None:
+		# Should not happen: Last-resort tier has all gates open.
 		raise Exception(
-			'No primer pair within Tm tolerance')
-	return best
+			'No primer pair found even at last-resort tier')
+	fwd, rev, tmf, tmr, gcf, gcr = chosen
+	msg = None
+	if chosen_tier > 0:
+		# Build a short reason string vs the Ideal tier.
+		reasons = []
+		if not (40.0 <= gcf <= 60.0 and 40.0 <= gcr <= 60.0):
+			reasons.append('GC% outside 40-60')
+		if not (55.0 <= tmf <= 65.0 and 55.0 <= tmr <= 65.0):
+			reasons.append('Tm outside 55-65 \u00b0C')
+		if abs(tmf - tmr) > 2.0:
+			reasons.append('|\u0394Tm| > 2 \u00b0C')
+		if fwd[-1] not in 'GC' or rev[-1] not in 'GC':
+			reasons.append('GC clamp missing')
+		reason = '; '.join(reasons) if reasons \
+			else 'gates relaxed'
+		label = _PCR_TIERS[chosen_tier]['label']
+		msg = f'Warning: Suboptimal PCR primers ({label} tier) \u2014 {reason}'
+	return (fwd, rev, msg)
 
 # Standard genetic code (DNA -> single-letter AA, '*' = stop)
 _CODON_TABLE = {
