@@ -643,9 +643,16 @@ def MSA(sequences):
 
 	Returns
 	-------
-	tuple : (alignment_string, aligned_list)
-	    alignment_string : str        ClustalW-style formatted text
-	    aligned_list     : list[str]  gap-padded sequences, same order
+	tuple : (alignment_string, aligned_list,
+	         conservation, entropy, pssm, dca)
+	    alignment_string : str          ClustalW-style formatted text
+	    aligned_list     : list[str]    gap-padded sequences, same order
+	    conservation     : list[float]  per-column 1 - H/log2(20), [0,1]
+	    entropy          : list[float]  per-column Shannon entropy (bits)
+	    pssm             : np.ndarray   shape (L, 20) log-odds, AA order
+	                                    'ARNDCQEGHILKMFPSTWYV'
+	    dca              : np.ndarray   shape (L, L) APC-corrected mfDCA
+	                                    direct-information matrix
 	'''
 	n = len(sequences)
 	if n < 2:
@@ -800,4 +807,1168 @@ def MSA(sequences):
 				f'{lb:<{lw}}  {blk}  {pos[k]}')
 		out.append(f'{"":>{lw}}  {con[st:st+w]}')
 		out.append('')
-	return('\n'.join(out), final)
+	# --- conservation, entropy, PSSM, DCA -----------------------
+	# Alphabet: gap + 20 BLOSUM62 amino acids.  q=21.
+	alphabet = '-' + _aa
+	q = len(alphabet)
+	a2i = {c: i for i, c in enumerate(alphabet)}
+	B = n
+	M = np.zeros((B, L), dtype=np.int8)
+	for bi, s in enumerate(final):
+		for ci, ch in enumerate(s):
+			M[bi, ci] = a2i.get(ch, 0)
+	log2_20 = math.log2(20)
+	entropy = []
+	conservation = []
+	for ci in range(L):
+		col = M[:, ci]
+		nz = col[col != 0]
+		if len(nz) == 0:
+			entropy.append(0.0)
+			conservation.append(0.0)
+			continue
+		counts = np.bincount(nz, minlength=q)[1:]
+		p = counts / counts.sum()
+		nzp = p[p > 0]
+		H = float(-np.sum(nzp * np.log2(nzp)))
+		entropy.append(round(H, 4))
+		conservation.append(round(1.0 - H / log2_20, 4))
+	# PSSM with Laplace pseudocount, uniform background 1/20
+	pssm = np.zeros((L, 20), dtype=float)
+	for ci in range(L):
+		col = M[:, ci]
+		nz = col[col != 0]
+		counts = np.bincount(nz, minlength=q)[1:]
+		denom = counts.sum() + 20.0
+		freqs = (counts + 1.0) / denom
+		pssm[ci] = np.log2(freqs * 20.0)
+	# Mean-field DCA with sequence reweighting + APC
+	# Sequence identity reweighting (theta = 0.2, i.e. 80%)
+	theta = 0.2
+	weights = np.ones(B)
+	if B > 1:
+		simthr = (1.0 - theta) * L
+		eq_count = np.zeros(B)
+		for a in range(B):
+			for b in range(a, B):
+				if a == b:
+					eq_count[a] += 1
+					continue
+				eq = int((M[a] == M[b]).sum())
+				if eq >= simthr:
+					eq_count[a] += 1
+					eq_count[b] += 1
+		weights = 1.0 / eq_count
+	Beff = float(weights.sum())
+	# Single-site frequencies (B_eff weighted), q states
+	Pi = np.zeros((L, q))
+	for bi in range(B):
+		for ci in range(L):
+			Pi[ci, M[bi, ci]] += weights[bi]
+	Pi /= Beff
+	# Pseudocount lambda
+	lam = 0.5
+	Pi_pc = (1.0 - lam) * Pi + lam / q
+	# Two-site frequencies
+	Pij = np.zeros((L, L, q, q))
+	for bi in range(B):
+		w_b = weights[bi]
+		row = M[bi]
+		for i in range(L):
+			ai = row[i]
+			for j in range(L):
+				Pij[i, j, ai, row[j]] += w_b
+	Pij /= Beff
+	Pij_pc = (1.0 - lam) * Pij + lam / (q * q)
+	# Diagonal trick: P_ii(a,b) = Pi(a)*delta(a,b)
+	for i in range(L):
+		Pij_pc[i, i] = 0.0
+		for a in range(q):
+			Pij_pc[i, i, a, a] = Pi_pc[i, a]
+	# Build covariance matrix dropping last state (gap as gauge ref)
+	qm = q - 1
+	C = np.zeros((L * qm, L * qm))
+	for i in range(L):
+		for j in range(L):
+			for a in range(qm):
+				for b in range(qm):
+					C[i*qm + a, j*qm + b] = (
+						Pij_pc[i, j, a, b]
+						- Pi_pc[i, a] * Pi_pc[j, b])
+	try:
+		invC = np.linalg.inv(C)
+	except np.linalg.LinAlgError:
+		invC = np.linalg.pinv(C)
+	# DI computation per pair via 2-site mean-field
+	def _di_pair(i, j):
+		W = np.ones((q, q))
+		for a in range(qm):
+			for b in range(qm):
+				W[a, b] = math.exp(
+					-invC[i*qm + a, j*qm + b])
+		mu1 = np.ones(q) / q
+		mu2 = np.ones(q) / q
+		pi_i = Pi_pc[i]
+		pi_j = Pi_pc[j]
+		for _ in range(100):
+			scra1 = mu2 @ W.T
+			scra2 = mu1 @ W
+			new_mu1 = pi_i / scra1
+			new_mu2 = pi_j / scra2
+			new_mu1 /= new_mu1.sum()
+			new_mu2 /= new_mu2.sum()
+			if (np.max(np.abs(new_mu1 - mu1)) < 1e-6
+				and np.max(np.abs(new_mu2 - mu2)) < 1e-6):
+				mu1, mu2 = new_mu1, new_mu2
+				break
+			mu1, mu2 = new_mu1, new_mu2
+		Pdir = W * np.outer(mu1, mu2)
+		Pdir /= Pdir.sum()
+		Pfac = np.outer(pi_i, pi_j)
+		mask = (Pdir > 1e-12) & (Pfac > 1e-12)
+		di = float(np.sum(
+			Pdir[mask] * np.log(Pdir[mask] / Pfac[mask])))
+		return di
+	dca_raw = np.zeros((L, L))
+	for i in range(L):
+		for j in range(i+1, L):
+			d = _di_pair(i, j)
+			dca_raw[i, j] = d
+			dca_raw[j, i] = d
+	# Average product correction (APC)
+	dca = np.zeros((L, L))
+	if L > 1:
+		row_mean = dca_raw.sum(axis=1) / (L - 1)
+		total_mean = dca_raw.sum() / (L * (L - 1))
+		if total_mean > 0:
+			for i in range(L):
+				for j in range(L):
+					if i == j: continue
+					dca[i, j] = dca_raw[i, j] - (
+						row_mean[i] * row_mean[j]
+						/ total_mean)
+		else:
+			dca = dca_raw.copy()
+		np.fill_diagonal(dca, 0.0)
+	return('\n'.join(out), final, conservation, entropy, pssm, dca)
+
+def Isoelectric(sequence):
+	'''
+	Calculate the isoelectric point (pI) of a protein sequence.
+
+	Uses EMBOSS pKa values and Henderson-Hasselbalch with a
+	bisection search on [0, 14].
+
+	Parameters
+	----------
+	sequence : str  protein FASTA sequence (one-letter codes).
+
+	Returns
+	-------
+	float : the pH at which the protein has zero net charge,
+	        rounded to 2 decimals.
+	'''
+	if not sequence:
+		raise Exception('Empty sequence')
+	seq = sequence.upper()
+	# EMBOSS pKa values
+	pKa_pos = {'K': 10.53, 'R': 12.48, 'H': 6.00}
+	pKa_neg = {'D': 3.65,  'E': 4.25,  'C': 8.33, 'Y': 10.07}
+	pKa_nt  = 8.6
+	pKa_ct  = 3.6
+	cnt_pos = {a: seq.count(a) for a in pKa_pos}
+	cnt_neg = {a: seq.count(a) for a in pKa_neg}
+	def charge(pH):
+		pos = 1.0 / (1.0 + 10 ** (pH - pKa_nt))
+		for a, n in cnt_pos.items():
+			if n: pos += n / (1.0 + 10 ** (pH - pKa_pos[a]))
+		neg = 1.0 / (1.0 + 10 ** (pKa_ct - pH))
+		for a, n in cnt_neg.items():
+			if n: neg += n / (1.0 + 10 ** (pKa_neg[a] - pH))
+		return pos - neg
+	lo, hi = 0.0, 14.0
+	for _ in range(100):
+		mid = (lo + hi) / 2.0
+		c   = charge(mid)
+		if abs(c) < 1e-4: break
+		if c > 0: lo = mid
+		else:     hi = mid
+	return round(mid, 2)
+
+# Hydrophobicity scales used by Hydrophobicity()
+_HPHOB_SCALES = {
+	'eisenberg': {
+		'A': 0.620, 'R':-2.530, 'N':-0.780, 'D':-0.900, 'C': 0.290,
+		'Q':-0.850, 'E':-0.740, 'G': 0.480, 'H':-0.400, 'I': 1.380,
+		'L': 1.060, 'K':-1.500, 'M': 0.640, 'F': 1.190, 'P': 0.120,
+		'S':-0.180, 'T':-0.050, 'W': 0.810, 'Y': 0.260, 'V': 1.080},
+	'kyte-doolittle': {
+		'A': 1.8, 'R':-4.5, 'N':-3.5, 'D':-3.5, 'C': 2.5,
+		'Q':-3.5, 'E':-3.5, 'G':-0.4, 'H':-3.2, 'I': 4.5,
+		'L': 3.8, 'K':-3.9, 'M': 1.9, 'F': 2.8, 'P':-1.6,
+		'S':-0.8, 'T':-0.7, 'W':-0.9, 'Y':-1.3, 'V': 4.2},
+	'hopp-woods': {
+		'A':-0.5, 'R': 3.0, 'N': 0.2, 'D': 3.0, 'C':-1.0,
+		'Q': 0.2, 'E': 3.0, 'G': 0.0, 'H':-0.5, 'I':-1.8,
+		'L':-1.8, 'K': 3.0, 'M':-1.3, 'F':-2.5, 'P': 0.0,
+		'S': 0.3, 'T':-0.4, 'W':-3.4, 'Y':-2.3, 'V':-1.5},
+	'engelman': {
+		'A': 1.6, 'R':-12.3,'N':-4.8, 'D':-9.2, 'C': 2.0,
+		'Q':-4.1, 'E':-8.2, 'G': 1.0, 'H':-3.0, 'I': 3.1,
+		'L': 2.8, 'K':-8.8, 'M': 3.4, 'F': 3.7, 'P':-0.2,
+		'S': 0.6, 'T': 1.2, 'W': 1.9, 'Y':-0.7, 'V': 2.6}}
+
+def Hydrophobicity(sequence, window=9, scale='eisenberg'):
+	'''
+	Sliding-window hydrophobicity profile (ProtScale-style).
+
+	Parameters
+	----------
+	sequence : str    protein FASTA sequence.
+	window   : int    odd window size (default 9).
+	scale    : str    one of {'eisenberg', 'kyte-doolittle',
+	                  'hopp-woods', 'engelman'}.
+
+	Returns
+	-------
+	tuple : (positions, scores)
+	    positions : list[int]   0-indexed center of each window.
+	    scores    : list[float] mean score in each window (3 dp).
+	'''
+	seq = sequence.upper()
+	L = len(seq)
+	if window < 1: raise Exception('window must be >= 1')
+	if window > L:
+		raise Exception(
+			f'window ({window}) larger than sequence ({L})')
+	tbl = _HPHOB_SCALES.get(scale.lower())
+	if tbl is None:
+		raise Exception(
+			f'Unknown scale {scale!r}; choose from '
+			f'{list(_HPHOB_SCALES)}')
+	half = (window - 1) // 2
+	positions, scores = [], []
+	for i in range(L - window + 1):
+		s = sum(tbl.get(seq[i + k], 0.0) for k in range(window))
+		positions.append(i + half)
+		scores.append(round(s / window, 3))
+	return(positions, scores)
+
+def Aliphatic(sequence):
+	'''
+	Aliphatic index of a protein (Ikai 1980).
+
+	    AI = X(A) + 2.9*X(V) + 3.9*(X(I) + X(L))
+	    where X(aa) is the mole percent of that amino acid.
+
+	Parameters
+	----------
+	sequence : str  protein FASTA sequence.
+
+	Returns
+	-------
+	float : aliphatic index, rounded to 2 decimals.
+	'''
+	if not sequence: raise Exception('Empty sequence')
+	seq = sequence.upper()
+	L = len(seq)
+	xA = 100.0 * seq.count('A') / L
+	xV = 100.0 * seq.count('V') / L
+	xI = 100.0 * seq.count('I') / L
+	xL = 100.0 * seq.count('L') / L
+	return round(xA + 2.9 * xV + 3.9 * (xI + xL), 2)
+
+def ExtinctCoeff(sequence, reduced=True):
+	'''
+	Molar extinction coefficient at 280 nm in water (Pace 1995).
+
+	    eps = nW*5500 + nY*1490 + (nC/2)*125
+	    Cysteines contribute only when oxidised (cystines).
+
+	Parameters
+	----------
+	sequence : str   protein FASTA sequence.
+	reduced  : bool  True (default) treats Cys as reduced
+	                 (no contribution); False treats them as
+	                 disulphide-bonded cystines.
+
+	Returns
+	-------
+	int : molar extinction coefficient in M^-1 cm^-1.
+	'''
+	if not sequence: raise Exception('Empty sequence')
+	seq = sequence.upper()
+	nW = seq.count('W')
+	nY = seq.count('Y')
+	nC = seq.count('C')
+	eps = nW * 5500 + nY * 1490
+	if not reduced:
+		eps += (nC // 2) * 125
+	return int(round(eps))
+
+# Guruprasad et al. (1990) DIWV dipeptide instability table.
+# Rows = first residue, cols = second residue (BLOSUM62 order).
+_DIWV_AA = 'ARNDCQEGHILKMFPSTWYV'
+_DIWV = {
+	'A': {'A':1.0,'R':1.0,'N':1.0,'D':-7.49,'C':44.94,'Q':1.0,
+		'E':1.0,'G':1.0,'H':-7.49,'I':1.0,'L':1.0,'K':1.0,
+		'M':1.0,'F':1.0,'P':20.26,'S':1.0,'T':1.0,'W':1.0,
+		'Y':1.0,'V':1.0},
+	'R': {'A':1.0,'R':58.28,'N':13.34,'D':1.0,'C':1.0,'Q':20.26,
+		'E':1.0,'G':-7.49,'H':20.26,'I':1.0,'L':1.0,'K':1.0,
+		'M':1.0,'F':1.0,'P':20.26,'S':44.94,'T':1.0,'W':58.28,
+		'Y':-6.54,'V':1.0},
+	'N': {'A':1.0,'R':1.0,'N':1.0,'D':1.0,'C':-1.88,'Q':-6.54,
+		'E':1.0,'G':-14.03,'H':1.0,'I':44.94,'L':1.0,'K':24.68,
+		'M':1.0,'F':-14.03,'P':-1.88,'S':1.0,'T':-7.49,'W':-9.37,
+		'Y':1.0,'V':-1.88},
+	'D': {'A':1.0,'R':-6.54,'N':1.0,'D':1.0,'C':1.0,'Q':1.0,
+		'E':1.0,'G':1.0,'H':1.0,'I':1.0,'L':1.0,'K':-7.49,
+		'M':1.0,'F':-6.54,'P':1.0,'S':20.26,'T':-14.03,'W':1.0,
+		'Y':1.0,'V':1.0},
+	'C': {'A':1.0,'R':1.0,'N':1.0,'D':20.26,'C':1.0,'Q':-6.54,
+		'E':1.0,'G':1.0,'H':33.60,'I':1.0,'L':20.26,'K':1.0,
+		'M':33.60,'F':1.0,'P':20.26,'S':1.0,'T':33.60,'W':24.68,
+		'Y':1.0,'V':-6.54},
+	'Q': {'A':1.0,'R':1.0,'N':1.0,'D':20.26,'C':-6.54,'Q':20.26,
+		'E':20.26,'G':1.0,'H':1.0,'L':1.0,'I':1.0,'K':1.0,
+		'M':1.0,'F':-6.54,'P':20.26,'S':44.94,'T':1.0,'W':1.0,
+		'Y':-6.54,'V':-6.54},
+	'E': {'A':1.0,'R':1.0,'N':1.0,'D':20.26,'C':44.94,'Q':20.26,
+		'E':33.60,'G':1.0,'H':-6.54,'I':20.26,'L':1.0,'K':1.0,
+		'M':1.0,'F':1.0,'P':20.26,'S':20.26,'T':1.0,'W':-14.03,
+		'Y':1.0,'V':1.0},
+	'G': {'A':-7.49,'R':-7.49,'N':-7.49,'D':1.0,'C':1.0,'Q':1.0,
+		'E':-6.54,'G':13.34,'H':1.0,'I':-7.49,'L':1.0,'K':-7.49,
+		'M':1.0,'F':1.0,'P':1.0,'S':1.0,'T':-7.49,'W':13.34,
+		'Y':-7.49,'V':1.0},
+	'H': {'A':1.0,'R':1.0,'N':24.68,'D':1.0,'C':1.0,'Q':1.0,
+		'E':1.0,'G':-9.37,'H':1.0,'I':44.94,'L':1.0,'K':24.68,
+		'M':1.0,'F':-9.37,'P':-1.88,'S':1.0,'T':-6.54,'W':-1.88,
+		'Y':44.94,'V':1.0},
+	'I': {'A':1.0,'R':1.0,'N':1.0,'D':1.0,'C':1.0,'Q':1.0,
+		'E':44.94,'G':1.0,'H':13.34,'I':1.0,'L':20.26,'K':-7.49,
+		'M':1.0,'F':1.0,'P':-1.88,'S':1.0,'T':1.0,'W':1.0,
+		'Y':1.0,'V':-7.49},
+	'L': {'A':1.0,'R':20.26,'N':1.0,'D':1.0,'C':1.0,'Q':33.60,
+		'E':1.0,'G':1.0,'H':1.0,'I':1.0,'L':1.0,'K':-7.49,
+		'M':1.0,'F':1.0,'P':20.26,'S':1.0,'T':1.0,'W':24.68,
+		'Y':1.0,'V':1.0},
+	'K': {'A':1.0,'R':33.60,'N':1.0,'D':1.0,'C':1.0,'Q':24.68,
+		'E':1.0,'G':-7.49,'H':1.0,'I':-7.49,'L':-7.49,'K':1.0,
+		'M':33.60,'F':1.0,'P':-6.54,'S':1.0,'T':1.0,'W':1.0,
+		'Y':1.0,'V':-7.49},
+	'M': {'A':13.34,'R':-6.54,'N':1.0,'D':1.0,'C':1.0,'Q':-6.54,
+		'E':1.0,'G':1.0,'H':58.28,'I':1.0,'L':1.0,'K':1.0,
+		'M':-1.88,'F':1.0,'P':44.94,'S':44.94,'T':-1.88,'W':1.0,
+		'Y':24.68,'V':1.0},
+	'F': {'A':1.0,'R':1.0,'N':1.0,'D':13.34,'C':1.0,'Q':1.0,
+		'E':1.0,'G':1.0,'H':1.0,'I':1.0,'L':1.0,'K':-14.03,
+		'M':1.0,'F':1.0,'P':20.26,'S':1.0,'T':1.0,'W':1.0,
+		'Y':33.60,'V':1.0},
+	'P': {'A':20.26,'R':-6.54,'N':1.0,'D':-6.54,'C':-6.54,'Q':20.26,
+		'E':18.38,'G':1.0,'H':1.0,'I':1.0,'L':1.0,'K':1.0,
+		'M':-6.54,'F':20.26,'P':20.26,'S':20.26,'T':1.0,'W':-1.88,
+		'Y':1.0,'V':20.26},
+	'S': {'A':1.0,'R':20.26,'N':1.0,'D':1.0,'C':33.60,'Q':20.26,
+		'E':20.26,'G':1.0,'H':1.0,'I':1.0,'L':1.0,'K':1.0,
+		'M':1.0,'F':1.0,'P':44.94,'S':20.26,'T':1.0,'W':1.0,
+		'Y':1.0,'V':1.0},
+	'T': {'A':1.0,'R':1.0,'N':-14.03,'D':1.0,'C':1.0,'Q':-6.54,
+		'E':20.26,'G':-7.49,'H':1.0,'I':1.0,'L':1.0,'K':1.0,
+		'M':1.0,'F':13.34,'P':1.0,'S':1.0,'T':1.0,'W':-14.03,
+		'Y':1.0,'V':1.0},
+	'W': {'A':-14.03,'R':1.0,'N':13.34,'D':1.0,'C':1.0,'Q':1.0,
+		'E':1.0,'G':-9.37,'H':24.68,'I':1.0,'L':13.34,'K':1.0,
+		'M':24.68,'F':1.0,'P':1.0,'S':1.0,'T':-14.03,'W':1.0,
+		'Y':1.0,'V':-7.49},
+	'Y': {'A':24.68,'R':-15.91,'N':1.0,'D':24.68,'C':1.0,'Q':1.0,
+		'E':-6.54,'G':-7.49,'H':13.34,'I':1.0,'L':1.0,'K':1.0,
+		'M':44.94,'F':1.0,'P':13.34,'S':1.0,'T':-7.49,'W':-9.37,
+		'Y':13.34,'V':1.0},
+	'V': {'A':1.0,'R':1.0,'N':1.0,'D':-14.03,'C':1.0,'Q':1.0,
+		'E':1.0,'G':-7.49,'H':1.0,'I':1.0,'L':1.0,'K':-1.88,
+		'M':1.0,'F':1.0,'P':20.26,'S':1.0,'T':-7.49,'W':1.0,
+		'Y':-6.54,'V':1.0}}
+
+def Instability(sequence):
+	'''
+	Instability index of a protein (Guruprasad et al. 1990).
+
+	    II = (10 / L) * sum_{i=0..L-2} DIWV(seq[i], seq[i+1])
+
+	A score below 40 generally indicates a stable protein.
+
+	Parameters
+	----------
+	sequence : str  protein FASTA sequence.
+
+	Returns
+	-------
+	float : instability index, rounded to 2 decimals.
+	'''
+	if not sequence: raise Exception('Empty sequence')
+	seq = sequence.upper()
+	L = len(seq)
+	if L < 2: return 0.0
+	total = 0.0
+	for i in range(L - 1):
+		a, b = seq[i], seq[i+1]
+		row = _DIWV.get(a)
+		if row is None: continue
+		v = row.get(b)
+		if v is None: continue
+		total += v
+	return round(10.0 * total / L, 2)
+
+# Kyte-Doolittle hydropathy (used by GRAVY)
+_KD = {
+	'A': 1.8, 'R':-4.5, 'N':-3.5, 'D':-3.5, 'C': 2.5,
+	'Q':-3.5, 'E':-3.5, 'G':-0.4, 'H':-3.2, 'I': 4.5,
+	'L': 3.8, 'K':-3.9, 'M': 1.9, 'F': 2.8, 'P':-1.6,
+	'S':-0.8, 'T':-0.7, 'W':-0.9, 'Y':-1.3, 'V': 4.2}
+
+def GRAVY(sequence):
+	'''
+	Grand average of hydropathy (Kyte & Doolittle 1982).
+
+	Parameters
+	----------
+	sequence : str  protein FASTA sequence.
+
+	Returns
+	-------
+	float : mean Kyte-Doolittle hydropathy, rounded to 3 dp.
+	'''
+	if not sequence: raise Exception('Empty sequence')
+	seq = sequence.upper()
+	total = sum(_KD.get(a, 0.0) for a in seq)
+	return round(total / len(seq), 3)
+
+def Split(pose, chain=None, start=None, end=None):
+	'''
+	Extract a slice of a Pose into a new Pose object.
+
+	Two mutually-exclusive modes:
+	    Split(pose, chain='A')      - extract one whole chain.
+	    Split(pose, start=i, end=j) - extract residues [i, j]
+	                                  (inclusive, zero-based on the
+	                                  residue table).
+
+	Works for protein, DNA and RNA poses. Atom indices, residue
+	indices, bond adjacency and coordinates are all re-numbered
+	densely from zero in the returned Pose.
+	'''
+	try:
+		from .pose import Pose
+	except ImportError:
+		from pose import Pose
+	if (chain is None) == (start is None and end is None):
+		raise Exception(
+			"Split requires either chain= OR (start=, end=)")
+	mol = pose.data.get('Type')
+	if mol is None:
+		raise Exception('Source pose is empty')
+	is_pro = (mol == 'Protein')
+	rk = 'Amino Acids' if is_pro else 'Nucleotides'
+	src = pose.data[rk]
+	if not src:
+		raise Exception(f'Source pose has no {rk}')
+	all_idx = sorted(src.keys())
+	if chain is not None:
+		keep_res = [i for i in all_idx if src[i][1] == chain]
+		if not keep_res:
+			raise Exception(f'Chain {chain!r} not in pose')
+	else:
+		if start is None or end is None:
+			raise Exception(
+				'Split needs both start and end for range mode')
+		if start > end:
+			raise Exception(
+				f'start ({start}) > end ({end})')
+		keep_res = [i for i in all_idx if start <= i <= end]
+		if not keep_res:
+			raise Exception(
+				f'Range [{start}, {end}] selects no residues')
+	keep_atoms = []
+	for ri in keep_res:
+		for ai in src[ri][2]:
+			keep_atoms.append(ai)
+		for ai in src[ri][3]:
+			keep_atoms.append(ai)
+	atom_set = set(keep_atoms)
+	keep_atoms = sorted(atom_set)
+	a_remap = {old: new for new, old in enumerate(keep_atoms)}
+	r_remap = {old: new for new, old in enumerate(keep_res)}
+	new = Pose()
+	new.data = {
+		'Type'       : mol,
+		'Energy'     : 0,
+		'Rg'         : 0,
+		'Mass'       : 0,
+		'Size'       : {},
+		'FASTA'      : {},
+		'SS'         : {},
+		'Nucleotides': {} if not is_pro else None,
+		'Amino Acids': {} if is_pro else None,
+		'Atoms'      : {},
+		'Bonds'      : {},
+		'Coordinates': np.zeros((0, 3))}
+	src_atoms = pose.data['Atoms']
+	for old_ai in keep_atoms:
+		new.data['Atoms'][a_remap[old_ai]] = list(src_atoms[old_ai])
+	src_bonds = pose.data['Bonds']
+	for old_ai in keep_atoms:
+		na = a_remap[old_ai]
+		nbrs = []
+		for ob in src_bonds.get(old_ai, []):
+			if ob in a_remap:
+				nbrs.append(a_remap[ob])
+		new.data['Bonds'][na] = sorted(nbrs)
+	src_co = pose.data['Coordinates']
+	new_co = np.array(
+		[src_co[old_ai] for old_ai in keep_atoms],
+		dtype=float)
+	new.data['Coordinates'] = new_co if len(new_co) \
+		else np.zeros((0, 3))
+	tgt = new.data[rk]
+	for old_ri in keep_res:
+		row = list(src[old_ri])
+		row[2] = [a_remap[a] for a in row[2] if a in a_remap]
+		row[3] = [a_remap[a] for a in row[3] if a in a_remap]
+		tgt[r_remap[old_ri]] = row
+	new._update()
+	return new
+
+def Concatenate(pose1, pose2, fuse=False):
+	'''
+	Combine two Pose objects of the same Type.
+
+	fuse=False (default): append pose2 to pose1 as additional
+	    chains, preserving original coordinates. Colliding chain
+	    IDs are renamed to the next free letter.
+	fuse=True : rebuild the concatenated FASTA as a single
+	    polymer using Pose.Build (idealised geometry; original
+	    coordinates are discarded).
+	'''
+	try:
+		from .pose import Pose
+	except ImportError:
+		from pose import Pose
+	t1 = pose1.data.get('Type')
+	t2 = pose2.data.get('Type')
+	if t1 is None or t2 is None:
+		raise Exception('Concatenate: empty pose given')
+	if t1 != t2:
+		raise Exception(
+			f'Cannot concatenate {t1} with {t2}')
+	is_pro = (t1 == 'Protein')
+	rk = 'Amino Acids' if is_pro else 'Nucleotides'
+	if fuse:
+		f1 = pose1.data['FASTA']
+		f2 = pose2.data['FASTA']
+		merged_seq = ''.join(
+			f1[c] for c in sorted(f1)) + ''.join(
+			f2[c] for c in sorted(f2))
+		new = Pose()
+		new.Build(merged_seq, fmt=t1)
+		return new
+	new = Pose()
+	new.data = {
+		'Type'       : t1,
+		'Energy'     : 0,
+		'Rg'         : 0,
+		'Mass'       : 0,
+		'Size'       : {},
+		'FASTA'      : {},
+		'SS'         : {},
+		'Nucleotides': {} if not is_pro else None,
+		'Amino Acids': {} if is_pro else None,
+		'Atoms'      : {},
+		'Bonds'      : {},
+		'Coordinates': np.zeros((0, 3))}
+	def _copy(src_pose, ai_off, ri_off, ch_remap):
+		src_aa = src_pose.data[rk]
+		src_at = src_pose.data['Atoms']
+		src_bd = src_pose.data['Bonds']
+		src_co = src_pose.data['Coordinates']
+		old_a = sorted(src_at.keys())
+		a_map = {}
+		coords = []
+		for oa in old_a:
+			na = ai_off + len(a_map)
+			a_map[oa] = na
+			new.data['Atoms'][na] = list(src_at[oa])
+			coords.append(src_co[oa])
+		for oa in old_a:
+			na = a_map[oa]
+			new.data['Bonds'][na] = sorted(
+				a_map[ob] for ob in src_bd.get(oa, [])
+				if ob in a_map)
+		old_r = sorted(src_aa.keys())
+		r_map = {}
+		for ori in old_r:
+			nri = ri_off + len(r_map)
+			r_map[ori] = nri
+			row = list(src_aa[ori])
+			row[1] = ch_remap.get(row[1], row[1])
+			row[2] = [a_map[a] for a in row[2] if a in a_map]
+			row[3] = [a_map[a] for a in row[3] if a in a_map]
+			new.data[rk][nri] = row
+		return coords, len(a_map), len(r_map)
+	co1, na1, nr1 = _copy(pose1, 0, 0, {})
+	used_chains = set()
+	for v in new.data[rk].values():
+		used_chains.add(v[1])
+	def _next_ch(taken):
+		for c in 'ABCDEFGHIJKLMNOPQRSTUVWXYZ':
+			if c not in taken:
+				taken.add(c)
+				return c
+		raise Exception('Ran out of chain letters')
+	p2_chains = sorted({
+		v[1] for v in pose2.data[rk].values()})
+	ch_remap = {}
+	taken = set(used_chains)
+	for c in p2_chains:
+		if c in taken:
+			ch_remap[c] = _next_ch(taken)
+		else:
+			taken.add(c)
+	co2, na2, nr2 = _copy(pose2, na1, nr1, ch_remap)
+	all_co = co1 + co2
+	new.data['Coordinates'] = np.array(all_co, dtype=float) \
+		if all_co else np.zeros((0, 3))
+	new._update()
+	return new
+
+# SantaLucia 1998 unified nearest-neighbor parameters
+# units: dH kcal/mol, dS cal/mol/K
+_NN_DH = {
+	'AA':-7.9, 'TT':-7.9, 'AT':-7.2, 'TA':-7.2,
+	'CA':-8.5, 'TG':-8.5, 'GT':-8.4, 'AC':-8.4,
+	'CT':-7.8, 'AG':-7.8, 'GA':-8.2, 'TC':-8.2,
+	'CG':-10.6,'GC':-9.8, 'GG':-8.0, 'CC':-8.0}
+_NN_DS = {
+	'AA':-22.2,'TT':-22.2,'AT':-20.4,'TA':-21.3,
+	'CA':-22.7,'TG':-22.7,'GT':-22.4,'AC':-22.4,
+	'CT':-21.0,'AG':-21.0,'GA':-22.2,'TC':-22.2,
+	'CG':-27.2,'GC':-24.4,'GG':-19.9,'CC':-19.9}
+
+def _revcomp(s):
+	c = {'A':'T','T':'A','G':'C','C':'G','N':'N'}
+	return ''.join(c[x] for x in reversed(s))
+
+def _gc_pct(s):
+	if not s: return 0.0
+	return 100.0 * (s.count('G') + s.count('C')) / len(s)
+
+def _tm_nn(seq, conc=250e-9, na=0.05):
+	'''
+	SantaLucia 1998 unified nearest-neighbor Tm with
+	salt correction (Owczarzy 2004 simplified).
+	conc = primer molar concentration (default 250 nM).
+	na   = Na+ molar concentration (default 50 mM).
+	'''
+	s = seq.upper()
+	if len(s) < 2: return 0.0
+	dH = 0.0
+	dS = 0.0
+	for i in range(len(s) - 1):
+		nn = s[i:i+2]
+		dH += _NN_DH.get(nn, 0.0)
+		dS += _NN_DS.get(nn, 0.0)
+	# Initiation terms
+	if s[0]  in 'GC': dH += 0.1; dS += -2.8
+	else:             dH += 2.3; dS +=  4.1
+	if s[-1] in 'GC': dH += 0.1; dS += -2.8
+	else:             dH += 2.3; dS +=  4.1
+	# Salt correction (Owczarzy 2004 linear)
+	N = len(s)
+	dS_salt = dS + 0.368 * (N - 1) * math.log(na)
+	R = 1.987
+	# Non-self-complementary => x = 4
+	tm_k = (dH * 1000.0) / (dS_salt + R * math.log(conc / 4.0))
+	return tm_k - 273.15
+
+def _has_run(s, n=4):
+	for base in 'ACGT':
+		if base * n in s: return True
+	return False
+
+def _has_hairpin(s, stem=4):
+	rc = _revcomp(s)
+	for i in range(len(s) - stem + 1):
+		motif = s[i:i+stem]
+		# look for reverse complement of motif later in s
+		j = s.find(_revcomp(motif), i + stem + 3)
+		if j != -1: return True
+	return False
+
+def _has_self_dimer(s, k=4):
+	rc = _revcomp(s)
+	# Slide 3' end of s against rc looking for >=k contiguous
+	# matching bases at the 3' end (alignment of s onto rc).
+	tail = s[-k:]
+	return tail in rc
+
+def PCR(dna_sequence):
+	'''
+	Design ideal forward and reverse PCR primers for a DNA template.
+
+	Constraints applied to each candidate (length 18-25):
+	    - GC% in [40, 60]
+	    - Nearest-neighbor (SantaLucia 1998) Tm in [55, 65] degC
+	    - 3' end is G or C (GC clamp)
+	    - No run of 4 identical bases
+	    - No internal palindrome of >= 4 (hairpin)
+	    - 3' tail not contained in self reverse complement
+	Forward and reverse Tm must agree within 2 degC.
+
+	Parameters
+	----------
+	dna_sequence : str
+	    Template DNA sequence (A/C/G/T).
+
+	Returns
+	-------
+	tuple : (forward, reverse)
+	    forward : str  forward primer (5' end of template).
+	    reverse : str  reverse primer (reverse complement of 3' end).
+	'''
+	seq = dna_sequence.upper()
+	for ch in seq:
+		if ch not in 'ACGT':
+			raise Exception(
+				f'Illegal base {ch!r} in template')
+	if len(seq) < 60:
+		raise Exception(
+			'Template too short for primer design (<60 bp)')
+	def _candidates(region):
+		out = []
+		for L in range(18, 26):
+			if L > len(region): continue
+			cand = region[:L]
+			if cand[-1] not in 'GC': continue
+			gc = _gc_pct(cand)
+			if not (40.0 <= gc <= 60.0): continue
+			if _has_run(cand, 4): continue
+			if _has_hairpin(cand, 4): continue
+			if _has_self_dimer(cand, 5): continue
+			tm = _tm_nn(cand)
+			if not (55.0 <= tm <= 65.0): continue
+			out.append((cand, tm, gc))
+		return out
+	# Forward: walk 5' end with a small offset window
+	fwd_pool = []
+	for off in range(0, min(15, len(seq) - 25)):
+		fwd_pool.extend(
+			[(off,) + c for c in _candidates(seq[off:])])
+	# Reverse: walk 3' end (in revcomp space)
+	rc = _revcomp(seq)
+	rev_pool = []
+	for off in range(0, min(15, len(rc) - 25)):
+		rev_pool.extend(
+			[(off,) + c for c in _candidates(rc[off:])])
+	if not fwd_pool: raise Exception('No valid forward primer')
+	if not rev_pool: raise Exception('No valid reverse primer')
+	# Pick the pair with closest Tm match, prefer Tm near 60
+	best, best_score = None, float('inf')
+	for off1, fwd, tmf, gcf in fwd_pool:
+		for off2, rev, tmr, gcr in rev_pool:
+			dT = abs(tmf - tmr)
+			if dT > 2.0: continue
+			score = (
+				dT * 5.0
+				+ abs(tmf - 60.0)
+				+ abs(tmr - 60.0)
+				+ abs(gcf - 50.0) * 0.1
+				+ abs(gcr - 50.0) * 0.1
+				+ (off1 + off2) * 0.05)
+			if score < best_score:
+				best_score = score
+				best = (fwd, rev)
+	if best is None:
+		raise Exception(
+			'No primer pair within Tm tolerance')
+	return best
+
+# Standard genetic code (DNA -> single-letter AA, '*' = stop)
+_CODON_TABLE = {
+	'TTT':'F','TTC':'F','TTA':'L','TTG':'L',
+	'CTT':'L','CTC':'L','CTA':'L','CTG':'L',
+	'ATT':'I','ATC':'I','ATA':'I','ATG':'M',
+	'GTT':'V','GTC':'V','GTA':'V','GTG':'V',
+	'TCT':'S','TCC':'S','TCA':'S','TCG':'S',
+	'CCT':'P','CCC':'P','CCA':'P','CCG':'P',
+	'ACT':'T','ACC':'T','ACA':'T','ACG':'T',
+	'GCT':'A','GCC':'A','GCA':'A','GCG':'A',
+	'TAT':'Y','TAC':'Y','TAA':'*','TAG':'*',
+	'CAT':'H','CAC':'H','CAA':'Q','CAG':'Q',
+	'AAT':'N','AAC':'N','AAA':'K','AAG':'K',
+	'GAT':'D','GAC':'D','GAA':'E','GAG':'E',
+	'TGT':'C','TGC':'C','TGA':'*','TGG':'W',
+	'CGT':'R','CGC':'R','CGA':'R','CGG':'R',
+	'AGT':'S','AGC':'S','AGA':'R','AGG':'R',
+	'GGT':'G','GGC':'G','GGA':'G','GGG':'G'}
+
+# Codon usage (relative frequencies). Source: Kazusa codon usage db.
+# Highest-weight codon per amino acid is selected for back-translation.
+_CODON_USAGE = {
+	'ecoli': {
+		'F':[('TTT',0.58),('TTC',0.42)],
+		'L':[('CTG',0.50),('TTA',0.13),('TTG',0.13),
+			('CTT',0.10),('CTC',0.10),('CTA',0.04)],
+		'I':[('ATT',0.49),('ATC',0.39),('ATA',0.11)],
+		'M':[('ATG',1.00)],
+		'V':[('GTG',0.37),('GTT',0.28),('GTC',0.20),('GTA',0.15)],
+		'S':[('AGC',0.28),('TCT',0.17),('TCC',0.15),
+			('AGT',0.15),('TCG',0.14),('TCA',0.12)],
+		'P':[('CCG',0.52),('CCA',0.19),('CCT',0.16),('CCC',0.12)],
+		'T':[('ACC',0.44),('ACG',0.27),('ACT',0.16),('ACA',0.13)],
+		'A':[('GCG',0.36),('GCC',0.27),('GCA',0.21),('GCT',0.16)],
+		'Y':[('TAT',0.59),('TAC',0.41)],
+		'*':[('TAA',0.61),('TGA',0.30),('TAG',0.09)],
+		'H':[('CAT',0.57),('CAC',0.43)],
+		'Q':[('CAG',0.66),('CAA',0.34)],
+		'N':[('AAC',0.55),('AAT',0.45)],
+		'K':[('AAA',0.74),('AAG',0.26)],
+		'D':[('GAT',0.63),('GAC',0.37)],
+		'E':[('GAA',0.68),('GAG',0.32)],
+		'C':[('TGC',0.55),('TGT',0.45)],
+		'W':[('TGG',1.00)],
+		'R':[('CGC',0.40),('CGT',0.38),('CGG',0.10),
+			('CGA',0.06),('AGA',0.04),('AGG',0.02)],
+		'G':[('GGC',0.40),('GGT',0.34),('GGG',0.15),('GGA',0.11)]},
+	'human': {
+		'F':[('TTC',0.55),('TTT',0.45)],
+		'L':[('CTG',0.41),('CTC',0.20),('CTT',0.13),
+			('TTG',0.13),('TTA',0.07),('CTA',0.07)],
+		'I':[('ATC',0.48),('ATT',0.36),('ATA',0.16)],
+		'M':[('ATG',1.00)],
+		'V':[('GTG',0.47),('GTC',0.24),('GTT',0.18),('GTA',0.11)],
+		'S':[('AGC',0.24),('TCC',0.22),('TCT',0.15),
+			('AGT',0.15),('TCA',0.15),('TCG',0.06)],
+		'P':[('CCC',0.33),('CCT',0.28),('CCA',0.27),('CCG',0.11)],
+		'T':[('ACC',0.36),('ACA',0.28),('ACT',0.24),('ACG',0.12)],
+		'A':[('GCC',0.40),('GCT',0.26),('GCA',0.23),('GCG',0.11)],
+		'Y':[('TAC',0.57),('TAT',0.43)],
+		'*':[('TGA',0.52),('TAA',0.28),('TAG',0.20)],
+		'H':[('CAC',0.59),('CAT',0.41)],
+		'Q':[('CAG',0.75),('CAA',0.25)],
+		'N':[('AAC',0.54),('AAT',0.46)],
+		'K':[('AAG',0.58),('AAA',0.42)],
+		'D':[('GAC',0.54),('GAT',0.46)],
+		'E':[('GAG',0.58),('GAA',0.42)],
+		'C':[('TGC',0.55),('TGT',0.45)],
+		'W':[('TGG',1.00)],
+		'R':[('AGA',0.20),('AGG',0.20),('CGG',0.21),
+			('CGC',0.19),('CGA',0.11),('CGT',0.08)],
+		'G':[('GGC',0.34),('GGA',0.25),('GGG',0.25),('GGT',0.16)]}}
+
+def _detect_alphabet(s):
+	chars = set(s.upper()) - {'-', '*', 'N'}
+	if not chars: return 'protein'
+	dna  = set('ACGT')
+	rna  = set('ACGU')
+	prot = set('ACDEFGHIKLMNPQRSTVWY')
+	if chars <= dna: return 'dna'
+	if chars <= rna: return 'rna'
+	if chars <= prot: return 'protein'
+	# Fall back: more amino-acid only letters wins
+	if chars - dna - rna: return 'protein'
+	return 'dna'
+
+def Translate(sequence, fmt='protein', organism='ecoli'):
+	'''
+	Translate between DNA, RNA and protein representations.
+
+	Parameters
+	----------
+	sequence : str
+	    Input sequence. Alphabet auto-detected (DNA / RNA / protein).
+	fmt : str
+	    Target alphabet: 'protein' (default), 'dna', or 'rna'.
+	organism : str
+	    Codon usage table for back-translation (protein -> DNA/RNA).
+	    'ecoli' (default) or 'human'.
+
+	Returns
+	-------
+	str : the translated sequence (uppercase).
+	'''
+	if not sequence: raise Exception('Empty sequence')
+	src = _detect_alphabet(sequence)
+	tgt = fmt.lower()
+	if tgt not in ('protein', 'dna', 'rna'):
+		raise Exception(f'Unknown target fmt: {fmt}')
+	s = sequence.upper().replace('-', '').replace(' ', '')
+	# Identity / alphabet swap
+	if src == tgt: return s
+	if src == 'dna' and tgt == 'rna':
+		return s.replace('T', 'U')
+	if src == 'rna' and tgt == 'dna':
+		return s.replace('U', 'T')
+	# Nucleotide -> protein
+	if src in ('dna', 'rna') and tgt == 'protein':
+		dna = s.replace('U', 'T')
+		L = len(dna)
+		if L % 3 != 0:
+			dna = dna[:L - (L % 3)]
+		out = []
+		for i in range(0, len(dna), 3):
+			codon = dna[i:i+3]
+			aa = _CODON_TABLE.get(codon, 'X')
+			out.append(aa)
+		return ''.join(out)
+	# Protein -> DNA / RNA (codon optimised)
+	if src == 'protein' and tgt in ('dna', 'rna'):
+		usage = _CODON_USAGE.get(organism.lower())
+		if usage is None:
+			raise Exception(
+				f"Unknown organism {organism!r}; "
+				f"use 'ecoli' or 'human'")
+		best = {aa: max(opts, key=lambda x: x[1])[0]
+			for aa, opts in usage.items()}
+		out = []
+		for aa in s:
+			c = best.get(aa)
+			if c is None:
+				raise Exception(
+					f'No codon for residue {aa!r}')
+			out.append(c)
+		dna = ''.join(out)
+		return dna if tgt == 'dna' else dna.replace('T', 'U')
+	raise Exception(
+		f'Unsupported translation {src} -> {tgt}')
+
+def PROSITE(sequence, pattern):
+	'''
+	Search a protein sequence for a PROSITE-style pattern.
+
+	Pattern grammar (subset of the official PROSITE syntax):
+	    -        token separator (stripped)
+	    A        literal residue
+	    [ABC]    any of A/B/C
+	    {ABC}    any except A/B/C
+	    x        any residue
+	    x(n)     exactly n residues
+	    x(n,m)   between n and m residues
+	    A(n)     exactly n A's
+	    A(n,m)   between n and m A's
+	    <        anchor at sequence start
+	    >        anchor at sequence end
+
+	Parameters
+	----------
+	pattern  : str  PROSITE pattern.
+	sequence : str  protein sequence to search.
+
+	Returns
+	-------
+	list of (start, end, match)
+	    start, end : 1-based, inclusive positions.
+	    match      : matched substring.
+	'''
+	if not pattern: raise Exception('Empty pattern')
+	if not sequence: return []
+	# Tokenise and translate to a regex.
+	p = pattern.replace('-', '').replace(' ', '')
+	out = []
+	i = 0
+	while i < len(p):
+		c = p[i]
+		if c == '<':
+			out.append('^')
+			i += 1
+		elif c == '>':
+			out.append('$')
+			i += 1
+		elif c == '[':
+			j = p.find(']', i)
+			if j == -1:
+				raise Exception('Unclosed [ in pattern')
+			out.append('[' + p[i+1:j] + ']')
+			i = j + 1
+		elif c == '{':
+			j = p.find('}', i)
+			if j == -1:
+				raise Exception('Unclosed { in pattern')
+			out.append('[^' + p[i+1:j] + ']')
+			i = j + 1
+		elif c == 'x' or c == 'X':
+			out.append('.')
+			i += 1
+		elif c.isalpha():
+			out.append(c.upper())
+			i += 1
+		else:
+			raise Exception(
+				f'Unexpected character {c!r} '
+				f'at position {i} of pattern')
+		# Optional quantifier (n) or (n,m)
+		if i < len(p) and p[i] == '(':
+			j = p.find(')', i)
+			if j == -1:
+				raise Exception('Unclosed ( in pattern')
+			body = p[i+1:j]
+			if ',' in body:
+				lo, hi = body.split(',', 1)
+				out.append('{' + lo.strip() + ','
+					+ hi.strip() + '}')
+			else:
+				out.append('{' + body.strip() + '}')
+			i = j + 1
+	regex = '(?=(' + ''.join(out) + '))'
+	rx   = re.compile(regex, re.IGNORECASE)
+	hits = []
+	for m in rx.finditer(sequence):
+		mstr  = m.group(1)
+		start = m.start() + 1
+		end   = start + len(mstr) - 1
+		hits.append((start, end, mstr))
+	return hits
+
+def HydrogenBondMap(pose):
+	'''
+	Backbone hydrogen-bond donor/acceptor map for a protein pose.
+
+	Uses the same DSSP electrostatic criterion as Pose.CalcDSSP
+	(Kabsch & Sander 1983):
+	    E = 0.084 * (1/r_ON + 1/r_CH - 1/r_OH - 1/r_CN) * 332
+	A backbone NH (residue i) -> C=O (residue j) bond is accepted
+	when E < -0.5 kcal/mol, |i - j| > 1, and i, j share a chain.
+
+	Parameters
+	----------
+	pose : Pose object containing a protein.
+
+	Returns
+	-------
+	np.ndarray of shape (N_atoms, N_atoms) with values:
+	    0 - no bond
+	    1 - this atom is a donor (backbone N) in a bond
+	    2 - this atom is an acceptor (backbone O) in a bond
+	'''
+	if pose.data.get('Type') != 'Protein':
+		raise Exception(
+			'HydrogenBondMap only supports protein poses')
+	AAs = pose.data.get('Amino Acids') or {}
+	if not AAs:
+		raise Exception('Pose has no amino acids')
+	atoms = pose.data['Atoms']
+	N_atoms = max(atoms.keys()) + 1 if atoms else 0
+	M = np.zeros((N_atoms, N_atoms), dtype=np.int8)
+	N_res = len(AAs)
+	res_idx = sorted(AAs.keys())
+	chains   = [AAs[i][1] for i in res_idx]
+	tricodes = [AAs[i][5].upper() for i in res_idx]
+	def _hasatom(r, name):
+		try:
+			pose._hasatom(r, name)
+		except Exception:
+			pass
+		for ai in AAs[r][2]:
+			if atoms[ai][0] == name: return True
+		return False
+	def _atomidx(r, name):
+		for ai in AAs[r][2]:
+			if atoms[ai][0] == name: return ai
+		return -1
+	co = pose.data['Coordinates']
+	# Compute virtual H positions (DSSP rule: H is N + unit(C->O) of i-1)
+	H_pos = [None] * N_res
+	for k, r in enumerate(res_idx):
+		if tricodes[k] == 'PRO': continue
+		if k == 0 or chains[k] != chains[k-1]: continue
+		if _hasatom(r, 'H'):
+			H_pos[k] = co[_atomidx(r, 'H')]
+		elif _hasatom(r, '1H'):
+			H_pos[k] = co[_atomidx(r, '1H')]
+		elif (_hasatom(r, 'N')
+			and _hasatom(res_idx[k-1], 'C')
+			and _hasatom(res_idx[k-1], 'O')):
+			Ni = co[_atomidx(r, 'N')]
+			Cp = co[_atomidx(res_idx[k-1], 'C')]
+			Op = co[_atomidx(res_idx[k-1], 'O')]
+			cdir = Cp - Op
+			nm = float(np.linalg.norm(cdir))
+			if nm > 0.001:
+				H_pos[k] = Ni + (cdir / nm)
+	for ki in range(N_res):
+		if H_pos[ki] is None: continue
+		ri = res_idx[ki]
+		Ni_idx = _atomidx(ri, 'N')
+		if Ni_idx < 0: continue
+		Ni = co[Ni_idx]
+		Hi = H_pos[ki]
+		for kj in range(N_res):
+			if abs(ki - kj) <= 1: continue
+			if chains[ki] != chains[kj]: continue
+			rj = res_idx[kj]
+			if not _hasatom(rj, 'O'): continue
+			Cj_idx = _atomidx(rj, 'C')
+			Oj_idx = _atomidx(rj, 'O')
+			if Cj_idx < 0 or Oj_idx < 0: continue
+			Cj = co[Cj_idx]
+			Oj = co[Oj_idx]
+			r_ON = float(np.linalg.norm(Oj - Ni))
+			r_CH = float(np.linalg.norm(Cj - Hi))
+			r_OH = float(np.linalg.norm(Oj - Hi))
+			r_CN = float(np.linalg.norm(Cj - Ni))
+			if min(r_ON, r_CH, r_OH, r_CN) < 0.001: continue
+			E = 0.084 * (
+				1/r_ON + 1/r_CH - 1/r_OH - 1/r_CN) * 332
+			if E < -0.5:
+				M[Ni_idx, Oj_idx] = 1
+				M[Oj_idx, Ni_idx] = 2
+	return M
+
+def ContactMap(pose):
+	'''
+	Residue-residue distance map (in angstroms).
+
+	Uses CA atoms for proteins and C1' atoms for DNA / RNA.
+
+	Parameters
+	----------
+	pose : Pose object containing a protein or nucleic acid.
+
+	Returns
+	-------
+	np.ndarray of shape (N_residues, N_residues) with pairwise
+	Euclidean distances in angstroms (zero on the diagonal).
+	'''
+	mol = pose.data.get('Type')
+	if mol is None:
+		raise Exception('Empty pose')
+	if mol == 'Protein':
+		src = pose.data['Amino Acids']
+		ref = 'CA'
+	elif mol in ('DNA', 'RNA'):
+		src = pose.data['Nucleotides']
+		ref = "C1'"
+	else:
+		raise Exception(f'Unknown molecule type: {mol}')
+	if not src:
+		raise Exception('Pose has no residues')
+	atoms = pose.data['Atoms']
+	co    = pose.data['Coordinates']
+	keys  = sorted(src.keys())
+	N     = len(keys)
+	pts   = np.zeros((N, 3))
+	for k, ri in enumerate(keys):
+		hit = False
+		for ai in src[ri][2]:
+			if atoms[ai][0] == ref:
+				pts[k] = co[ai]
+				hit = True
+				break
+		if not hit:
+			raise Exception(
+				f'Residue {ri} has no {ref} atom')
+	diff = pts[:, None, :] - pts[None, :, :]
+	mat  = np.sqrt((diff * diff).sum(-1))
+	np.fill_diagonal(mat, 0.0)
+	return mat
+
