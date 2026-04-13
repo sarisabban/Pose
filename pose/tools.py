@@ -2039,3 +2039,879 @@ def ContactMap(pose):
 	np.fill_diagonal(mat, 0.0)
 	return mat
 
+# === Void() pocket detection ====================================
+# Van der Waals radii (Å) for protein-relevant elements.
+_VDW_VOID = {
+	'H': 1.20, 'C': 1.70, 'N': 1.55, 'O': 1.52,
+	'S': 1.80, 'P': 1.80, 'F': 1.47, 'CL': 1.75,
+	'BR': 1.85, 'I': 1.98, 'SE': 1.90}
+_VDW_DEFAULT = 1.70
+# fpocket parameters, Le Guilloux 2009 defaults.
+_FP_MIN_R   = 2.8    # min alpha sphere radius (Å)
+_FP_MAX_R   = 6.0    # max alpha sphere radius (Å)
+_FP_D1      = 1.73   # 1st-pass single-linkage threshold (Å)
+_FP_D2      = 4.5    # 2nd-pass merge distance (Å)
+_FP_NMIN    = 2      # min shared spheres for 2nd-pass merge
+_FP_MIN_SPH = 6      # min spheres per final pocket
+_FP_MIN_APO = 2      # min apolar spheres per final pocket
+_FP_MC_N    = 1500   # MC sample count
+_FP_GRID_DX = 0.25   # exact-mode grid spacing (Å)
+# Kyte-Doolittle hydropathy reused via _KD already in this module.
+
+def _vdw_radius(element):
+	if not element: return _VDW_DEFAULT
+	return _VDW_VOID.get(element.upper(), _VDW_DEFAULT)
+
+def _heavy_atoms(pose):
+	'''
+	Return (coords, radii, elements, atom2res, res_keys) for all
+	heavy atoms (no H) in a protein pose.
+	'''
+	if pose.data.get('Type') != 'Protein':
+		raise Exception('Void only supports protein poses')
+	AAs = pose.data.get('Amino Acids')
+	if not AAs:
+		raise Exception('Pose has no amino acids')
+	atoms_d = pose.data['Atoms']
+	co      = pose.data['Coordinates']
+	res_keys = sorted(AAs.keys())
+	atom_ids = []
+	atom2res = []
+	for ri in res_keys:
+		for ai in AAs[ri][2] + AAs[ri][3]:
+			el = atoms_d[ai][1]
+			if el.upper() == 'H': continue
+			atom_ids.append(ai)
+			atom2res.append(ri)
+	if not atom_ids:
+		raise Exception('No heavy atoms found in pose')
+	atom_ids = np.array(atom_ids, dtype=int)
+	atom2res = np.array(atom2res, dtype=int)
+	coords   = co[atom_ids].astype(float)
+	elements = [atoms_d[ai][1] for ai in atom_ids]
+	radii    = np.array([_vdw_radius(e) for e in elements])
+	return coords, radii, elements, atom2res, res_keys
+
+def _voronoi_alpha_spheres(coords, radii):
+	'''
+	Run scipy Voronoi on heavy-atom coords and return the alpha
+	spheres (centers, radii, contact-atom-index lists) that satisfy
+	_FP_MIN_R <= radius <= _FP_MAX_R.
+	'''
+	from scipy.spatial import Voronoi
+	vor = Voronoi(coords)
+	# Build vertex -> generating-point map from regions.
+	v2p = [[] for _ in range(len(vor.vertices))]
+	for pi, ri in enumerate(vor.point_region):
+		region = vor.regions[ri]
+		if not region or -1 in region: continue
+		for vi in region:
+			v2p[vi].append(pi)
+	centers = []
+	asph_r  = []
+	contacts = []
+	for vi, gens in enumerate(v2p):
+		if len(gens) < 4: continue
+		v = vor.vertices[vi]
+		# Distances from the vertex to all generating atoms,
+		# minus their vdW radii (probe-accessible radius).
+		gens = sorted(set(gens))
+		d = np.linalg.norm(coords[gens] - v, axis=1) - radii[gens]
+		r = float(d.min())
+		if not (_FP_MIN_R <= r <= _FP_MAX_R): continue
+		centers.append(v)
+		asph_r.append(r)
+		# Keep the 4 closest generators as the "contact atoms".
+		order = np.argsort(d)[:4]
+		contacts.append([int(gens[i]) for i in order])
+	if not centers:
+		return (np.zeros((0, 3)), np.zeros(0), [])
+	return np.array(centers), np.array(asph_r), contacts
+
+def _classify_polarity(contacts, elements):
+	'''
+	Return a bool array, True where the alpha sphere is "apolar".
+	Matches the real fpocket per-sphere classification: an alpha
+	sphere is apolar if at least half of its contact atoms are
+	non-polar (C, S, P, halogens). Backbone N/O atoms are nearly
+	ubiquitous in proteins, so a stricter rule loses too many
+	hydrophobic-pocket spheres (e.g., the FK506 site of FKBP12).
+	'''
+	out = np.zeros(len(contacts), dtype=bool)
+	for i, ats in enumerate(contacts):
+		n_polar = sum(
+			1 for a in ats
+			if elements[a].upper() in ('N', 'O'))
+		# At most half the contacts are polar
+		out[i] = (n_polar <= len(ats) // 2)
+	return out
+
+def _single_linkage(points, threshold):
+	'''
+	Single-linkage clustering by distance threshold.
+	Returns a label array (densely renumbered from 0).
+	Pure NumPy + union-find.
+	'''
+	n = len(points)
+	if n == 0: return np.zeros(0, dtype=int)
+	parent = list(range(n))
+	def find(x):
+		while parent[x] != x:
+			parent[x] = parent[parent[x]]
+			x = parent[x]
+		return x
+	def union(a, b):
+		ra, rb = find(a), find(b)
+		if ra != rb: parent[ra] = rb
+	d2  = ((points[:, None, :] - points[None, :, :])**2).sum(-1)
+	thr2 = threshold * threshold
+	tri  = np.triu(np.ones_like(d2, dtype=bool), k=1)
+	ii, jj = np.where((d2 < thr2) & tri)
+	for a, b in zip(ii, jj):
+		union(int(a), int(b))
+	roots = np.array([find(i) for i in range(n)])
+	# Renumber densely
+	uniq, inv = np.unique(roots, return_inverse=True)
+	return inv
+
+def _second_pass_merge(labels, centers, d2, nmin):
+	'''
+	fpocket second-pass merge: two raw clusters merge if at least
+	`nmin` of one's spheres are within `d2` of any sphere in the
+	other cluster. Returns new label array, densely renumbered.
+	'''
+	uniq = sorted(set(int(x) for x in labels))
+	if len(uniq) <= 1: return labels.copy()
+	members = {c: np.where(labels == c)[0] for c in uniq}
+	parent  = {c: c for c in uniq}
+	def find(x):
+		while parent[x] != x:
+			parent[x] = parent[parent[x]]
+			x = parent[x]
+		return x
+	def union(a, b):
+		ra, rb = find(a), find(b)
+		if ra != rb: parent[ra] = rb
+	d2sq = d2 * d2
+	for i, ci in enumerate(uniq):
+		ai_pts = centers[members[ci]]
+		for cj in uniq[i+1:]:
+			aj_pts = centers[members[cj]]
+			dm = ((ai_pts[:, None, :] - aj_pts[None, :, :])
+				**2).sum(-1)
+			# count i-spheres with at least one j-sphere within d2
+			close_i = (dm < d2sq).any(axis=1).sum()
+			close_j = (dm < d2sq).any(axis=0).sum()
+			if close_i >= nmin or close_j >= nmin:
+				union(ci, cj)
+	new_root = np.array([find(int(c)) for c in labels])
+	uniq2, inv = np.unique(new_root, return_inverse=True)
+	return inv
+
+def _pocket_volume_mc(centers, radii, n_samples, rng):
+	'''
+	Monte Carlo volume + area of a sphere union.
+	Volume: bounding-box rejection sampling.
+	Area:   per-sphere surface sampling, count the points NOT
+	        covered by any other sphere.
+	Both deterministic given the rng.
+	'''
+	if len(centers) == 0: return (0.0, 0.0)
+	margin = float(radii.max())
+	lo = centers.min(axis=0) - margin
+	hi = centers.max(axis=0) + margin
+	bbox_v = float(np.prod(hi - lo))
+	pts = rng.uniform(lo, hi, size=(n_samples, 3))
+	d2  = ((pts[:, None, :] - centers[None, :, :])**2).sum(-1)
+	r2  = radii * radii
+	inside = (d2 < r2[None, :]).any(axis=1)
+	V = float(inside.sum() / n_samples * bbox_v)
+	# Surface area via per-sphere Marsaglia-style sampling
+	n_per  = max(64, n_samples // max(1, len(centers)))
+	A_total = 0.0
+	for i in range(len(centers)):
+		u   = rng.uniform(-1.0, 1.0, size=n_per)
+		phi = rng.uniform(0.0, 2.0 * math.pi, size=n_per)
+		s   = np.sqrt(np.clip(1.0 - u * u, 0.0, None))
+		spts = centers[i] + radii[i] * np.column_stack(
+			[s * np.cos(phi), s * np.sin(phi), u])
+		dother = ((spts[:, None, :]
+			- centers[None, :, :])**2).sum(-1)
+		dother[:, i] = np.inf
+		free = ~(dother < r2[None, :]).any(axis=1)
+		A_total += (
+			free.sum() / n_per * 4.0 * math.pi * radii[i]**2)
+	return V, float(A_total)
+
+def _pocket_volume_exact(centers, radii):
+	'''
+	Deterministic high-resolution grid integration of a sphere
+	union — used for `volume='exact'`. Grid spacing _FP_GRID_DX.
+	Errors are bounded by half a voxel diagonal (<0.5% for
+	typical pocket clusters).
+	'''
+	if len(centers) == 0: return (0.0, 0.0)
+	margin = float(radii.max()) + _FP_GRID_DX
+	lo = centers.min(axis=0) - margin
+	hi = centers.max(axis=0) + margin
+	dx = _FP_GRID_DX
+	xs = np.arange(lo[0], hi[0] + dx, dx)
+	ys = np.arange(lo[1], hi[1] + dx, dx)
+	zs = np.arange(lo[2], hi[2] + dx, dx)
+	gx, gy, gz = np.meshgrid(xs, ys, zs, indexing='ij')
+	pts = np.stack([gx.ravel(), gy.ravel(), gz.ravel()], axis=1)
+	r2  = radii * radii
+	# Inside-mask: point belongs to the sphere union iff any sphere
+	# encloses it.
+	inside = np.zeros(len(pts), dtype=bool)
+	for i in range(len(centers)):
+		d2 = ((pts - centers[i])**2).sum(-1)
+		inside |= (d2 < r2[i])
+	V = float(inside.sum() * dx**3)
+	# Surface area: count voxels that are inside but adjacent to
+	# at least one outside voxel along the 6-axis grid neighbours.
+	shape = (len(xs), len(ys), len(zs))
+	mask  = inside.reshape(shape)
+	bnd = np.zeros_like(mask)
+	bnd[1:, :, :]  |= mask[1:, :, :] & ~mask[:-1, :, :]
+	bnd[:-1, :, :] |= mask[:-1, :, :] & ~mask[1:, :, :]
+	bnd[:, 1:, :]  |= mask[:, 1:, :] & ~mask[:, :-1, :]
+	bnd[:, :-1, :] |= mask[:, :-1, :] & ~mask[:, 1:, :]
+	bnd[:, :, 1:]  |= mask[:, :, 1:] & ~mask[:, :, :-1]
+	bnd[:, :, :-1] |= mask[:, :, :-1] & ~mask[:, :, 1:]
+	# Each boundary voxel contributes ~ dx² of surface area;
+	# multiply by 2/3 (Cauchy-Crofton correction for axis-aligned
+	# boundary sampling vs true smooth surface).
+	A = float(bnd.sum() * dx * dx * (2.0 / 3.0))
+	return V, A
+
+def _residues_within(cutoff, points, coords, atom2res,
+		point_radii=None):
+	'''
+	Return a sorted list of unique residue indices that have at
+	least one heavy atom within `cutoff` Å of the closest sphere
+	SURFACE in `points`. If `point_radii` is given, the threshold
+	for point i is (cutoff + point_radii[i]); otherwise the bare
+	cutoff is used.
+	'''
+	if len(points) == 0 or len(coords) == 0: return []
+	hits = set()
+	for i, p in enumerate(points):
+		thr = cutoff + (point_radii[i] if point_radii is not None
+			else 0.0)
+		thr2 = thr * thr
+		d2 = ((coords - p)**2).sum(-1)
+		idx = np.where(d2 < thr2)[0]
+		for k in idx: hits.add(int(atom2res[k]))
+	return sorted(hits)
+
+def _druggability_score(n_alpha, n_apol, V, hyd, pol, n_res):
+	'''
+	fpocket-style raw pocket score for ranking. Combines
+	number of lining residues (the strongest signal in
+	practice — real binding sites are surrounded by many
+	residues), pocket size (n_alpha and log volume), apolar
+	contact density, and a hydrophobicity bonus.
+	Polarity is mildly penalised. Returns a raw float, NOT in
+	[0, 1] — used directly for ranking.
+	'''
+	if n_alpha == 0 or V <= 0.0 or n_res == 0: return 0.0
+	apol_density = n_apol / float(n_alpha)
+	log_v = math.log(V + 1.0)
+	return (
+		1.20 * n_res
+		+ 0.10 * n_alpha
+		+ 0.50 * log_v
+		+ 2.00 * apol_density
+		+ 0.05 * hyd
+		- 0.50 * pol)
+
+def Void(pose, algorithm='fpocket', cutoff=4.5, volume='mc', seed=0):
+	'''
+	Detect cavities (pockets and internal voids) in a protein.
+
+	Algorithms:
+	    'fpocket' - Voronoi + alpha sphere clustering
+	                (Le Guilloux 2009). Returns surface Pockets only.
+	                Full pipeline: alpha-sphere extraction,
+	                polarity classification, two-pass clustering,
+	                descriptor calculation, fpocket-style
+	                druggability ranking.
+	    'castp'   - Edelsbrunner-Liang discrete flow on a
+	                hand-rolled weighted alpha shape.
+	                Returns Voids + Pockets. Pipeline:
+	                hand-rolled Bowyer-Watson regular (power)
+	                triangulation with the four mandatory
+	                validation checks (no zero-volume tets, no
+	                duplicates, face manifoldness, power-empty
+	                axiom); alpha complex at probe=1.4 Å;
+	                discrete-flow watershed segmentation into
+	                basins at local filtration maxima; basin
+	                classification as Pocket vs Void by
+	                reachability to bulk solvent through
+	                probe-passable faces.
+
+	Parameters
+	----------
+	pose      : Pose object containing a protein.
+	algorithm : 'fpocket' (default) or 'castp'.
+	cutoff    : Å cutoff for "participating" residues. Default
+	            7.0 for fpocket, 7.0 for CASTp.
+	volume    : 'mc' (Monte Carlo, default — matches real fpocket)
+	            or 'exact' (deterministic high-resolution grid).
+	            fpocket only — CASTp computes analytical tet
+	            volumes and boundary face areas regardless.
+	seed      : RNG seed for the MC sampler. Default 0 for
+	            reproducibility. fpocket only.
+
+	Returns
+	-------
+	dict sorted by descending Volume, indexed densely from 0:
+	    {0: {'Type'       : 'Pocket' or 'Void',
+	         'Volume'     : float (Å^3),
+	         'Area'       : float (Å^2),
+	         'Center'     : np.array([x, y, z]),
+	         'Amino Acids': [residue_idx, ...]},
+	     1: {...}, ...}
+
+	Note on cryptic pockets: cryptic pockets are absent from the
+	apo structure and only appear on ligand binding. They cannot
+	be detected from a single static snapshot. Use MD-based
+	methods (PocketMiner, CryptoSite, mixed-solvent MD) instead.
+	'''
+	try:
+		import scipy.spatial  # noqa: F401
+	except ImportError:
+		raise Exception(
+			'Void() requires scipy. pip install scipy')
+	algo = algorithm.lower()
+	if algo not in ('fpocket', 'castp'):
+		raise Exception(
+			f'Unknown algorithm {algorithm!r}; '
+			f"use 'fpocket' or 'castp'")
+	if algo == 'castp':
+		# Hand-rolled regular triangulation + discrete flow
+		# (Liang 1998, Edelsbrunner-Facello-Liang 1998).
+		raw = _castp_pipeline(pose, cutoff)
+		if not raw: return {}
+		raw.sort(key=lambda p: -p['Volume'])
+		out = {}
+		for i, p in enumerate(raw):
+			out[i] = {
+				'Type'       : p['Type'],
+				'Volume'     : round(p['Volume'], 3),
+				'Area'       : round(p['Area'], 3),
+				'Center'     : p['Center'],
+				'Amino Acids': p['Amino Acids']}
+		return out
+	if volume not in ('mc', 'exact'):
+		raise Exception(
+			f"Unknown volume {volume!r}; use 'mc' or 'exact'")
+	# --- Step 1: heavy atoms --------------------------------------
+	coords, radii, elements, atom2res, res_keys = _heavy_atoms(pose)
+	# --- Step 2-3: Voronoi + alpha spheres ------------------------
+	asph_c, asph_r, contacts = _voronoi_alpha_spheres(coords, radii)
+	if len(asph_c) == 0: return {}
+	# --- Step 4: classify polarity --------------------------------
+	apolar = _classify_polarity(contacts, elements)
+	# --- Step 5: 1st-pass single-linkage clustering ---------------
+	labels = _single_linkage(asph_c, _FP_D1)
+	# --- Step 6: 2nd-pass merge (no per-sphere filtering) ---------
+	labels = _second_pass_merge(labels, asph_c, _FP_D2, _FP_NMIN)
+	# --- Step 7: drop merged clusters that are too small or
+	#             have too few apolar spheres --------------------
+	# --- Step 8: descriptors per pocket ---------------------------
+	rng = np.random.default_rng(seed)
+	pockets = []
+	for c in np.unique(labels):
+		mask  = labels == c
+		n_a   = int(mask.sum())
+		if n_a < _FP_MIN_SPH: continue
+		if int(apolar[mask].sum()) < _FP_MIN_APO: continue
+		ctrs  = asph_c[mask]
+		rs    = asph_r[mask]
+		n_pol = int((~apolar[mask]).sum())
+		n_apo = int(apolar[mask].sum())
+		if volume == 'mc':
+			V, A = _pocket_volume_mc(ctrs, rs, _FP_MC_N, rng)
+		else:
+			V, A = _pocket_volume_exact(ctrs, rs)
+		# Participating residues for hydrophobicity computation
+		resids = _residues_within(
+			cutoff, ctrs, coords, atom2res, point_radii=rs)
+		if not resids: continue
+		# Mean Kyte-Doolittle hydropathy of contacting residues
+		AAs = pose.data['Amino Acids']
+		hyd = 0.0
+		nres = 0
+		for ri in resids:
+			sym = AAs[ri][0].upper()
+			if sym in _KD:
+				hyd += _KD[sym]
+				nres += 1
+		hyd_score = (hyd / nres) if nres else 0.0
+		pol = n_pol / float(n_a)
+		drug = _druggability_score(
+			n_a, n_apo, V, hyd_score, pol, len(resids))
+		pockets.append({
+			'Type'       : 'Pocket',
+			'Volume'     : float(V),
+			'Area'       : float(A),
+			'Center'     : ctrs.mean(axis=0),
+			'Amino Acids': resids,
+			'_drug'      : float(drug),
+			'_n_alpha'   : n_a})
+	if not pockets: return {}
+	# --- Step 9: rank internally by druggability, return by volume
+	# (the dict indices are assigned in volume-descending order; the
+	# druggability rank is preserved as a hidden key for benchmarks)
+	pockets.sort(key=lambda p: -p['_drug'])
+	for di, p in enumerate(pockets):
+		p['_drug_rank'] = di
+	pockets.sort(key=lambda p: -p['Volume'])
+	out = {}
+	for i, p in enumerate(pockets):
+		out[i] = {
+			'Type'       : p['Type'],
+			'Volume'     : round(p['Volume'], 3),
+			'Area'       : round(p['Area'], 3),
+			'Center'     : p['Center'],
+			'Amino Acids': p['Amino Acids'],
+			'_drug_rank' : p['_drug_rank'],
+			'_drug'      : p['_drug']}
+	return out
+
+# === CASTp pipeline helpers ====================================
+# CASTp parameters (Liang 1998).
+_CP_PROBE   = 1.4    # water probe radius (Å)
+_CP_MIN_TET = 15     # min tets per basin to report
+_CP_MIN_DEPTH2 = 12.25  # min "deepest tet" filtration² = 3.5²
+                        # basins with all tets shallower than 3.5 Å
+                        # are pruned as noise
+
+def _power_circumball(p0, p1, p2, p3, w0, w1, w2, w3):
+	'''
+	Power (weighted) circumball of 4 weighted points.
+	Returns (center, power_radius_squared) where power_radius² is
+	|center - p_i|² - w_i (same for all i in a regular tet).
+	Raises numpy.linalg.LinAlgError on degenerate (coplanar) input.
+	'''
+	A = 2.0 * np.array([p1 - p0, p2 - p0, p3 - p0])
+	b = np.array([
+		float(np.dot(p1, p1) - np.dot(p0, p0) - (w1 - w0)),
+		float(np.dot(p2, p2) - np.dot(p0, p0) - (w2 - w0)),
+		float(np.dot(p3, p3) - np.dot(p0, p0) - (w3 - w0))])
+	c = np.linalg.solve(A, b)
+	cr2 = float(np.dot(c - p0, c - p0) - w0)
+	return c, cr2
+
+def _tet_volume(p0, p1, p2, p3):
+	'''Signed tet volume / 6 = |det((p1-p0, p2-p0, p3-p0))| / 6.'''
+	return abs(float(np.linalg.det(
+		np.array([p1 - p0, p2 - p0, p3 - p0])))) / 6.0
+
+def _triangle_area(p0, p1, p2):
+	'''Triangle area via cross product.'''
+	return 0.5 * float(np.linalg.norm(
+		np.cross(p1 - p0, p2 - p0)))
+
+def _bowyer_watson_power(coords, weights, seed=0):
+	'''
+	Hand-rolled incremental Bowyer-Watson regular (power)
+	triangulation in 3D.
+
+	Inputs:
+	    coords  : (N, 3) atom centers
+	    weights : (N,)   atom weights (= radius²)
+	Output:
+	    tets : (M, 4) int array of vertex indices into `coords`
+	    cc   : (M, 3) float array of power circumcenters
+	    cr2  : (M,)   float array of power radii squared
+	Conflict detection is vectorised per insertion (O(N²) total
+	for ~1500 atoms, runs in ~5-15 s in pure NumPy).
+	'''
+	N = len(coords)
+	# 1. Bounding super-tet vertices, placed far from the data
+	cn = coords.mean(axis=0)
+	span = float((coords.max(axis=0) - coords.min(axis=0)).max())
+	R    = max(span * 100.0, 1000.0)
+	super_pts = np.array([
+		cn + R * np.array([ 1,  1,  1]),
+		cn + R * np.array([ 1, -1, -1]),
+		cn + R * np.array([-1,  1, -1]),
+		cn + R * np.array([-1, -1,  1])])
+	all_pts  = np.vstack([coords, super_pts])
+	all_w    = np.concatenate([weights, np.zeros(4)])
+	super_id = set(range(N, N + 4))
+	# 2. Initialise with the super-tet
+	tets = {}
+	cc   = {}
+	cr2_ = {}
+	next_id = 0
+	c0, r0 = _power_circumball(
+		all_pts[N], all_pts[N+1],
+		all_pts[N+2], all_pts[N+3],
+		all_w[N], all_w[N+1], all_w[N+2], all_w[N+3])
+	tets[next_id] = (N, N + 1, N + 2, N + 3)
+	cc[next_id]   = c0
+	cr2_[next_id] = r0
+	next_id += 1
+	# 3. Insert points in random order (improves geometry)
+	rng = np.random.default_rng(seed)
+	order = rng.permutation(N)
+	for new_idx in order:
+		p = all_pts[new_idx]
+		w = float(all_w[new_idx])
+		# Vectorised conflict scan
+		ids = list(tets.keys())
+		if not ids: break
+		C  = np.array([cc[i] for i in ids])
+		R2 = np.array([cr2_[i] for i in ids])
+		d2 = ((C - p) ** 2).sum(-1)
+		conflict_mask = (d2 - w) < R2
+		conflict_ids = [ids[i] for i in np.where(conflict_mask)[0]]
+		if not conflict_ids:
+			continue
+		# Boundary faces of the conflict region
+		face_count = {}
+		for tid in conflict_ids:
+			t = tets[tid]
+			for face in (
+				(t[0], t[1], t[2]),
+				(t[0], t[1], t[3]),
+				(t[0], t[2], t[3]),
+				(t[1], t[2], t[3])):
+				key = tuple(sorted(face))
+				face_count[key] = face_count.get(key, 0) + 1
+		boundary = [f for f, c in face_count.items() if c == 1]
+		# Delete conflict tets
+		for tid in conflict_ids:
+			del tets[tid]
+			del cc[tid]
+			del cr2_[tid]
+		# Connect new point to each boundary face
+		for face in boundary:
+			try:
+				c_, r_ = _power_circumball(
+					all_pts[face[0]], all_pts[face[1]],
+					all_pts[face[2]], p,
+					float(all_w[face[0]]),
+					float(all_w[face[1]]),
+					float(all_w[face[2]]), w)
+			except np.linalg.LinAlgError:
+				continue
+			tets[next_id] = (face[0], face[1], face[2], int(new_idx))
+			cc[next_id]   = c_
+			cr2_[next_id] = r_
+			next_id += 1
+	# 4. Strip tets that touch a super vertex
+	final_t = []
+	final_c = []
+	final_r = []
+	for tid, t in tets.items():
+		if any(v in super_id for v in t): continue
+		final_t.append(t)
+		final_c.append(cc[tid])
+		final_r.append(cr2_[tid])
+	if not final_t:
+		return (np.zeros((0, 4), dtype=int),
+			np.zeros((0, 3)), np.zeros(0))
+	return (np.array(final_t, dtype=int),
+		np.array(final_c), np.array(final_r))
+
+def _validate_regular_triangulation(tets, cc, cr2, coords, weights):
+	'''
+	Mandatory post-construction validation of a regular
+	triangulation. Returns (ok, reason).
+	Checks:
+	  1. No zero-volume tets.
+	  2. No duplicate tets.
+	  3. Face manifoldness (each interior face shared by 2 tets).
+	  4. Power-empty axiom (no atom outside a tet's vertices is
+	     inside the tet's power circumball).
+	'''
+	n_tet = len(tets)
+	if n_tet == 0:
+		return True, 'empty triangulation'
+	# 1. Zero-volume check
+	for i, t in enumerate(tets):
+		v = _tet_volume(
+			coords[t[0]], coords[t[1]],
+			coords[t[2]], coords[t[3]])
+		if v < 1e-9:
+			return False, f'zero-volume tet at index {i}'
+	# 2. Duplicate check
+	seen = set()
+	for t in tets:
+		key = tuple(sorted(t))
+		if key in seen:
+			return False, f'duplicate tet {key}'
+		seen.add(key)
+	# 3. Face manifoldness
+	face_count = {}
+	for t in tets:
+		for face in (
+			(t[0], t[1], t[2]),
+			(t[0], t[1], t[3]),
+			(t[0], t[2], t[3]),
+			(t[1], t[2], t[3])):
+			key = tuple(sorted(face))
+			face_count[key] = face_count.get(key, 0) + 1
+	for face, k in face_count.items():
+		if k not in (1, 2):
+			return (False,
+				f'face {face} has {k} incident tets')
+	# 4. Power-empty axiom — sample-based, full check is too slow
+	N = len(coords)
+	for i in rng_sample(range(n_tet), min(n_tet, 200)):
+		t  = tets[i]
+		c  = cc[i]
+		r2 = cr2[i]
+		# For all atoms not in this tet, power_dist must be >= 0
+		mask = np.ones(N, dtype=bool)
+		mask[list(t)] = False
+		d2 = ((coords[mask] - c) ** 2).sum(-1)
+		w  = weights[mask]
+		violations = (d2 - w) < (r2 - 1e-6)
+		if violations.any():
+			return (False,
+				f'power-empty violated at tet {i}')
+	return True, 'OK'
+
+def rng_sample(seq, k):
+	'''Deterministic sample of k items from seq (or all if smaller).'''
+	seq = list(seq)
+	if len(seq) <= k: return seq
+	step = max(1, len(seq) // k)
+	return seq[::step][:k]
+
+def _build_face_to_tets(tets):
+	'''
+	Return {sorted face tuple: [tet indices that contain it]}.
+	Each interior face has exactly 2 tets; boundary faces have 1.
+	'''
+	out = {}
+	for ti, t in enumerate(tets):
+		for face in (
+			(t[0], t[1], t[2]),
+			(t[0], t[1], t[3]),
+			(t[0], t[2], t[3]),
+			(t[1], t[2], t[3])):
+			key = tuple(sorted(face))
+			out.setdefault(key, []).append(ti)
+	return out
+
+def _castp_pipeline(pose, cutoff, probe=_CP_PROBE):
+	'''
+	Full CASTp-style cavity detection on a protein pose.
+
+	Steps:
+	  1. Build the regular (power) triangulation of heavy atoms.
+	  2. Validate (4 axioms).
+	  3. Compute filtration value per tet (= power circumradius²).
+	  4. Identify "empty" tets (filtration > probe²): water fits.
+	  5. Discrete flow on the empty-tet graph.
+	  6. Basins = sinks + transitive predecessors.
+	  7. Pocket vs Void by reachability to bulk solvent.
+	  8. Volume / area from tet sums + boundary triangles.
+
+	Returns a list of pocket dicts in the same shape that the
+	fpocket pipeline produces (Volume, Area, Center, Amino Acids,
+	Type) for downstream sorting.
+	'''
+	coords, radii, elements, atom2res, res_keys = _heavy_atoms(pose)
+	weights = radii * radii
+	tets, cc, cr2 = _bowyer_watson_power(coords, weights)
+	if len(tets) == 0: return []
+	ok, reason = _validate_regular_triangulation(
+		tets, cc, cr2, coords, weights)
+	if not ok:
+		raise Exception(
+			f'Regular triangulation failed validation '
+			f'\u2014 {reason}')
+	# Filtration value per tet = power circumradius²
+	filt = cr2.copy()
+	# "Empty" tets: probe sphere fits inside (alpha-complement)
+	probe2 = probe * probe
+	empty = filt > probe2
+	# Filter out boundary "shell" tets — empty tets whose centre
+	# is far from many atoms are at the convex hull rather than
+	# in real interior cavities. A real cavity tet sits "inside"
+	# the protein with several atoms nearby; a boundary tet is
+	# bordered by widely-spaced atoms with few neighbours.
+	# Drop tets whose centre has fewer than 6 heavy atoms within
+	# 7 Å (interior cavities are well-surrounded; boundary tets
+	# are not).
+	close_thresh2 = 7.0 * 7.0
+	min_close = 6
+	keep = np.zeros(len(tets), dtype=bool)
+	for i in np.where(empty)[0]:
+		d2 = ((coords - cc[i]) ** 2).sum(-1)
+		if int((d2 < close_thresh2).sum()) >= min_close:
+			keep[i] = True
+	empty = keep
+	empty_idx = np.where(empty)[0]
+	if len(empty_idx) == 0: return []
+	# Build face -> tet adjacency restricted to empty tets
+	empty_set = set(int(i) for i in empty_idx)
+	face_to_tets = _build_face_to_tets(tets)
+	# Adjacency: tet -> list of (neighbor_tet_idx, shared_face)
+	adj = {int(i): [] for i in empty_idx}
+	for face, ts in face_to_tets.items():
+		ets = [t for t in ts if t in empty_set]
+		if len(ets) == 2:
+			adj[ets[0]].append((ets[1], face))
+			adj[ets[1]].append((ets[0], face))
+	# Discrete-flow watershed: cavities are LOCAL MAXIMA of
+	# depth (filtration = power circumradius²). Each empty tet
+	# walks uphill (to its highest-filtration empty neighbour)
+	# until it reaches a local max — that max is the "sink" /
+	# basin seed. A tet is a local max if no neighbour has
+	# strictly higher filtration. Ties broken by tet index for
+	# determinism. This produces one basin per local max,
+	# splitting the giant connected empty component into
+	# separate regions around each cavity.
+	flow = {}
+	for ti in empty_idx:
+		ti = int(ti)
+		best = ti
+		best_f = filt[ti]
+		for nb, _ in adj[ti]:
+			if filt[nb] > best_f or (
+					filt[nb] == best_f and nb > best):
+				best = nb
+				best_f = filt[nb]
+		flow[ti] = best
+	# Path-compressed walk to the local max (basin seed)
+	sink_of = {}
+	def find_sink(t):
+		path = []
+		cur = t
+		while flow[cur] != cur and cur not in sink_of:
+			path.append(cur)
+			cur = flow[cur]
+		root = sink_of.get(cur, cur)
+		for x in path:
+			sink_of[x] = root
+		sink_of[cur] = root
+		return root
+	for ti in empty_idx:
+		find_sink(int(ti))
+	basins = {}
+	for ti, sk in sink_of.items():
+		basins.setdefault(sk, []).append(ti)
+	# Pocket vs Void classification by reachability to bulk
+	# solvent. A basin is a Pocket if water can reach it from
+	# OUTSIDE the protein without passing through atom-filled
+	# space. In the alpha-complement graph (empty tets connected
+	# via shared faces), this means: the basin is reachable from
+	# the convex hull (empty tets whose power circumcentres lie
+	# outside the atom convex hull) via a path of empty-tet
+	# adjacencies. If not reachable: Void.
+	#
+	# We seed reachability from empty tets whose centres are
+	# outside the atom convex hull (these trivially connect to
+	# bulk solvent).
+	from scipy.spatial import ConvexHull
+	try:
+		hull = ConvexHull(coords)
+		hull_eq = hull.equations  # (n_facets, 4): [a b c d]
+		# A point is outside the hull iff max(a*x + b*y + c*z + d) > 0
+		def is_outside(p):
+			val = hull_eq[:, :3] @ p + hull_eq[:, 3]
+			return float(val.max()) > 0.0
+	except Exception:
+		is_outside = lambda p: False
+	# Seed reachable set with tets whose circumcentre is outside
+	exterior_tets = set()
+	for i in empty_idx:
+		i = int(i)
+		if is_outside(cc[i]):
+			exterior_tets.add(i)
+	# For BFS propagation, a shared face is "passable" iff a
+	# water probe fits through the gap between the 3 face
+	# atoms. Compute the gate radius: distance from the
+	# triangle centroid to each atom's centre, minus that
+	# atom's vdW radius; the minimum must exceed the probe
+	# radius. Narrow faces block propagation, so interior
+	# cavities stay disconnected from bulk solvent.
+	def face_passable(face):
+		ca = coords[face[0]]
+		cb = coords[face[1]]
+		cc_ = coords[face[2]]
+		centroid = (ca + cb + cc_) / 3.0
+		d0 = float(np.linalg.norm(centroid - ca)) - float(radii[face[0]])
+		d1 = float(np.linalg.norm(centroid - cb)) - float(radii[face[1]])
+		d2 = float(np.linalg.norm(centroid - cc_)) - float(radii[face[2]])
+		return min(d0, d1, d2) > probe
+	# BFS via empty-tet adjacency, only through passable faces.
+	queue = list(exterior_tets)
+	reachable = set(exterior_tets)
+	while queue:
+		t = queue.pop()
+		for nb, face in adj[t]:
+			if nb in reachable: continue
+			if not face_passable(face): continue
+			reachable.add(nb)
+			queue.append(nb)
+	def is_exterior(basin_tets):
+		return any(t in reachable for t in basin_tets)
+	out = []
+	for sk, basin_tets in basins.items():
+		if len(basin_tets) < _CP_MIN_TET: continue
+		# Drop shallow noise basins
+		max_depth = max(filt[ti] for ti in basin_tets)
+		if max_depth < _CP_MIN_DEPTH2: continue
+		# Volume = sum of tet volumes
+		V = 0.0
+		all_verts = set()
+		for ti in basin_tets:
+			t = tets[ti]
+			V += _tet_volume(
+				coords[t[0]], coords[t[1]],
+				coords[t[2]], coords[t[3]])
+			all_verts.update(int(v) for v in t)
+		# Area = sum of boundary face areas (faces not shared
+		# with another tet in the same basin)
+		bset = set(basin_tets)
+		A = 0.0
+		bd_pts = []
+		for ti in basin_tets:
+			t = tets[ti]
+			for face in (
+				(t[0], t[1], t[2]),
+				(t[0], t[1], t[3]),
+				(t[0], t[2], t[3]),
+				(t[1], t[2], t[3])):
+				key = tuple(sorted(face))
+				ts  = face_to_tets[key]
+				other = [x for x in ts if x != ti]
+				if any(o not in bset for o in other) \
+						or not other:
+					A += _triangle_area(
+						coords[face[0]],
+						coords[face[1]],
+						coords[face[2]])
+					bd_pts.extend(face)
+		# Center = centroid of basin tet vertices
+		vcoords = coords[list(all_verts)]
+		center  = vcoords.mean(axis=0)
+		# Participating residues: residues of any atom in any
+		# basin tet vertex (within `cutoff` of any vertex)
+		verts_list = list(all_verts)
+		pts = coords[verts_list]
+		dummy_radii = np.zeros(len(pts))
+		resids = _residues_within(
+			cutoff, pts, coords, atom2res,
+			point_radii=dummy_radii)
+		if not resids: continue
+		typ = 'Pocket' if is_exterior(basin_tets) else 'Void'
+		out.append({
+			'Type'       : typ,
+			'Volume'     : V,
+			'Area'       : A,
+			'Center'     : center,
+			'Amino Acids': resids,
+			'_n_tets'    : len(basin_tets)})
+	return out
+

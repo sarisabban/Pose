@@ -17,4 +17,4 @@ setuptools.setup(
 	packages=['pose'],
 	include_package_data=True,
 	package_data={'pose': ['*.json']},
-	install_requires=['numpy'])
+	install_requires=['numpy', 'scipy'])
