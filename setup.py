@@ -8,7 +8,7 @@ setuptools.setup(
 	version='1.0',
 	author='Sari Sabban',
 	author_email='',
-	description='A bare metal Python library for building and manipulating protein molecular structures',
+	description='A bare-metal Python library for building and manipulating protein and nucleic acid molecular structures',
 	long_description=long_description,
 	long_description_content_type='text/markdown',
 	url='https://github.com/sarisabban/Pose',
@@ -17,4 +17,4 @@ setuptools.setup(
 	packages=['pose'],
 	include_package_data=True,
 	package_data={'pose': ['*.json']},
-	install_requires=['numpy', 'scipy'])
+	install_requires=['numpy'])
