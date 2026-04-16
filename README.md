@@ -33,7 +33,7 @@ Pose constructs a data structure for protein or nucleic acid molecules that cont
 Using this data structure, Pose can build and manipulate polypeptides and nucleic acids: construct any polypeptide or nucleic acid from sequence, move dihedral and rotamer angles, mutate residues and base pairs, and measure bond lengths and angles. It is designed as a substrate for higher-level protocols such as simulated annealing, molecular dynamics, and machine learning-based molecular design.
 
 **Key features:**
-- Designed to be extremely stable bare-metal python: NumPy is the only dependency for the core `Pose` and `Molecule` classes; SciPy is needed only for the `Void()` cavity-detection tool
+- Designed to be extremely stable bare-metal python: NumPy is the only dependency for the core `Pose` and `Molecule` classes
 - 26 amino acids supported by default (20 canonical + 6 non-canonical: LYX, MSE, PYL, SEC, TRF, TSO), can be extended to 100+
 - Support for both L-amino acids and D-amino acids (mixed sequences fully supported)
 - 5 DNA and RNA canonical nucleotides
@@ -48,7 +48,7 @@ Using this data structure, Pose can build and manipulate polypeptides and nuclei
 
 ## Installation
 
-**Dependencies:** Python >= 3, NumPy, SciPy
+**Dependencies:** Python >= 3, NumPy
 
 For virtualenv:
 ```bash
@@ -167,7 +167,7 @@ Each class have similar methods and data structure, but with slight differences 
 | `p.Export('out.pdb')`                                      | Write the full structure, and all chains, to a PDB or mmCIF file |
 | `m.Export('out.sdf')`                                      | Write the full structure to a PDB, SDF, mmCIF, MOL, or MOL2 file |
 | `p.Build('MSLESNRGI', chain='A', fmt='protein')`           | Build a macromolecule from a one-letter sequence. For a polypeptide add the sequence and choose the format `fmt='Protein'`, uppercase = L-amino acids, lowercase = D-amino acids. For a nucleic acid add the sequence and choose the format `fmt='DNA'` or `fmt='RNA'`. You can add more chains by repeating the command with different chain `chain='A'` values. A structure can either be a protein, or a nucleic acid (DNA/RNA), it cannot be a mixture of the two |
-| `p.ReBuild(sequence=None, D_AA=False, _mutate=None)`       | Rebuild the polypeptide or nucleic acid. Use `sequence='AGLMTSWVLVA'` to rebuild the structure with multiple bulk mutations on chain A. Use `sequence={'A':'MSLKLSTVVA', 'B':'ASLKSWFWVA'}` to perform mutations at multiple chains at the same time. Use `D_AA=True` to rebuild a protein entirely in D-amino acids. Will add missing hydrogens. For DNA and RNA, the `sequence=''` length must match exactly the original sequence length, otherwise an error will be raised |
+| `p.ReBuild(sequence=None, mirror=False, _mutate=None)`     | Rebuild the polypeptide or nucleic acid. Use `sequence='AGLMTSWVLVA'` to rebuild the structure with multiple bulk mutations on chain A. Use `sequence={'A':'MSLKLSTVVA', 'B':'ASLKSWFWVA'}` to perform mutations at multiple chains at the same time. Use `mirror=True` to rebuild a protein and convert L-amino acids → D-amino acids and D-amino acids → L-amino acids. Will add missing hydrogens. For DNA and RNA, the `sequence=''` length must match exactly the original sequence length, otherwise an error will be raised |
 | `p.Mutate(1, 'V')`                                         | Mutate a single monomer. For proteins: `p.Mutate(1, 'V')` = residue 1 → L-Valine, `p.Mutate(1, 'v')` = residue 1 → D-Valine. For DNA: `p.Mutate(0, 'T')` = nucleotide 0 → Thymine. For RNA: `p.Mutate(0, 'U')` = nucleotide 0 → Uracil. For double-stranded nucleic acids, the complementary base is also updated automatically |
 
 ### Measurements
@@ -185,7 +185,7 @@ Each class have similar methods and data structure, but with slight differences 
 | `m.GetAtomCoord(3)`                          | Get the XYZ coordinates of an atom given its index. Example: atom at index `3` |
 | `p.GetAtomList(PDB=True)`                    | Get a list of all atom element names for the entire structure. Use `PDB=True` for PDB-formatted names |
 | `m.GetAtomList()`                            | Get a list of all atom element names for the entire structure |
-| `p.GetAtomIdx(3, 'N')`                       | Get the atom index in `p.data['Coordinates']` from it's name within a monomer. This is the opposite of `p.GetAtomCoord(3, 'N')` |
+| `p.GetAtomIdx(3, 'N')`                       | Get the atom index in `p.data['Coordinates']` from its name within a monomer. This is the opposite of `p.GetAtomCoord(3, 'N')` |
 | `p.GetIdentity(0, 'Atom')`                   | Identify the PDB name of an atom, or an amino acid, or a nucleotide by its index. Example `p.GetIdentity(5, 'Atom')` or `p.GetIdentity(5, 'amino acid')` or `p.GetIdentity(5, 'nucleotide')`. Also, specifically just for atoms, you are return its partial charge using `p.GetIdentity(3, 'Atom', charge=True)` |
 | `p.GetInfo()`                                | Print a formatted summary of the structure's information |
 | `m.GetInfo()`                                | Print a formatted summary of the structure's information and a graphical representation of the molecule |
@@ -237,7 +237,6 @@ These are standalone tools (not Pose() class methods) and thus are called on the
 | `PROSITE(sequence, pattern)`                                       | Search a protein sequence for a PROSITE-style pattern. Pattern grammar: `[ABC]` = any of A/B/C, `{ABC}` = any except A/B/C, `x` = any residue, `x(n)` / `x(n,m)` = quantifiers, `A(n)` / `A(n,m)` = repeat literal residues, `<` / `>` = anchor at sequence start/end, `-` = token separator (stripped). Returns a list of tuples `[(start, end, match), ...]` with 1-based, inclusive positions |
 | `HydrogenBondMap(pose)`                                            | Generates a backbone hydrogen-bond donor/acceptor map for a protein pose (proteins only). Uses the same DSSP electrostatic criterion as `p.CalcDSSP()` (Kabsch & Sander 1983: `E < -0.5` kcal/mol). Returns an array of shape `(N_atoms, N_atoms)` where 0 = no bond, 1 = this atom is a donor (backbone N), 2 = this atom is an acceptor (backbone O) |
 | `ContactMap(pose)`                                                 | Generates a monomer-monomer distance map in angstroms. The molecule type is auto-detected from `pose.data['Type']`: distances between protein residues are calculated from the Cα atoms, while distances between DNA and RNA bases are calculated from their C1' atoms. Returns an array of shape `(N_residues, N_residues)` with zero on the diagonal |
-| `Void(pose, algorithm='fpocket', cutoff=7.0, volume='mc', seed=0)` | Detect protein cavities (binding pockets and internal voids). Two algorithms: `algorithm='fpocket'` (default), returning surface **Pockets** ranked internally by druggability (API output sorted by descending Volume). `algorithm='castp'` runs a hand-rolled Edelsbrunner-Liang CASTp pipeline, returns **Pocket** or **Void** by reachability to bulk solvent through probe-passable triangular faces. `cutoff` is the residue-assignment radius in Å. `volume='mc'` (default) runs fpocket's Monte Carlo sphere-union sampling (seedable via `seed`), `volume='exact'` runs a deterministic high-resolution grid integration. fpocket-only kwargs, CASTp always computes analytical tet-sum volumes and boundary-face areas. Returns `{i: {'Type': 'Pocket' \| 'Void', 'Volume': float, 'Area': float, 'Center': np.array([x, y, z]), 'Amino Acids': [residue_idx, ...]}, ...}` sorted by descending Volume and indexed densely from `0` |
 
 > BLAST handles sequences beyond the 20 canonical L-amino acids automatically: **D-amino acids**: stored as lowercase letters in `pose.data['FASTA']`. BLAST uppercases both sequences before alignment, treating each D-amino acid as its L-counterpart for scoring purposes. This correctly reflects the chemical reality that D- and L-forms of the same residue have identical side-chain chemistry. **Non-canonical amino acids**: any letter not in the 20-letter BLOSUM62 alphabet falls back to: `+4` for a self-match (equal to the minimum BLOSUM62 diagonal), `−1` for a mismatch. This keeps non-canonical residues visible to the aligner without inflating scores.
 
@@ -370,6 +369,8 @@ This information resides in `database['Amino Acids'][AMINO_ACID_UNICODE or BACKB
 | `Backbone Atoms` or `Sidechain Atoms` | List of lists  | The atom identity of each coordinate point, for example: first coordinate point is the nitrogen with symbol N and PDB entry N, next atom is the hydrogen that is bonded to the nitrogen with symbol H and PDB entry 1H etc... Unlike the PDB where all hydrogens are collected after the amino acid, here each atom's hydrogens come right after it. This makes for easier matrix operations. Order is index [0] = PDB atom's name, index [1] = element, index [2] = partial charge, index [3] = occupancy, index [4] = temperature factor |
 | `Chi Angle Atoms`                     | List of lists  | The atoms in the sidechain that are contributing to a chi angle|
 | `Bonds`                               | Dictionary     | The bond graph as an adjacency list|
+| `BondOrderss`                         | Dictionary     | The bond order graph as an adjacency list, 1 = single bonds, 1.5 = aromatic resonance partial-double bond, 2 = double bonds, 3 = triple bonds |
+
 
 ## Description of nucleotides in database.json:
 
@@ -384,6 +385,7 @@ This information resides in `database['Nucleotides'][NUCEOTIDE_TRICODE]`
 | `Base Atoms`      | List of lists  | The atom identity of each nistrogen base coordinate point |
 | `Chi Angle Atoms` | List of lists  | The atoms in the sidechain that are contributing to a chi angle |
 | `Bonds`           | Dictionary     | The bond graph as an adjacency list |
+| `BondOrderss`     | Dictionary     | The bond order graph as an adjacency list, 1 = single bonds, 1.5 = aromatic resonance partial-double bond, 2 = double bonds, 3 = triple bonds |
 
 ---
 

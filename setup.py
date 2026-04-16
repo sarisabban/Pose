@@ -5,7 +5,7 @@ with open('README.md', 'r', encoding='utf-8') as f:
 
 setuptools.setup(
 	name='pose',
-	version='1.0',
+	version='1.0.0',
 	author='Sari Sabban',
 	author_email='',
 	description='A bare-metal Python library for building and manipulating protein and nucleic acid molecular structures',
