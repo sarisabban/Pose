@@ -8,362 +8,241 @@ from collections import defaultdict, deque
 def Parameterise(filename, unicode, tricode):
 	'''
 	Add a new amino acid entry to AminoAcids.json.
-
 	Parameters
 	----------
-	filename : str
-	    Path to the CIF file (download from RCSB Chemical Sketch).
-	unicode  : str
-	    Single-letter key to use in AminoAcids.json (e.g. 'J').
-	tricode  : str
-	    Three-letter residue code matching the CIF file (e.g. 'MSE').
+	filename : str - Path to the CIF file (download from RCSB Chemical Sketch)
+	unicode  : str - Single-letter key to use in AminoAcids.json (e.g. 'J')
+	tricode  : str - Three-letter residue code (e.g. 'MSE')
 	'''
-	# ALA reference frame (N at origin)
+	# ALA reference frame (N at origin): N, H1-3, CA, HA, CB, 1HB-3HB,
+	# C, O, OXT — RigidMotion uses A[0]=N, A[4]=CA, A[6]=CB, A[-3]=C.
 	ALA = np.array([
-		[ 0.000,  0.000,  0.000],  # N
-		[-0.334, -0.943,  0.000],  # H1
-		[-0.334,  0.471,  0.816],  # H2
-		[-0.334,  0.471, -0.816],  # H3
-		[ 1.458,  0.000,  0.000],  # CA
-		[ 1.822, -0.535,  0.877],  # HA
-		[ 1.988, -0.773, -1.199],  # CB
-		[ 3.078, -0.764, -1.185],  # 1HB
-		[ 1.633, -1.802, -1.154],  # 2HB
-		[ 1.633, -0.307, -2.117],  # 3HB
-		[ 2.009,  1.420,  0.000],  # C
-		[ 2.058,  2.045,  1.023],  # O
-		[ 2.394,  1.914, -1.023]]) # OXT
-	def RigidMotion(A, B, Ni, CAi, CBi, Ci):
-		''' Superimpose amino acid B into A '''
-		A1s = np.ones(len(A))
-		B1s = np.ones(len(B))
-		A = np.c_[A, A1s]
-		B = np.c_[B, B1s]
-		Aa, Ao, Ab, Ac = A[0], A[4], A[6], A[-3]
-		Ba, Bo, Bb, Bc = B[Ni], B[CAi], B[CBi], B[Ci]
-		AL = np.array([Aa - Ao, Ab - Ao, Ac - Ao, Ao])
-		BL = np.array([Ba - Bo, Bb - Bo, Bc - Bo, Bo])
-		BL_ = np.linalg.inv(BL)
-		M = np.matmul(BL_, AL)
-		B = [np.matmul(i, M)[:3] for i in B]
-		B = np.array(B)
-		return B
-	def is_h(element):
-		return element.upper() in ('H', 'D')
-	def bfs_sidechain(start, adj, skip, elem, cif_ord):
-		result, seen = [], set(skip)
-		seen.add(start)
-		q = deque([start])
-		while q:
-			atom = q.popleft()
-			if is_h(elem.get(atom, '')):
-				continue
-			result.append(atom)
-			nbrs = sorted(
-				adj[atom],
-				key=lambda n: cif_ord.get(n, 9999))
-			for n in nbrs:
-				if n in seen:
-					continue
-				seen.add(n)
-				if is_h(elem.get(n, '')):
-					result.append(n)
-				else:
-					q.append(n)
-		return result
-	def rename_atoms(names, elem):
-		counter = defaultdict(int)
-		out = {}
-		for name in names:
-			m = re.match(r'^([A-Z]+)(\d+)$', name)
-			if is_h(elem.get(name, '')) and m:
-				base = m.group(1)
-				counter[base] += 1
-				out[name] = f'{counter[base]}{base}'
-			else:
-				out[name] = name
-		return out
-	def trace_main_chain(start, adj, skip, elem, cif_ord):
-		chain, visited = [], set(skip) | {'CA'}
-		cur = start
-		while cur is not None:
-			chain.append(cur)
-			visited.add(cur)
-			hvs = [
-				n for n in adj[cur]
-				if n not in visited and not is_h(elem.get(n, ''))]
-			if not hvs:
-				break
-			cur = min(hvs, key=lambda n: cif_ord.get(n, 9999))
-		return chain
-	def fmt_vec(v):
-		x, y, z = round(v[0], 3), round(v[1], 3), round(v[2], 3)
-		return f'[{x:6.3f},{y:7.3f},{z:7.3f}]'
-	def fmt_atom(a):
-		if len(a) == 5:
-			name, el, q, o, t = a
-			return (f'["{name}", "{el}", '
-				f'{float(q):.1f}, {float(o):.1f}, {float(t):.1f}]')
-		else:
-			name, el, q, o = a
-			return (f'["{name}", "{el}", '
-				f'{int(q)}, {int(o)}]')
-	def fmt_chi(c):
-		return '[' + ', '.join(f'"{x}"' for x in c) + ']'
-	def format_entry(key, e, is_last):
-		sep = '' if is_last else ','
-		L = [f'"{key}": {{']
-		for field, val in e.items():
-			if field == 'Vectors':
-				L.append('    "Vectors": [')
-				for vi, v in enumerate(val):
-					row = f'        {fmt_vec(v)}'
-					L.append(row + (',' if vi < len(val)-1 else '],'))
-			elif field == 'Tricode':
-				L.append(f'    "Tricode": "{val}",')
-			elif field == 'Type':
-				L.append(f'    "Type": "{val}",')
-			elif field == 'Fused':
-				L.append(
-					'    "Fused": '
-					f'{"true" if val else "false"},')
-			elif field in ('Sidechain Atoms',
-				'Backbone Atoms', 'Base Atoms'):
-				L.append(f'    "{field}": [')
-				for ai, a in enumerate(val):
-					row = f'        {fmt_atom(a)}'
-					L.append(row + (',' if ai < len(val)-1 else '],'))
-			elif field == 'Chi Angle Atoms':
-				if not val:
-					L.append('    "Chi Angle Atoms": [')
-					L.append('        ],')
-				else:
-					L.append('    "Chi Angle Atoms": [')
-					for ci, c in enumerate(val):
-						row = f'        {fmt_chi(c)}'
-						L.append(row + (',' if ci < len(val)-1 else '],'))
-			elif field == 'Bonds':
-				L.append('    "Bonds": {')
-				items = list(val.items())
-				has_bo = 'BondOrders' in e
-				for bi, (bk, bv) in enumerate(items):
-					vals = ', '.join(str(x) for x in bv)
-					row  = f'        "{bk}":[{vals}]'
-					if bi < len(items) - 1:
-						L.append(row + ',')
-					else:
-						if has_bo:
-							L.append(row + '},')
-						else:
-							L.append(row + '}}' + sep)
-			elif field == 'BondOrders':
-				L.append('    "BondOrders": {')
-				items = list(val.items())
-				for bi, (bk, bv) in enumerate(items):
-					vals = ', '.join(
-						(f'{x:g}' if isinstance(x, float) else str(x))
-						for x in bv)
-					row  = f'        "{bk}":[{vals}]'
-					if bi < len(items) - 1:
-						L.append(row + ',')
-					else:
-						L.append(row + '}}' + sep)
-		return '\n'.join(L)
-	def format_db(db):
-		L = ['{']
-		sections = list(db.items())
-		for si, (sec_name, entries) in enumerate(sections):
-			sec_last = (si == len(sections) - 1)
-			L.append(f'"{sec_name}": {{')
-			items = list(entries.items())
-			for i, (k, v) in enumerate(items):
-				L.append(format_entry(
-					k, v, is_last=(i == len(items)-1)))
-				if i < len(items) - 1:
-					L.append('')
-			sec_close = '}' if sec_last else '},'
-			# Replace the trailing }} of the last entry
-			# with }}} (or }}},) to close the section too
-			L[-1] = L[-1] + sec_close
-			L.append('')
-		L.append('}')
-		return '\n'.join(L)
-	unicode = unicode.upper()
-	tricode = tricode.upper()
-	# 1. Parse CIF
-	# Atom lines: len >= 18, ideal coords at [15][16][17], bb flag at [9]
-	# Bond lines: len == 7
+		[ 0.000,  0.000,  0.000], [-0.334, -0.943,  0.000],
+		[-0.334,  0.471,  0.816], [-0.334,  0.471, -0.816],
+		[ 1.458,  0.000,  0.000], [ 1.822, -0.535,  0.877],
+		[ 1.988, -0.773, -1.199], [ 3.078, -0.764, -1.185],
+		[ 1.633, -1.802, -1.154], [ 1.633, -0.307, -2.117],
+		[ 2.009,  1.420,  0.000], [ 2.058,  2.045,  1.023],
+		[ 2.394,  1.914, -1.023]])
+	unicode, tricode = unicode.upper(), tricode.upper()
+	# 1. Parse CIF: atom rows (>=18 tokens, ideal coords at [15:18],
+	#    fallback [12:15], bb flag [9]=='Y'); bond rows (==7 tokens).
 	COORD_RAW, ATOMS_RAW, BONDS = [], [], []
-	with open(filename) as f:
-		for line in f:
-			line = line.strip().split()
-			if not line:
-				continue
-			if line[0] == tricode:
-				if len(line) == 7 and line[3] in (
-				'SING', 'DOUB', 'TRIP', 'AROM'):
-					BONDS.append((line[1], line[2], line[3], line[4]))
-				elif len(line) >= 18:
-					try:
-						try:
-							x = float(line[15])
-							y = float(line[16])
-							z = float(line[17])
-						except (ValueError, IndexError):
-							x = float(line[12])
-							y = float(line[13])
-							z = float(line[14])
-						bb = (line[9] == 'Y')
-						COORD_RAW.append([x, y, z])
-						ATOMS_RAW.append({
-							'id':   line[1],
-							'elem': line[3].capitalize(),
-							'bb':   bb,
-						})
+	with open(filename) as fh:
+		for line in fh:
+			t = line.strip().split()
+			if not t or t[0] != tricode: continue
+			if len(t) == 7 and t[3] in ('SING','DOUB','TRIP','AROM'):
+				BONDS.append((t[1], t[2], t[3], t[4]))
+			elif len(t) >= 18:
+				try:
+					try:    c = [float(t[i]) for i in (15, 16, 17)]
 					except (ValueError, IndexError):
-						pass
+						c = [float(t[i]) for i in (12, 13, 14)]
+					COORD_RAW.append(c)
+					ATOMS_RAW.append({'id': t[1],
+						'elem': t[3].capitalize(),
+						'bb': (t[9] == 'Y')})
+				except (ValueError, IndexError): pass
 	COORD   = np.array(COORD_RAW)
 	CIF_IDS = [a['id'] for a in ATOMS_RAW]
 	if 'CB' not in CIF_IDS:
-		raise ValueError(
-			f'No CB atom found in {filename}. '
+		raise ValueError(f'No CB atom found in {filename}. '
 			'Only standard amino acids (not GLY) are supported.')
-	# Backbone atom set (from CIF flag; fallback to known names)
-	bb_set = {a['id'] for a in ATOMS_RAW if a['bb']}
-	if not bb_set:
-		bb_set = {
-			'N', 'CA', 'C', 'O', 'OXT',
-			'H', 'H1', 'H2', 'H3',
-			'HA', 'HA2', 'HA3', 'HXT',}
+	bb_set = {a['id'] for a in ATOMS_RAW if a['bb']} or {
+		'N','CA','C','O','OXT','H','H1','H2','H3',
+		'HA','HA2','HA3','HXT'}
 	elem    = {a['id']: a['elem'] for a in ATOMS_RAW}
 	cif_ord = {a['id']: i for i, a in enumerate(ATOMS_RAW)}
-	# 2. Superimpose onto ALA backbone frame
+	# 2. Superimpose onto ALA backbone frame (rigid motion via N, CA,
+	#    CB, C). AL/BL use CA as origin; transform maps B-frame→A-frame.
 	try:
-		Ni  = CIF_IDS.index('N')
-		CAi = CIF_IDS.index('CA')
-		CBi = CIF_IDS.index('CB')
-		Ci  = CIF_IDS.index('C')
+		Ni, CAi = CIF_IDS.index('N'),  CIF_IDS.index('CA')
+		CBi, Ci = CIF_IDS.index('CB'), CIF_IDS.index('C')
 	except ValueError as e:
-		raise ValueError(
-			f'Missing backbone atom in {filename}: {e}')
-	COORD = RigidMotion(ALA, COORD, Ni, CAi, CBi, Ci)
-	# 3. Bond graph by atom_id
+		raise ValueError(f'Missing backbone atom in {filename}: {e}')
+	A = np.c_[ALA,   np.ones(len(ALA))]
+	B = np.c_[COORD, np.ones(len(COORD))]
+	AL = np.array([A[0]-A[4], A[6]-A[4], A[-3]-A[4], A[4]])
+	BL = np.array([B[Ni]-B[CAi], B[CBi]-B[CAi], B[Ci]-B[CAi], B[CAi]])
+	COORD = (B @ (np.linalg.inv(BL) @ AL))[:, :3]
+	# 3. Undirected bond graph, indexed by atom id.
 	adj = defaultdict(set)
-	for a1, a2, _vo, _ar in BONDS:
-		adj[a1].add(a2)
-		adj[a2].add(a1)
-	# 4. BFS from CB in CIF ordinal order
-	ordered = bfs_sidechain('CB', adj, bb_set, elem, cif_ord)
-	# 5. Rename atoms: CIF suffix → Pose prefix (HB2→1HB, HB3→2HB)
-	name_map = rename_atoms(ordered, elem)
-	# 6. Detect fused sidechain (e.g. PRO: CD bonds back to N)
-	sc_set     = set(ordered)
-	fused_atom = None
-	for sc in ordered:
-		if 'N' in adj[sc]:
-			fused_atom = sc
-			break
-	fused = fused_atom is not None
-	# 7. Sidechain bond adjacency (fused ring uses -5 sentinel)
-	new_idx  = {n: i for i, n in enumerate(ordered)}
-	sc_bonds = defaultdict(list)
-	sc_orders = defaultdict(list)
-	_vo_map = {'SING': 1, 'DOUB': 2, 'TRIP': 3, 'AROM': 1.5}
-	bo_lookup = {}
-	for a1, a2, vo, ar in BONDS:
-		if ar == 'Y':
-			bo = 1.5
+	for a1, a2, _v, _r in BONDS:
+		adj[a1].add(a2); adj[a2].add(a1)
+	# 4. BFS from CB (heavy-atom queue; H neighbours appended inline
+	#    next to their parent so they land in CIF-ordinal groups).
+	ordered = []
+	seen    = set(bb_set) | {'CB'}
+	q       = deque(['CB'])
+	while q:
+		atom = q.popleft()
+		ordered.append(atom)
+		for n in sorted(adj[atom], key=lambda m: cif_ord.get(m, 9999)):
+			if n in seen: continue
+			seen.add(n)
+			(ordered if elem.get(n, '').upper() in ('H', 'D') else q).append(n)
+	# 5. CIF → Pose atom naming: HB2 → 1HB (per-base counter on H/D).
+	name_map, counter = {}, defaultdict(int)
+	for name in ordered:
+		m = re.match(r'^([A-Z]+)(\d+)$', name)
+		if m and elem.get(name, '').upper() in ('H', 'D'):
+			counter[m.group(1)] += 1
+			name_map[name] = f'{counter[m.group(1)]}{m.group(1)}'
 		else:
-			bo = _vo_map.get(vo.upper())
-			if bo is None:
-				print(f'Warning: unknown bond order {vo!r} for '
-					f'{a1}-{a2} in {tricode}, defaulting to 1')
-				bo = 1
-		bo_lookup[(a1, a2)] = bo
-		bo_lookup[(a2, a1)] = bo
-	for a1, a2, _vo, _ar in BONDS:
+			name_map[name] = name
+	# 6. Fused sidechain: any sidechain atom bonded back to N (e.g. PRO).
+	fused_atom = next((sc for sc in ordered if 'N' in adj[sc]), None)
+	fused = fused_atom is not None
+	# 7. Sidechain bond graph on new indices; -5 sentinel stands in for
+	#    the backbone N of a fused ring. Bond orders: map CIF value_order
+	#    inline (AROM flag and 'AROM' both → 1.5); unknown → warn + 1.
+	sc_set  = set(ordered)
+	new_idx = {n: i for i, n in enumerate(ordered)}
+	sc_bonds, sc_orders, bo_lookup = (
+		defaultdict(list), defaultdict(list), {})
+	for a1, a2, vo, ar in BONDS:
+		u = vo.upper()
+		if   ar == 'Y':   bo = 1.5
+		elif u == 'SING': bo = 1
+		elif u == 'DOUB': bo = 2
+		elif u == 'TRIP': bo = 3
+		elif u == 'AROM': bo = 1.5
+		else:
+			print(f'Warning: unknown bond order {vo!r} for '
+				f'{a1}-{a2} in {tricode}, defaulting to 1')
+			bo = 1
+		bo_lookup[(a1, a2)] = bo_lookup[(a2, a1)] = bo
+	for a1, a2, _v, _r in BONDS:
 		if a1 in sc_set and a2 in sc_set:
 			i1, i2 = new_idx[a1], new_idx[a2]
-			sc_bonds[i1].append(i2)
-			sc_bonds[i2].append(i1)
+			sc_bonds[i1].append(i2);  sc_bonds[i2].append(i1)
 			bo = bo_lookup[(a1, a2)]
-			sc_orders[i1].append(bo)
-			sc_orders[i2].append(bo)
+			sc_orders[i1].append(bo); sc_orders[i2].append(bo)
 	if fused:
-		i_f = new_idx[fused_atom]
-		sc_bonds[i_f].append(-5)
-		sc_bonds[-5].append(i_f)
-		sc_orders[i_f].append(1)
-		sc_orders[-5].append(1)
+		fi = new_idx[fused_atom]
+		sc_bonds[fi].append(-5);  sc_bonds[-5].append(fi)
+		sc_orders[fi].append(1);  sc_orders[-5].append(1)
+	# Two-pass aromaticity: a C with >=2 O/N neighbours where at least
+	# one is double-bonded → spread resonance (all such C–O/N → 1.5).
 	elem_at_idx = {new_idx[n]: elem[n] for n in ordered}
-	for _pass in range(2):
+	for _p in range(2):
 		for i in list(sc_bonds.keys()):
-			if i < 0: continue
-			if elem_at_idx.get(i, '') != 'C': continue
-			has_double_xn = False
-			xn_count = 0
-			for nb, bo in zip(sc_bonds[i], sc_orders[i]):
-				if nb < 0: continue
-				if elem_at_idx.get(nb, '') not in ('O', 'N'): continue
-				xn_count += 1
-				if bo >= 2: has_double_xn = True
-			if not (has_double_xn and xn_count >= 2): continue
-			for k, (nb, bo) in enumerate(
-			zip(sc_bonds[i], sc_orders[i])):
-				if nb < 0: continue
-				if elem_at_idx.get(nb, '') not in ('O', 'N'): continue
+			if i < 0 or elem_at_idx.get(i, '') != 'C': continue
+			xs = [(k, nb, bo) for k, (nb, bo) in enumerate(
+					zip(sc_bonds[i], sc_orders[i]))
+				if nb >= 0 and elem_at_idx.get(nb, '') in ('O','N')]
+			if len(xs) < 2 or not any(bo >= 2 for _, _, bo in xs): continue
+			for k, nb, bo in xs:
 				if bo == 1.5: continue
 				sc_orders[i][k] = 1.5
 				for kk, mnb in enumerate(sc_bonds[nb]):
 					if mnb == i:
 						sc_orders[nb][kk] = 1.5
 						break
-	pos_keys    = sorted(k for k in sc_bonds if k >= 0)
-	final_bonds = {k: sorted(sc_bonds[k]) for k in pos_keys}
-	final_orders = {}
-	for k in pos_keys:
-		order_of = dict(zip(sc_bonds[k], sc_orders[k]))
-		final_orders[k] = [order_of[nb] for nb in final_bonds[k]]
+	# Final bond dicts — sorted neighbour indices for determinism, with
+	# matching bond-order lists.  -5 sentinel kept last if fused.
+	pos_keys     = sorted(k for k in sc_bonds if k >= 0)
+	final_bonds  = {k: sorted(sc_bonds[k]) for k in pos_keys}
+	final_orders = {k: [dict(zip(sc_bonds[k], sc_orders[k]))[nb]
+		for nb in final_bonds[k]] for k in pos_keys}
 	if fused:
-		final_bonds[-5] = sorted(sc_bonds[-5])
-		order_of = dict(zip(sc_bonds[-5], sc_orders[-5]))
-		final_orders[-5] = [order_of[nb] for nb in final_bonds[-5]]
-	# 8. Chi angles: trace main chain by CIF ordinal preference
-	mc         = trace_main_chain('CB', adj, bb_set, elem, cif_ord)
+		final_bonds[-5]  = sorted(sc_bonds[-5])
+		final_orders[-5] = [dict(zip(sc_bonds[-5], sc_orders[-5]))[nb]
+			for nb in final_bonds[-5]]
+	# 8. Chi angles: trace main chain from CB by CIF-ordinal preference
+	#    (skip backbone + CA). Window of 4 over [N, CA, *mc] → dihedrals.
+	mc, visited, cur = [], set(bb_set) | {'CA'}, 'CB'
+	while cur is not None:
+		mc.append(cur); visited.add(cur)
+		hvs = [n for n in adj[cur] if n not in visited
+			and elem.get(n, '').upper() not in ('H', 'D')]
+		cur = min(hvs, key=lambda n: cif_ord.get(n, 9999)) if hvs else None
 	full_chain = ['N', 'CA'] + mc
-	chis = []
-	for i in range(len(full_chain) - 3):
-		chis.append([
-			full_chain[i],   full_chain[i+1],
-			full_chain[i+2], full_chain[i+3],
-		])
+	chis = [full_chain[i:i+4] for i in range(len(full_chain) - 3)]
 	if fused and len(full_chain) >= 5:
 		chis.append(full_chain[-3:] + ['N'])
 		chis.append(full_chain[-2:] + ['N', 'CA'])
-	# 9. Assemble output arrays
-	id_to_i   = {cid: i for i, cid in enumerate(CIF_IDS)}
-	coord_out = [COORD[id_to_i[n]].tolist() for n in ordered]
-	atoms_out = [[name_map[n], elem[n], 0, 1.0, 0] for n in ordered]
-	# 10. Build entry
+	# 9. Assemble the new entry in the same field order as existing AAs.
+	id_to_i = {cid: i for i, cid in enumerate(CIF_IDS)}
 	entry = {
-		'Vectors':         coord_out,
+		'Vectors':         [COORD[id_to_i[n]].tolist() for n in ordered],
 		'Tricode':         tricode,
 		'Fused':           fused,
-		'Sidechain Atoms': atoms_out,
+		'Sidechain Atoms': [[name_map[n], elem[n], 0, 1.0, 0] for n in ordered],
 		'Chi Angle Atoms': chis,
 		'Bonds':           {str(k): v for k, v in final_bonds.items()},
-		'BondOrders':      {str(k): v for k, v in final_orders.items()},}
-	# 11. Write to database.json in the pose package directory
+		'BondOrders':      {str(k): v for k, v in final_orders.items()}}
+	# 10. Merge into database.json.
 	db_path = os.path.join(
-		os.path.dirname(os.path.abspath(__file__)),
-		'database.json')
-	with open(db_path) as f:
-		db = json.load(f)
+		os.path.dirname(os.path.abspath(__file__)), 'database.json')
+	with open(db_path) as fh: db = json.load(fh)
 	if unicode in db['Amino Acids']:
 		print(f'Warning: "{unicode}" already exists... overwriting.')
 	db['Amino Acids'][unicode] = entry
-	with open(db_path, 'w') as f:
-		f.write(format_db(db))
+	# 11. Custom serialiser — preserves the exact database.json layout
+	#     (padded vector columns, compact bond rows, section closers).
+	L    = ['{']
+	secs = list(db.items())
+	for si, (sname, entries) in enumerate(secs):
+		sec_last = (si == len(secs) - 1)
+		L.append(f'"{sname}": {{')
+		items = list(entries.items())
+		for ei, (ekey, e) in enumerate(items):
+			elast = (ei == len(items) - 1)
+			sep    = '' if elast else ','
+			has_bo = 'BondOrders' in e
+			L.append(f'"{ekey}": {{')
+			for field, val in e.items():
+				if field == 'Vectors':
+					L.append('    "Vectors": [')
+					n = len(val) - 1
+					for vi, v in enumerate(val):
+						L.append('        ['
+							f'{round(v[0],3):6.3f},'
+							f'{round(v[1],3):7.3f},'
+							f'{round(v[2],3):7.3f}]'
+							+ (',' if vi < n else '],'))
+				elif field in ('Tricode', 'Type'):
+					L.append(f'    "{field}": "{val}",')
+				elif field == 'Fused':
+					L.append('    "Fused": '
+						+ ('true' if val else 'false') + ',')
+				elif field in (
+						'Sidechain Atoms','Backbone Atoms','Base Atoms'):
+					L.append(f'    "{field}": [')
+					n = len(val) - 1
+					for ai, a in enumerate(val):
+						af = (f'["{a[0]}", "{a[1]}", ' + (
+							f'{float(a[2]):.1f}, {float(a[3]):.1f}, '
+							f'{float(a[4]):.1f}]' if len(a) == 5
+							else f'{int(a[2])}, {int(a[3])}]'))
+						L.append(f'        {af}' + (',' if ai < n else '],'))
+				elif field == 'Chi Angle Atoms':
+					L.append('    "Chi Angle Atoms": [')
+					if not val: L.append('        ],')
+					else:
+						n = len(val) - 1
+						for ci, c in enumerate(val):
+							L.append('        [' + ', '.join(
+								f'"{x}"' for x in c) + ']'
+								+ (',' if ci < n else '],'))
+				elif field in ('Bonds', 'BondOrders'):
+					L.append(f'    "{field}": {{')
+					bi = list(val.items()); n = len(bi) - 1
+					is_bonds = (field == 'Bonds')
+					for k, (bk, bv) in enumerate(bi):
+						row = f'        "{bk}":[' + ', '.join(
+							(f'{x:g}' if isinstance(x, float)
+								else str(x)) for x in bv) + ']'
+						if k < n:                 L.append(row + ',')
+						elif is_bonds and has_bo: L.append(row + '},')
+						else:                     L.append(row + '}}' + sep)
+			if not elast: L.append('')
+		L[-1] = L[-1] + ('}' if sec_last else '},')
+		L.append('')
+	L.append('}')
+	with open(db_path, 'w') as fh: fh.write('\n'.join(L))
 	print(f'Added {tricode} as "{unicode}" to database.json')
 
 def RMSD(pose1, pose2, alg='align', export=None):
