@@ -7,12 +7,18 @@ from collections import defaultdict, deque
 
 def Parameterise(filename, unicode, tricode):
 	'''
-	Add a new amino acid entry to AminoAcids.json.
-	Parameters
-	----------
+	Add a new amino acid entry to database.json
+
+	Arguments
+	---------
 	filename : str - Path to the CIF file (download from RCSB Chemical Sketch)
 	unicode  : str - Single-letter key to use in AminoAcids.json (e.g. 'J')
 	tricode  : str - Three-letter residue code (e.g. 'MSE')
+
+	Return
+	------
+
+	Updated database.json
 	'''
 	# ALA reference frame (N at origin): N, H1-3, CA, HA, CB, 1HB-3HB,
 	# C, O, OXT — RigidMotion uses A[0]=N, A[4]=CA, A[6]=CB, A[-3]=C.
@@ -255,177 +261,131 @@ def RMSD(pose1, pose2, alg='align', export=None):
 		kabsch     - SVD-based optimal rotation, all residues
 		quaternion - eigenvalue-based optimal rotation, all residues
 		simple     - translation only, no rotation
+	Return
+	------
+	float    : The RMSD value
 	'''
 	if alg not in ('align', 'kabsch', 'quaternion', 'simple'):
 		raise Exception('Unknown algorithm: ' + str(alg))
-	t1 = pose1.data['Type']
-	t2 = pose2.data['Type']
-	p1 = t1 == 'Protein'
-	p2 = t2 == 'Protein'
-	if p1 != p2:
-		raise Exception(
-			f'Cannot align {t1} with {t2}: '
+	t1, t2 = pose1.data['Type'], pose2.data['Type']
+	if (t1 == 'Protein') != (t2 == 'Protein'):
+		raise Exception(f'Cannot align {t1} with {t2}: '
 			'cannot mix protein and nucleic acid')
-	is_pro = p1
-	rk = 'Amino Acids' if is_pro else 'Nucleotides'
-	ra = 'CA' if is_pro else "C1'"
-	def kabsch_R(Pc, Qc):
-		H = Pc.T @ Qc
-		U, S, Vt = np.linalg.svd(H)
-		d = np.sign(np.linalg.det(Vt.T @ U.T))
-		return(Vt.T @ np.diag(
-			np.array([1.0, 1.0, d])) @ U.T)
+	is_pro = (t1 == 'Protein')
+	rk     = 'Amino Acids' if is_pro else 'Nucleotides'
+	ra     = 'CA' if is_pro else "C1'"
+	atoms1, co1, res1 = (pose1.data['Atoms'],
+		pose1.data['Coordinates'], pose1.data[rk])
+	atoms2, co2, res2 = (pose2.data['Atoms'],
+		pose2.data['Coordinates'], pose2.data[rk])
 	if alg == 'align':
-		rk1 = sorted(pose1.data[rk].keys())
-		rk2 = sorted(pose2.data[rk].keys())
-		seq1 = ''.join(
-			pose1.data[rk][k][0].upper() for k in rk1)
-		seq2 = ''.join(
-			pose2.data[rk][k][0].upper() for k in rk2)
-		m, n = len(seq1), len(seq2)
-		gap = -1.0
-		dp = np.zeros((m+1, n+1))
-		for i in range(1, m+1):
-			dp[i, 0] = i * gap
-		for j in range(1, n+1):
-			dp[0, j] = j * gap
-		for i in range(1, m+1):
-			for j in range(1, n+1):
-				s = (_blosum(seq1[i-1], seq2[j-1])
-					if is_pro else
-					(1.0 if seq1[i-1]==seq2[j-1]
-					else -0.5))
-				dp[i, j] = max(
-					dp[i-1, j-1] + s,
-					dp[i-1, j] + gap,
-					dp[i, j-1] + gap)
+		# Needleman-Wunsch with BLOSUM62 (proteins) or
+		# +1/-0.5 match/mismatch (nucleic acids); gap = -1.
+		rk1, rk2 = sorted(res1.keys()), sorted(res2.keys())
+		seq1 = ''.join(res1[k][0].upper() for k in rk1)
+		seq2 = ''.join(res2[k][0].upper() for k in rk2)
+		m, n, gap = len(seq1), len(seq2), -1.0
+		dp = np.zeros((m + 1, n + 1))
+		dp[:, 0] = np.arange(m + 1) * gap
+		dp[0, :] = np.arange(n + 1) * gap
+		for i in range(1, m + 1):
+			a = seq1[i-1]
+			for j in range(1, n + 1):
+				b = seq2[j-1]
+				s = (_blosum(a, b) if is_pro
+					else (1.0 if a == b else -0.5))
+				dp[i, j] = max(dp[i-1, j-1] + s,
+					dp[i-1, j] + gap, dp[i, j-1] + gap)
 		pairs, i, j = [], m, n
 		while i > 0 and j > 0:
-			s = (_blosum(seq1[i-1], seq2[j-1])
-				if is_pro else
-				(1.0 if seq1[i-1]==seq2[j-1]
-				else -0.5))
-			if abs(dp[i,j]-(dp[i-1,j-1]+s)) < 1e-9:
-				pairs.append((i-1, j-1))
+			a, b = seq1[i-1], seq2[j-1]
+			s = (_blosum(a, b) if is_pro
+				else (1.0 if a == b else -0.5))
+			if   abs(dp[i, j] - (dp[i-1, j-1] + s)) < 1e-9:
+				pairs.append((i - 1, j - 1))
 				i -= 1; j -= 1
-			elif abs(dp[i,j]-(dp[i-1,j]+gap)) < 1e-9:
+			elif abs(dp[i, j] - (dp[i-1, j]   + gap)) < 1e-9:
 				i -= 1
 			else:
 				j -= 1
-		pairs = list(reversed(pairs))
+		pairs.reverse()
 		if len(pairs) < 3:
-			raise Exception(
-				'Too few aligned residue pairs')
-		P_aln, Q_aln = [], []
-		for ii, jj in pairs:
-			for idx in pose1.data[rk][rk1[ii]][2]:
-				if pose1.data['Atoms'][idx][0] == ra:
-					P_aln.append(
-						pose1.data['Coordinates']
-						[idx].copy().astype(float))
-					break
-			for idx in pose2.data[rk][rk2[jj]][2]:
-				if pose2.data['Atoms'][idx][0] == ra:
-					Q_aln.append(
-						pose2.data['Coordinates']
-						[idx].copy().astype(float))
-					break
-		P_aln = np.array(P_aln)
-		Q_aln = np.array(Q_aln)
+			raise Exception('Too few aligned residue pairs')
+		P_aln = np.array([next(co1[ai].copy().astype(float)
+			for ai in res1[rk1[ii]][2]
+			if atoms1[ai][0] == ra) for ii, _ in pairs])
+		Q_aln = np.array([next(co2[ai].copy().astype(float)
+			for ai in res2[rk2[jj]][2]
+			if atoms2[ai][0] == ra) for _, jj in pairs])
+		# Iterative Kabsch, 2.0 Å outlier rejection (<=5 loop rounds
+		# + one final fit — rolled into a single range(6) loop).
 		mask = np.ones(len(pairs), dtype=bool)
-		for _ in range(5):
-			Pm = P_aln[mask]
-			Qm = Q_aln[mask]
-			t_P = Pm.mean(axis=0)
-			t_Q = Qm.mean(axis=0)
-			R = kabsch_R(Pm - t_P, Qm - t_Q)
-			dists = np.sqrt((
-				((P_aln-t_P)-(Q_aln-t_Q) @ R)**2
-				).sum(axis=1))
+		for _ in range(6):
+			Pm, Qm   = P_aln[mask], Q_aln[mask]
+			t_P, t_Q = Pm.mean(axis=0), Qm.mean(axis=0)
+			P, Q     = Pm - t_P, Qm - t_Q
+			U, _, Vt = np.linalg.svd(P.T @ Q)
+			d = np.sign(np.linalg.det(Vt.T @ U.T))
+			R = Vt.T @ np.diag(np.array([1.0, 1.0, d])) @ U.T
+			dists = np.sqrt((((P_aln - t_P)
+				- (Q_aln - t_Q) @ R) ** 2).sum(axis=1))
 			new_mask = dists < 2.0
 			if (np.array_equal(new_mask, mask)
 					or new_mask.sum() < 3):
 				break
 			mask = new_mask
-		Pm = P_aln[mask]
-		Qm = Q_aln[mask]
-		t_P = Pm.mean(axis=0)
-		t_Q = Qm.mean(axis=0)
-		Pc = Pm - t_P
-		Qc = Qm - t_Q
-		R = kabsch_R(Pc, Qc)
-		diff = Pc - Qc @ R
-		rmsd = np.sqrt(np.mean((diff**2).sum(axis=1)))
 	else:
-		coords1, coords2 = [], []
-		for res_idx in sorted(pose1.data[rk].keys()):
-			for ai in pose1.data[rk][res_idx][2]:
-				if pose1.data['Atoms'][ai][0] == ra:
-					coords1.append(
-						pose1.data['Coordinates']
-						[ai].copy().astype(float))
-					break
-		for res_idx in sorted(pose2.data[rk].keys()):
-			for ai in pose2.data[rk][res_idx][2]:
-				if pose2.data['Atoms'][ai][0] == ra:
-					coords2.append(
-						pose2.data['Coordinates']
-						[ai].copy().astype(float))
-					break
+		# Gather ref-atom coords in residue order, skipping residues
+		# that lack it; truncate to the shorter pose.
+		coords1 = [c for c in (next(
+			(co1[ai].copy().astype(float)
+				for ai in res1[ri][2] if atoms1[ai][0] == ra),
+			None) for ri in sorted(res1.keys()))
+			if c is not None]
+		coords2 = [c for c in (next(
+			(co2[ai].copy().astype(float)
+				for ai in res2[ri][2] if atoms2[ai][0] == ra),
+			None) for ri in sorted(res2.keys()))
+			if c is not None]
 		if not coords1 or not coords2:
 			raise Exception(
 				f'No {ra} atoms found in one or both poses')
 		n = min(len(coords1), len(coords2))
-		P = np.array(coords1[:n])
-		Q = np.array(coords2[:n])
-		t_P = P.mean(axis=0)
-		t_Q = Q.mean(axis=0)
-		P = P - t_P
-		Q = Q - t_Q
+		P, Q     = np.array(coords1[:n]), np.array(coords2[:n])
+		t_P, t_Q = P.mean(axis=0), Q.mean(axis=0)
+		P, Q     = P - t_P, Q - t_Q
 		if alg == 'simple':
 			R = np.eye(3)
-			diff = P - Q
 		elif alg == 'kabsch':
-			R = kabsch_R(P, Q)
-			diff = P - (Q @ R)
-		elif alg == 'quaternion':
-			H = P.T @ Q
-			R11,R12,R13 = H[0,0],H[0,1],H[0,2]
-			R21,R22,R23 = H[1,0],H[1,1],H[1,2]
-			R31,R32,R33 = H[2,0],H[2,1],H[2,2]
+			U, _, Vt = np.linalg.svd(P.T @ Q)
+			d = np.sign(np.linalg.det(Vt.T @ U.T))
+			R = Vt.T @ np.diag(np.array([1.0, 1.0, d])) @ U.T
+		else:  # quaternion (Horn 1987: eigenvector of 4×4 key matrix)
+			H  = P.T @ Q
+			a, b, c = H[0]; d, e, f = H[1]; g, h, k = H[2]
 			F = np.array([
-				[R11+R22+R33, R23-R32,
-					R31-R13, R12-R21],
-				[R23-R32, R11-R22-R33,
-					R12+R21, R13+R31],
-				[R31-R13, R12+R21,
-					-R11+R22-R33, R23+R32],
-				[R12-R21, R13+R31,
-					R23+R32, -R11-R22+R33]])
-			_, vecs = np.linalg.eigh(F)
-			q0,q1,q2,q3 = vecs[:,-1]
+				[a+e+k,   f-h,     g-c,     b-d    ],
+				[f-h,     a-e-k,   b+d,     c+g    ],
+				[g-c,     b+d,    -a+e-k,   f+h    ],
+				[b-d,     c+g,     f+h,    -a-e+k  ]])
+			q0, q1, q2, q3 = np.linalg.eigh(F)[1][:, -1]
 			R = np.array([
-				[q0**2+q1**2-q2**2-q3**2,
-					2*(q1*q2-q0*q3),
-					2*(q1*q3+q0*q2)],
+				[q0*q0+q1*q1-q2*q2-q3*q3,
+					2*(q1*q2-q0*q3),         2*(q1*q3+q0*q2)],
 				[2*(q1*q2+q0*q3),
-					q0**2-q1**2+q2**2-q3**2,
-					2*(q2*q3-q0*q1)],
+					q0*q0-q1*q1+q2*q2-q3*q3, 2*(q2*q3-q0*q1)],
 				[2*(q1*q3-q0*q2),
-					2*(q2*q3+q0*q1),
-					q0**2-q1**2-q2**2+q3**2]])
-			diff = P - (Q @ R)
-		rmsd = np.sqrt(np.mean((diff**2).sum(axis=1)))
+					2*(q2*q3+q0*q1),         q0*q0-q1*q1-q2*q2+q3*q3]])
+	diff = P - Q @ R
+	rmsd = np.sqrt(np.mean((diff ** 2).sum(axis=1)))
 	if export is not None:
 		orig = pose2.data['Coordinates'].copy()
-		pose2.data['Coordinates'] = \
-			(orig - t_Q) @ R + t_P
-		fn  = export[:-4]
-		ext = export[-4:]
+		pose2.data['Coordinates'] = (orig - t_Q) @ R + t_P
+		fn, ext = export[:-4], export[-4:]
 		pose1.Export(fn + '_1' + ext)
 		pose2.Export(fn + '_2' + ext)
 		pose2.data['Coordinates'] = orig
-	return(round(float(rmsd), 5))
+	return round(float(rmsd), 5)
 
 # BLOSUM62 scoring matrix — shared by BLAST() and MSA()
 _aa  = 'ARNDCQEGHILKMFPSTWYV'
@@ -478,13 +438,10 @@ def BLAST(seq1, seq2):
 	    percent_identity : float percentage of identical residues
 	    e_value          : float Karlin-Altschul expect value
 	'''
-	seq1 = seq1.upper()
-	seq2 = seq2.upper()
+	seq1, seq2 = seq1.upper(), seq2.upper()
 	m, n = len(seq1), len(seq2)
-	# Affine gap penalties (NCBI BLASTP defaults for BLOSUM62)
-	go, ge = 11, 1
-	INF    = float('-inf')
-	# Smith-Waterman DP with affine gaps
+	# Smith-Waterman DP with affine gaps (NCBI BLASTP defaults).
+	go, ge, INF = 11, 1, float('-inf')
 	H  = np.zeros((m+1, n+1))
 	E  = np.full((m+1, n+1), INF)
 	F  = np.full((m+1, n+1), INF)
@@ -492,85 +449,63 @@ def BLAST(seq1, seq2):
 	best, bi, bj = 0.0, 0, 0
 	for i in range(1, m+1):
 		for j in range(1, n+1):
-			s       = _blosum(seq1[i-1], seq2[j-1])
-			diag    = H[i-1, j-1] + s
-			E[i, j] = max(
-				H[i, j-1] - go - ge, E[i, j-1] - ge)
-			F[i, j] = max(
-				H[i-1, j] - go - ge, F[i-1, j] - ge)
+			diag    = H[i-1, j-1] + _blosum(seq1[i-1], seq2[j-1])
+			E[i, j] = max(H[i, j-1] - go - ge, E[i, j-1] - ge)
+			F[i, j] = max(H[i-1, j] - go - ge, F[i-1, j] - ge)
 			h       = max(0.0, diag, E[i, j], F[i, j])
 			H[i, j] = h
-			if h > best:
-				best, bi, bj = h, i, j
-			if   h == 0:       tb[i, j] = 0
-			elif h == diag:    tb[i, j] = 1
-			elif h == F[i, j]: tb[i, j] = 2
-			else:              tb[i, j] = 3
+			if h > best: best, bi, bj = h, i, j
+			tb[i, j] = (0 if h == 0 else 1 if h == diag
+				else 2 if h == F[i, j] else 3)
 	if best == 0:
 		raise Exception('No alignment found between the sequences')
-	# Traceback from the highest-scoring cell
-	aq, as_ = [], []
-	i, j    = bi, bj
+	# Traceback from the highest-scoring cell.
+	aq, as_, i, j = [], [], bi, bj
 	while i > 0 and j > 0 and H[i, j] > 0:
 		t = int(tb[i, j])
 		if t == 1:
 			aq.append(seq1[i-1]); as_.append(seq2[j-1])
 			i -= 1; j -= 1
 		elif t == 2:
-			aq.append(seq1[i-1]); as_.append('-')
-			i -= 1
+			aq.append(seq1[i-1]); as_.append('-'); i -= 1
 		else:
-			aq.append('-'); as_.append(seq2[j-1])
-			j -= 1
-	aq  = ''.join(reversed(aq))
-	as_ = ''.join(reversed(as_))
-	qs, ss  = i + 1, j + 1
-	aln_len = len(aq)
-	n_id = sum(
-		1 for a, b in zip(aq, as_) if a == b and a != '-')
-	n_pos = sum(
-		1 for a, b in zip(aq, as_)
+			aq.append('-'); as_.append(seq2[j-1]); j -= 1
+	aq, as_ = ''.join(reversed(aq)), ''.join(reversed(as_))
+	qs, ss, aln_len = i + 1, j + 1, len(aq)
+	n_id  = sum(1 for a, b in zip(aq, as_) if a == b and a != '-')
+	n_pos = sum(1 for a, b in zip(aq, as_)
 		if a != '-' and b != '-' and _blosum(a, b) > 0)
-	n_gap   = aq.count('-') + as_.count('-')
-	pct     = round(n_id / aln_len * 100, 2)
-	# Karlin-Altschul E-value (BLOSUM62, gap_open=11, gap_extend=1)
+	n_gap = aq.count('-') + as_.count('-')
+	pct     = round(n_id  / aln_len * 100, 2)
+	pct_pos = round(n_pos / aln_len * 100, 1)
+	pct_gap = round(n_gap / aln_len * 100, 1)
+	# Karlin-Altschul (BLOSUM62, gap_open=11, gap_extend=1).
 	lam, K  = 0.270, 0.041
 	e_value = K * m * n * math.exp(-lam * best)
 	bits    = (lam * best - math.log(K)) / math.log(2)
-	# Match symbol line
-	mid = ''
-	for a, b in zip(aq, as_):
-		if   a == '-' or b == '-': mid += ' '
-		elif a == b:               mid += '|'
-		elif _blosum(a, b) > 0:    mid += '+'
-		else:                      mid += ' '
-	pct_pos = round(n_pos / aln_len * 100, 1)
-	pct_gap = round(n_gap / aln_len * 100, 1)
+	mid = ''.join(
+		' ' if a == '-' or b == '-'
+		else '|' if a == b
+		else '+' if _blosum(a, b) > 0
+		else ' '
+		for a, b in zip(aq, as_))
 	out = [
-		f'Query length={m}  Subject length={n}',
-		'',
+		f'Query length={m}  Subject length={n}', '',
 		(f'Score: {bits:.1f} bits ({int(best)}), '
 			f'E-value: {e_value:.3e}'),
 		(f'Identities: {n_id}/{aln_len} ({pct}%), '
 			f'Positives: {n_pos}/{aln_len} ({pct_pos}%), '
-			f'Gaps: {n_gap}/{aln_len} ({pct_gap}%)'),
-		'',]
-	w = 60
-	qp, sp = qs, ss
+			f'Gaps: {n_gap}/{aln_len} ({pct_gap}%)'), '']
+	qp, sp, w = qs, ss, 60
 	for st in range(0, aln_len, w):
-		bq = aq[st:st+w]
-		bm = mid[st:st+w]
-		bs = as_[st:st+w]
-		qr = len(bq) - bq.count('-')
-		sr = len(bs) - bs.count('-')
+		bq, bm, bs = aq[st:st+w], mid[st:st+w], as_[st:st+w]
+		qr, sr = len(bq) - bq.count('-'), len(bs) - bs.count('-')
 		out += [
 			f'Query  {qp:>6}  {bq}  {qp+qr-1}',
 			f'       {"":>6}  {bm}',
-			f'Sbjct  {sp:>6}  {bs}  {sp+sr-1}',
-			'',]
-		qp += qr
-		sp += sr
-	return('\n'.join(out), pct, e_value)
+			f'Sbjct  {sp:>6}  {bs}  {sp+sr-1}', '']
+		qp += qr; sp += sr
+	return '\n'.join(out), pct, e_value
 
 def MSA(sequences):
 	'''
