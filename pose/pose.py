@@ -556,16 +556,14 @@ class Pose():
 	def CalcCharge(self, iterations=6):
 		''' Calculate Gasteiger-Marsili partial charges to all atoms '''
 		PARAMS = {
-			'C3': (7.98,  9.18,  1.88),
-			'C2': (8.79,  9.32,  1.51),
-			'C1': (10.39, 9.45,  0.73),
-			'H':  (7.17,  6.24, -0.56),
-			'O3': (14.18, 12.92, 1.39),
-			'O2': (17.07, 13.79, 0.47),
-			'N3': (11.54, 10.82, 1.36),
-			'N2': (12.87, 11.15, 0.85),
-			'S':  (10.14,  9.13, 1.38),
-			'Se': (9.00,   8.00, 1.10)}
+			'C3':(7.98,  9.18,  1.88), 'C2':(8.79,  9.32,  1.51),
+			'C1':(10.39, 9.45,  0.73), 'H' :(7.17,  6.24, -0.56),
+			'O3':(14.18, 12.92, 1.39), 'O2':(17.07, 13.79, 0.47),
+			'N3':(11.54, 10.82, 1.36), 'N2':(12.87, 11.15, 0.85),
+			'S' :(10.14, 9.13,  1.38), 'Se':(9.00,  8.00,  1.10),
+			'F' :(14.66, 13.85, 2.31), 'Cl':(11.00, 9.69,  1.35),
+			'Br':(10.08, 8.47,  1.16), 'I' :(9.90,  7.96,  0.96),
+			'P' :(8.90,  8.24,  0.96), 'B' :(5.80,  6.00,  1.56)}
 		ids  = sorted(self.data['Atoms'].keys())
 		els  = [self.data['Atoms'][i][1].upper() for i in ids]
 		id_set = set(ids)
@@ -788,12 +786,10 @@ class Pose():
 			ss.setdefault(v[1], []).append(v[4])
 		ss = {k: ''.join(v) for k, v in ss.items()}
 		self.data['SS'] = ss
-	def CalcSASA(self, n_points=400, probe_radius=1.4):
+	def CalcSASA(self, n_points=960, probe_radius=1.4):
 		''' Calculate SASA per residue '''
 		if self.data['Amino Acids'] is None:
-			raise Exception(
-				'No protein loaded. '
-				'Call Import() first')
+			raise Exception('No protein loaded. Call Import() first')
 		VDW = {
 			'H':  1.20, 'C':  1.70, 'N':  1.55, 'O':  1.52,
 			'S':  1.80, 'SE': 1.90, 'P':  1.80, 'F':  1.47,
@@ -808,26 +804,20 @@ class Pose():
 		n      = len(ids)
 		c      = coords[np.array(ids)]
 		radii  = np.array([
-			VDW.get(atoms[i][1].upper(),DEFAULT_VDW)+probe_radius for i in ids])
+		VDW.get(atoms[i][1].upper(),DEFAULT_VDW)+probe_radius for i in ids])
 		golden = (1 + np.sqrt(5)) / 2
 		pts    = np.arange(n_points)
 		theta  = np.arccos(1 - 2 * (pts + 0.5) / n_points)
 		phi    = 2 * np.pi * pts / golden
-		st  = np.sin(theta)
-		sph = np.column_stack([st*np.cos(phi), st*np.sin(phi), np.cos(theta)])
-		from scipy.spatial import cKDTree
-		tree  = cKDTree(c) if n > 0 else None
-		max_r = float(radii.max()) if n > 0 else 0.0
+		st     = np.sin(theta)
+		sph    = np.column_stack([st*np.cos(phi),st*np.sin(phi),np.cos(theta)])
+		dm     = np.sqrt(((c[:, None, :] - c[None, :, :])**2).sum(2))
 		atom_sasa = np.zeros(n)
 		for ii in range(n):
 			ri       = radii[ii]
 			test_pts = c[ii] + ri * sph
-			cand     = tree.query_ball_point(c[ii], ri + max_r)
-			nbrs     = np.array(
-				[k for k in cand
-				 if k != ii
-				 and np.linalg.norm(c[ii] - c[k]) < ri + radii[k]],
-				dtype=int)
+			nbr_mask = (dm[ii] < ri + radii) & (dm[ii] > 0)
+			nbrs     = np.where(nbr_mask)[0]
 			if len(nbrs) == 0:
 				atom_sasa[ii] = 4 * np.pi * ri**2
 				continue
@@ -2424,16 +2414,11 @@ class Molecule():
 			if n > 0:
 				els = [atoms[i][1] for i in range(n)]
 				MAX_D = 2.2
-				try:
-					from scipy.spatial import cKDTree
-					tree = cKDTree(c)
-					pairs = tree.query_pairs(MAX_D)
-				except ImportError:
-					pairs = set()
-					for i in range(n):
-						for j in range(i+1, n):
-							d = np.linalg.norm(c[i] - c[j])
-							if d < MAX_D: pairs.add((i, j))
+				diff = c[:, None, :] - c[None, :, :]
+				d2 = np.einsum('ijk,ijk->ij', diff, diff)
+				mask = np.triu(d2 < MAX_D * MAX_D, k=1)
+				ii, jj = np.where(mask)
+				pairs = list(zip(ii.tolist(), jj.tolist()))
 				for i, j in pairs:
 					ei, ej = els[i], els[j]
 					th = 1.9
