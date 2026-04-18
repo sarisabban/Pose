@@ -8,20 +8,17 @@ from collections import defaultdict, deque
 def Parameterise(filename, unicode, tricode):
 	'''
 	Add a new amino acid entry to database.json
-
-	Arguments
-	---------
-	filename : str - Path to the CIF file (download from RCSB Chemical Sketch)
-	unicode  : str - Single-letter key to use in AminoAcids.json (e.g. 'J')
-	tricode  : str - Three-letter residue code (e.g. 'MSE')
-
-	Return
-	------
-
-	Updated database.json
+	Arguments:
+	----------
+		filename : str - Path to CIF file (download from RCSB Chemical Sketch)
+		unicode  : str - Single-letter key to use in AminoAcids.json (e.g. 'J')
+		tricode  : str - Three-letter residue code (e.g. 'MSE')
+	Return:
+	-------
+		Updated database.json
+		Notice   : str - What got updated or replaced
 	'''
-	# ALA reference frame (N at origin): N, H1-3, CA, HA, CB, 1HB-3HB,
-	# C, O, OXT — RigidMotion uses A[0]=N, A[4]=CA, A[6]=CB, A[-3]=C.
+	# 1. ALA reference frame (N at origin): N, H1-3, CA, HA, CB, 1HB-3HB, C, O, OXT.
 	ALA = np.array([
 		[ 0.000,  0.000,  0.000], [-0.334, -0.943,  0.000],
 		[-0.334,  0.471,  0.816], [-0.334,  0.471, -0.816],
@@ -31,8 +28,7 @@ def Parameterise(filename, unicode, tricode):
 		[ 2.009,  1.420,  0.000], [ 2.058,  2.045,  1.023],
 		[ 2.394,  1.914, -1.023]])
 	unicode, tricode = unicode.upper(), tricode.upper()
-	# 1. Parse CIF: atom rows (>=18 tokens, ideal coords at [15:18],
-	#    fallback [12:15], bb flag [9]=='Y'); bond rows (==7 tokens).
+	# 2. Parse CIF: atom rows have >=18 tokens (coords at [15:18] or fallback [12:15]); bond rows have 7 tokens.
 	COORD_RAW, ATOMS_RAW, BONDS = [], [], []
 	with open(filename) as fh:
 		for line in fh:
@@ -60,8 +56,7 @@ def Parameterise(filename, unicode, tricode):
 		'HA','HA2','HA3','HXT'}
 	elem    = {a['id']: a['elem'] for a in ATOMS_RAW}
 	cif_ord = {a['id']: i for i, a in enumerate(ATOMS_RAW)}
-	# 2. Superimpose onto ALA backbone frame (rigid motion via N, CA,
-	#    CB, C). AL/BL use CA as origin; transform maps B-frame→A-frame.
+	# 3. Superimpose onto ALA backbone frame via rigid motion (N, CA, CB, C) with CA as origin.
 	try:
 		Ni, CAi = CIF_IDS.index('N'),  CIF_IDS.index('CA')
 		CBi, Ci = CIF_IDS.index('CB'), CIF_IDS.index('C')
@@ -72,12 +67,11 @@ def Parameterise(filename, unicode, tricode):
 	AL = np.array([A[0]-A[4], A[6]-A[4], A[-3]-A[4], A[4]])
 	BL = np.array([B[Ni]-B[CAi], B[CBi]-B[CAi], B[Ci]-B[CAi], B[CAi]])
 	COORD = (B @ (np.linalg.inv(BL) @ AL))[:, :3]
-	# 3. Undirected bond graph, indexed by atom id.
+	# 4. Build undirected bond graph indexed by atom id.
 	adj = defaultdict(set)
 	for a1, a2, _v, _r in BONDS:
 		adj[a1].add(a2); adj[a2].add(a1)
-	# 4. BFS from CB (heavy-atom queue; H neighbours appended inline
-	#    next to their parent so they land in CIF-ordinal groups).
+	# 5. BFS sidechain from CB (heavy-atom queue; H neighbours land next to their parent in CIF order).
 	ordered = []
 	seen    = set(bb_set) | {'CB'}
 	q       = deque(['CB'])
@@ -88,7 +82,7 @@ def Parameterise(filename, unicode, tricode):
 			if n in seen: continue
 			seen.add(n)
 			(ordered if elem.get(n, '').upper() in ('H', 'D') else q).append(n)
-	# 5. CIF → Pose atom naming: HB2 → 1HB (per-base counter on H/D).
+	# 6. Rename atoms: CIF HB2 becomes Pose 1HB (per-base counter on H/D atoms).
 	name_map, counter = {}, defaultdict(int)
 	for name in ordered:
 		m = re.match(r'^([A-Z]+)(\d+)$', name)
@@ -97,12 +91,10 @@ def Parameterise(filename, unicode, tricode):
 			name_map[name] = f'{counter[m.group(1)]}{m.group(1)}'
 		else:
 			name_map[name] = name
-	# 6. Fused sidechain: any sidechain atom bonded back to N (e.g. PRO).
+	# 7. Detect fused sidechain: any sidechain atom bonded back to N (e.g. PRO).
 	fused_atom = next((sc for sc in ordered if 'N' in adj[sc]), None)
 	fused = fused_atom is not None
-	# 7. Sidechain bond graph on new indices; -5 sentinel stands in for
-	#    the backbone N of a fused ring. Bond orders: map CIF value_order
-	#    inline (AROM flag and 'AROM' both → 1.5); unknown → warn + 1.
+	# 8. Sidechain bond graph on new indices; -5 sentinel stands in for the backbone N of a fused ring.
 	sc_set  = set(ordered)
 	new_idx = {n: i for i, n in enumerate(ordered)}
 	sc_bonds, sc_orders, bo_lookup = (
@@ -129,8 +121,7 @@ def Parameterise(filename, unicode, tricode):
 		fi = new_idx[fused_atom]
 		sc_bonds[fi].append(-5);  sc_bonds[-5].append(fi)
 		sc_orders[fi].append(1);  sc_orders[-5].append(1)
-	# Two-pass aromaticity: a C with >=2 O/N neighbours where at least
-	# one is double-bonded → spread resonance (all such C–O/N → 1.5).
+	# 9. Two-pass aromaticity: C with >=2 O/N neighbours and at least one double bond gets resonance (all C-O/N -> 1.5).
 	elem_at_idx = {new_idx[n]: elem[n] for n in ordered}
 	for _p in range(2):
 		for i in list(sc_bonds.keys()):
@@ -146,8 +137,7 @@ def Parameterise(filename, unicode, tricode):
 					if mnb == i:
 						sc_orders[nb][kk] = 1.5
 						break
-	# Final bond dicts — sorted neighbour indices for determinism, with
-	# matching bond-order lists.  -5 sentinel kept last if fused.
+	# 10. Final bond dicts with sorted neighbours for determinism; -5 sentinel kept last if fused.
 	pos_keys     = sorted(k for k in sc_bonds if k >= 0)
 	final_bonds  = {k: sorted(sc_bonds[k]) for k in pos_keys}
 	final_orders = {k: [dict(zip(sc_bonds[k], sc_orders[k]))[nb]
@@ -156,8 +146,7 @@ def Parameterise(filename, unicode, tricode):
 		final_bonds[-5]  = sorted(sc_bonds[-5])
 		final_orders[-5] = [dict(zip(sc_bonds[-5], sc_orders[-5]))[nb]
 			for nb in final_bonds[-5]]
-	# 8. Chi angles: trace main chain from CB by CIF-ordinal preference
-	#    (skip backbone + CA). Window of 4 over [N, CA, *mc] → dihedrals.
+	# 11. Chi angles: trace main chain from CB by CIF-ordinal preference; 4-atom window over [N, CA, *mc].
 	mc, visited, cur = [], set(bb_set) | {'CA'}, 'CB'
 	while cur is not None:
 		mc.append(cur); visited.add(cur)
@@ -169,7 +158,7 @@ def Parameterise(filename, unicode, tricode):
 	if fused and len(full_chain) >= 5:
 		chis.append(full_chain[-3:] + ['N'])
 		chis.append(full_chain[-2:] + ['N', 'CA'])
-	# 9. Assemble the new entry in the same field order as existing AAs.
+	# 12. Assemble the new entry in the same field order as existing AAs.
 	id_to_i = {cid: i for i, cid in enumerate(CIF_IDS)}
 	entry = {
 		'Vectors':         [COORD[id_to_i[n]].tolist() for n in ordered],
@@ -179,15 +168,14 @@ def Parameterise(filename, unicode, tricode):
 		'Chi Angle Atoms': chis,
 		'Bonds':           {str(k): v for k, v in final_bonds.items()},
 		'BondOrders':      {str(k): v for k, v in final_orders.items()}}
-	# 10. Merge into database.json.
+	# 13. Merge into database.json.
 	db_path = os.path.join(
 		os.path.dirname(os.path.abspath(__file__)), 'database.json')
 	with open(db_path) as fh: db = json.load(fh)
 	if unicode in db['Amino Acids']:
 		print(f'Warning: "{unicode}" already exists... overwriting.')
 	db['Amino Acids'][unicode] = entry
-	# 11. Custom serialiser — preserves the exact database.json layout
-	#     (padded vector columns, compact bond rows, section closers).
+	# 14. Custom serialiser preserves exact layout (padded vectors, compact bond rows, section closers).
 	L    = ['{']
 	secs = list(db.items())
 	for si, (sname, entries) in enumerate(secs):
@@ -253,24 +241,25 @@ def Parameterise(filename, unicode, tricode):
 
 def RMSD(pose1, pose2, alg='align', export=None):
 	'''
-	Calculate RMSD between two poses (protein or nucleic acid).
-	Auto-detects molecule type via pose.data['Type'].
-	Proteins align on CA atoms, nucleic acids on C1' atoms.
-	Alignment algorithms:
-		align      - sequence alignment + iterative Kabsch (default)
-		kabsch     - SVD-based optimal rotation, all residues
-		quaternion - eigenvalue-based optimal rotation, all residues
-		simple     - translation only, no rotation
-	Return
-	------
-	float    : The RMSD value
+	Calculate RMSD between two poses (protein or nucleic acid)
+	Arguments:
+	----------
+		pose1  : Pose - First pose (protein or nucleic acid)
+		pose2  : Pose - Second pose (must be same Type as pose1)
+		alg    : str  - 'align' (default), 'kabsch', 'quaternion', 'simple'
+		export : str  - Output filename for aligned PDB pair; None skips export
+	Return:
+	-------
+		float : RMSD value in angstroms, rounded to 5 decimals
 	'''
+	# 1. Validate algorithm and check both poses are the same molecule type.
 	if alg not in ('align', 'kabsch', 'quaternion', 'simple'):
 		raise Exception('Unknown algorithm: ' + str(alg))
 	t1, t2 = pose1.data['Type'], pose2.data['Type']
 	if (t1 == 'Protein') != (t2 == 'Protein'):
 		raise Exception(f'Cannot align {t1} with {t2}: '
 			'cannot mix protein and nucleic acid')
+	# 2. Resolve molecule-specific residue-key and reference-atom name.
 	is_pro = (t1 == 'Protein')
 	rk     = 'Amino Acids' if is_pro else 'Nucleotides'
 	ra     = 'CA' if is_pro else "C1'"
@@ -279,8 +268,7 @@ def RMSD(pose1, pose2, alg='align', export=None):
 	atoms2, co2, res2 = (pose2.data['Atoms'],
 		pose2.data['Coordinates'], pose2.data[rk])
 	if alg == 'align':
-		# Needleman-Wunsch with BLOSUM62 (proteins) or
-		# +1/-0.5 match/mismatch (nucleic acids); gap = -1.
+		# 3. Needleman-Wunsch DP with BLOSUM62 (proteins) or +1/-0.5 (nucleic); gap = -1.
 		rk1, rk2 = sorted(res1.keys()), sorted(res2.keys())
 		seq1 = ''.join(res1[k][0].upper() for k in rk1)
 		seq2 = ''.join(res2[k][0].upper() for k in rk2)
@@ -296,6 +284,7 @@ def RMSD(pose1, pose2, alg='align', export=None):
 					else (1.0 if a == b else -0.5))
 				dp[i, j] = max(dp[i-1, j-1] + s,
 					dp[i-1, j] + gap, dp[i, j-1] + gap)
+		# 4. Traceback the optimal alignment path to recover residue pairs.
 		pairs, i, j = [], m, n
 		while i > 0 and j > 0:
 			a, b = seq1[i-1], seq2[j-1]
@@ -311,14 +300,14 @@ def RMSD(pose1, pose2, alg='align', export=None):
 		pairs.reverse()
 		if len(pairs) < 3:
 			raise Exception('Too few aligned residue pairs')
+		# 5. Gather reference-atom coordinates for each aligned pair.
 		P_aln = np.array([next(co1[ai].copy().astype(float)
 			for ai in res1[rk1[ii]][2]
 			if atoms1[ai][0] == ra) for ii, _ in pairs])
 		Q_aln = np.array([next(co2[ai].copy().astype(float)
 			for ai in res2[rk2[jj]][2]
 			if atoms2[ai][0] == ra) for _, jj in pairs])
-		# Iterative Kabsch, 2.0 Å outlier rejection (<=5 loop rounds
-		# + one final fit — rolled into a single range(6) loop).
+		# 6. Iterative Kabsch with 2.0 A outlier rejection (5 rounds + 1 final fit).
 		mask = np.ones(len(pairs), dtype=bool)
 		for _ in range(6):
 			Pm, Qm   = P_aln[mask], Q_aln[mask]
@@ -335,8 +324,7 @@ def RMSD(pose1, pose2, alg='align', export=None):
 				break
 			mask = new_mask
 	else:
-		# Gather ref-atom coords in residue order, skipping residues
-		# that lack it; truncate to the shorter pose.
+		# 3. Gather all ref-atom coords (skipping residues that lack it), truncate to shorter pose.
 		coords1 = [c for c in (next(
 			(co1[ai].copy().astype(float)
 				for ai in res1[ri][2] if atoms1[ai][0] == ra),
@@ -354,13 +342,14 @@ def RMSD(pose1, pose2, alg='align', export=None):
 		P, Q     = np.array(coords1[:n]), np.array(coords2[:n])
 		t_P, t_Q = P.mean(axis=0), Q.mean(axis=0)
 		P, Q     = P - t_P, Q - t_Q
+		# 4. Compute rotation matrix via the selected algorithm (Horn 1987 for quaternion).
 		if alg == 'simple':
 			R = np.eye(3)
 		elif alg == 'kabsch':
 			U, _, Vt = np.linalg.svd(P.T @ Q)
 			d = np.sign(np.linalg.det(Vt.T @ U.T))
 			R = Vt.T @ np.diag(np.array([1.0, 1.0, d])) @ U.T
-		else:  # quaternion (Horn 1987: eigenvector of 4×4 key matrix)
+		else:
 			H  = P.T @ Q
 			a, b, c = H[0]; d, e, f = H[1]; g, h, k = H[2]
 			F = np.array([
@@ -376,8 +365,10 @@ def RMSD(pose1, pose2, alg='align', export=None):
 					q0*q0-q1*q1+q2*q2-q3*q3, 2*(q2*q3-q0*q1)],
 				[2*(q1*q3-q0*q2),
 					2*(q2*q3+q0*q1),         q0*q0-q1*q1-q2*q2+q3*q3]])
+	# 7. Compute RMSD from centred coordinate residuals.
 	diff = P - Q @ R
 	rmsd = np.sqrt(np.mean((diff ** 2).sum(axis=1)))
+	# 8. Optionally export aligned pose pair as PDB files.
 	if export is not None:
 		orig = pose2.data['Coordinates'].copy()
 		pose2.data['Coordinates'] = (orig - t_Q) @ R + t_P
@@ -389,6 +380,7 @@ def RMSD(pose1, pose2, alg='align', export=None):
 
 # BLOSUM62 scoring matrix — shared by BLAST() and MSA()
 _aa  = 'ARNDCQEGHILKMFPSTWYV'
+_idx = {c: i for i, c in enumerate(_aa)}
 _bm  = [
 	[ 4,-1,-2,-2, 0,-1,-1, 0,-2,-1,-1,-1,-1,-2,-1, 1, 0,-3,-2, 0],
 	[-1, 5, 0,-2,-3, 1, 0,-2, 0,-3,-2, 2,-1,-3,-2,-1,-1,-3,-2,-3],
@@ -409,38 +401,43 @@ _bm  = [
 	[ 0,-1, 0,-1,-1,-1,-1,-2,-2,-1,-1,-1,-1,-2,-1, 1, 5,-3,-2, 0],
 	[-3,-3,-4,-4,-2,-2,-3,-2,-2,-3,-2,-3,-1, 1,-4,-3,-3,11, 2,-3],
 	[-2,-2,-2,-3,-2,-1,-2,-3, 2,-1,-1,-2,-1, 3,-3,-2,-2, 2, 7,-1],
-	[ 0,-3,-3,-3,-1,-2,-2,-3,-3, 3, 1,-2, 1,-1,-2,-2, 0,-3,-1, 4],
-]
-_idx = {c: i for i, c in enumerate(_aa)}
+	[ 0,-3,-3,-3,-1,-2,-2,-3,-3, 3, 1,-2, 1,-1,-2,-2, 0,-3,-1, 4]]
 
 def _blosum(a, b):
-	''' BLOSUM62 score; D-AAs are pre-uppercased by callers. '''
+	'''
+	BLOSUM62 pairwise amino-acid substitution score
+	Arguments:
+	----------
+		a : str - First amino acid one-letter code (must be uppercase)
+		b : str - Second amino acid one-letter code (must be uppercase)
+	Return:
+	-------
+		int : BLOSUM62 score; falls back to +4 for match / -1 for mismatch if unknown
+	'''
+	# 1. Resolve alphabet indices for both residues.
 	ia, ib = _idx.get(a, -1), _idx.get(b, -1)
-	if ia < 0 or ib < 0:
-		return(4 if a == b else -1)
+	# 2. Fallback when either residue is outside the BLOSUM62 alphabet.
+	if ia < 0 or ib < 0: return(4 if a == b else -1)
+	# 3. Look up the canonical BLOSUM62 score.
 	return(_bm[ia][ib])
 
 def BLAST(seq1, seq2):
 	'''
-	Pairwise protein sequence alignment using Smith-Waterman
-	(BLOSUM62, gap open=11, gap extend=1) with Karlin-Altschul
-	E-value statistics.
-
-	Parameters
+	Pairwise protein alignment via Smith-Waterman with BLOSUM62 and Karlin-Altschul E-value
+	Arguments:
 	----------
-	seq1 : str  FASTA sequence of the first protein.
-	seq2 : str  FASTA sequence of the second protein.
-
-	Returns
+		seq1 : str - FASTA sequence of the first (query) protein
+		seq2 : str - FASTA sequence of the second (subject) protein
+	Return:
 	-------
-	tuple : (alignment_string, percent_identity, e_value)
-	    alignment_string : str   alignment in BLAST-like format
-	    percent_identity : float percentage of identical residues
-	    e_value          : float Karlin-Altschul expect value
+		str   : BLAST-like formatted alignment report
+		float : Percent identity over the aligned region
+		float : Karlin-Altschul expect value
 	'''
+	# 1. Uppercase both sequences and capture lengths.
 	seq1, seq2 = seq1.upper(), seq2.upper()
 	m, n = len(seq1), len(seq2)
-	# Smith-Waterman DP with affine gaps (NCBI BLASTP defaults).
+	# 2. Smith-Waterman DP with affine gaps (NCBI BLASTP defaults: open=11, extend=1).
 	go, ge, INF = 11, 1, float('-inf')
 	H  = np.zeros((m+1, n+1))
 	E  = np.full((m+1, n+1), INF)
@@ -459,7 +456,7 @@ def BLAST(seq1, seq2):
 				else 2 if h == F[i, j] else 3)
 	if best == 0:
 		raise Exception('No alignment found between the sequences')
-	# Traceback from the highest-scoring cell.
+	# 3. Traceback from the highest-scoring cell to recover aligned strings.
 	aq, as_, i, j = [], [], bi, bj
 	while i > 0 and j > 0 and H[i, j] > 0:
 		t = int(tb[i, j])
@@ -471,6 +468,7 @@ def BLAST(seq1, seq2):
 		else:
 			aq.append('-'); as_.append(seq2[j-1]); j -= 1
 	aq, as_ = ''.join(reversed(aq)), ''.join(reversed(as_))
+	# 4. Compute identity, similarity, gap statistics over the aligned region.
 	qs, ss, aln_len = i + 1, j + 1, len(aq)
 	n_id  = sum(1 for a, b in zip(aq, as_) if a == b and a != '-')
 	n_pos = sum(1 for a, b in zip(aq, as_)
@@ -479,16 +477,18 @@ def BLAST(seq1, seq2):
 	pct     = round(n_id  / aln_len * 100, 2)
 	pct_pos = round(n_pos / aln_len * 100, 1)
 	pct_gap = round(n_gap / aln_len * 100, 1)
-	# Karlin-Altschul (BLOSUM62, gap_open=11, gap_extend=1).
+	# 5. Karlin-Altschul E-value (lam=0.270, K=0.041 for BLOSUM62 with gap 11/1).
 	lam, K  = 0.270, 0.041
 	e_value = K * m * n * math.exp(-lam * best)
 	bits    = (lam * best - math.log(K)) / math.log(2)
+	# 6. Build the per-column match-symbol line: | identical, + similar, ' ' otherwise.
 	mid = ''.join(
 		' ' if a == '-' or b == '-'
 		else '|' if a == b
 		else '+' if _blosum(a, b) > 0
 		else ' '
 		for a, b in zip(aq, as_))
+	# 7. Format the header and stats lines of the BLAST-style report.
 	out = [
 		f'Query length={m}  Subject length={n}', '',
 		(f'Score: {bits:.1f} bits ({int(best)}), '
@@ -496,6 +496,7 @@ def BLAST(seq1, seq2):
 		(f'Identities: {n_id}/{aln_len} ({pct}%), '
 			f'Positives: {n_pos}/{aln_len} ({pct_pos}%), '
 			f'Gaps: {n_gap}/{aln_len} ({pct_gap}%)'), '']
+	# 8. Emit 60-column aligned blocks with Query / midline / Sbjct tracks.
 	qp, sp, w = qs, ss, 60
 	for st in range(0, aln_len, w):
 		bq, bm, bs = aq[st:st+w], mid[st:st+w], as_[st:st+w]
@@ -509,481 +510,385 @@ def BLAST(seq1, seq2):
 
 def MSA(sequences):
 	'''
-	Progressive multiple sequence alignment (ClustalW-like).
-
-	Uses UPGMA guide tree built from pairwise BLAST distances,
-	then aligns profiles progressively with Needleman-Wunsch
-	(BLOSUM62, gap open=11, gap extend=1).  Handles L-AAs,
-	D-AAs (uppercased to L-counterpart), and non-canonical AAs.
-
-	Parameters
+	Progressive multiple sequence alignment (ClustalW-like) with BLOSUM62 and mean-field DCA
+	Arguments:
 	----------
-	sequences : list of str
-	    FASTA sequences to align (at least 2).
-
-	Returns
+		sequences : list[str] - FASTA sequences to align (at least 2 required)
+	Return:
 	-------
-	tuple : (alignment_string, aligned_list,
-	         conservation, entropy, pssm, dca)
-	    alignment_string : str          ClustalW-style formatted text
-	    aligned_list     : list[str]    gap-padded sequences, same order
-	    conservation     : list[float]  per-column 1 - H/log2(20), [0,1]
-	    entropy          : list[float]  per-column Shannon entropy (bits)
-	    pssm             : np.ndarray   shape (L, 20) log-odds, AA order
-	                                    'ARNDCQEGHILKMFPSTWYV'
-	    dca              : np.ndarray   shape (L, L) APC-corrected mfDCA
-	                                    direct-information matrix
+		str        : ClustalW-style formatted alignment text
+		list[str]  : Gap-padded aligned sequences in input order
+		list[float]: Per-column conservation score = 1 - H/log2(20), range [0, 1]
+		list[float]: Per-column Shannon entropy in bits
+		np.ndarray : PSSM of shape (L, 20) in AA order 'ARNDCQEGHILKMFPSTWYV'
+		np.ndarray : APC-corrected mean-field DCA direct-information matrix (L, L)
 	'''
+	# 1. Validate input count and normalise sequences to uppercase.
 	n = len(sequences)
 	if n < 2:
 		raise Exception('MSA requires at least 2 sequences')
 	seqs   = [s.upper() for s in sequences]
 	labels = [f'Seq{i+1}' for i in range(n)]
-	go, ge = 11, 1
-	INF    = float('-inf')
-	def col_score(p1, p2, ci, cj):
-		col_a = [s[ci] for s in p1 if s[ci] != '-']
-		col_b = [s[cj] for s in p2 if s[cj] != '-']
-		if not col_a or not col_b:
-			return(0.0)
-		total = sum(
-			_blosum(a, b) for a in col_a for b in col_b)
-		return(total / (len(col_a) * len(col_b)))
-	def align_profiles(p1, p2):
-		L1 = len(p1[0])
-		L2 = len(p2[0])
+	go, ge, INF = 11, 1, float('-inf')
+	# 2. Pairwise distances via BLAST (1 - pct/100, clipped to 1 on error).
+	dist = np.zeros((n, n))
+	for i in range(n):
+		for j in range(i+1, n):
+			try:
+				_, pct, _ = BLAST(seqs[i], seqs[j])
+				dd = 1.0 - pct / 100.0
+			except Exception:
+				dd = 1.0
+			dist[i, j] = dist[j, i] = dd
+	# 3. UPGMA guide tree: repeatedly merge closest active clusters.
+	sizes  = {k: 1 for k in range(n)}
+	active = list(range(n))
+	d      = dist.copy()
+	merge_order = []
+	for _ in range(n - 1):
+		bi, bj, best = -1, -1, float('inf')
+		for x in range(len(active)):
+			for y in range(x + 1, len(active)):
+				ii, jj = active[x], active[y]
+				if d[ii, jj] < best:
+					best, bi, bj = d[ii, jj], ii, jj
+		merge_order.append((bi, bj))
+		ni, nj = sizes[bi], sizes[bj]
+		for k in active:
+			if k == bi or k == bj: continue
+			d[bi, k] = d[k, bi] = (
+				ni * d[bi, k] + nj * d[bj, k]) / (ni + nj)
+		sizes[bi] += sizes[bj]
+		active.remove(bj)
+	# 4. Progressive profile-to-profile Needleman-Wunsch with affine gaps and BLOSUM62 column scoring.
+	profiles = {k: [seqs[k]] for k in range(n)}
+	for (ci, cj) in merge_order:
+		p1, p2 = profiles[ci], profiles[cj]
+		L1, L2 = len(p1[0]), len(p2[0])
 		H  = np.zeros((L1+1, L2+1))
 		E  = np.full((L1+1, L2+1), INF)
 		F  = np.full((L1+1, L2+1), INF)
 		tb = np.zeros((L1+1, L2+1), dtype=np.int8)
 		for i in range(1, L1+1):
-			H[i, 0] = -(go + ge * i)
-			tb[i, 0] = 2
+			H[i, 0], tb[i, 0] = -(go + ge * i), 2
 		for j in range(1, L2+1):
-			H[0, j] = -(go + ge * j)
-			tb[0, j] = 3
+			H[0, j], tb[0, j] = -(go + ge * j), 3
 		for i in range(1, L1+1):
 			for j in range(1, L2+1):
-				s       = col_score(p1, p2, i-1, j-1)
-				diag    = H[i-1, j-1] + s
-				E[i, j] = max(
-					H[i, j-1] - go - ge, E[i, j-1] - ge)
-				F[i, j] = max(
-					H[i-1, j] - go - ge, F[i-1, j] - ge)
+				ca = [r[i-1] for r in p1 if r[i-1] != '-']
+				cb = [r[j-1] for r in p2 if r[j-1] != '-']
+				cs = 0.0 if (not ca or not cb) else sum(
+					_blosum(a, b) for a in ca for b in cb
+					) / (len(ca) * len(cb))
+				diag    = H[i-1, j-1] + cs
+				E[i, j] = max(H[i, j-1] - go - ge, E[i, j-1] - ge)
+				F[i, j] = max(H[i-1, j] - go - ge, F[i-1, j] - ge)
 				h       = max(diag, E[i, j], F[i, j])
 				H[i, j] = h
-				if   h == diag:    tb[i, j] = 1
-				elif h == F[i, j]: tb[i, j] = 2
-				else:              tb[i, j] = 3
+				tb[i, j] = (1 if h == diag
+					else 2 if h == F[i, j] else 3)
 		np1 = [[] for _ in p1]
 		np2 = [[] for _ in p2]
 		i, j = L1, L2
 		while i > 0 or j > 0:
 			if i == 0:
 				for k in range(len(p1)): np1[k].append('-')
-				for k, s in enumerate(p2): np2[k].append(s[j-1])
+				for k, r in enumerate(p2): np2[k].append(r[j-1])
 				j -= 1
 			elif j == 0:
-				for k, s in enumerate(p1): np1[k].append(s[i-1])
+				for k, r in enumerate(p1): np1[k].append(r[i-1])
 				for k in range(len(p2)): np2[k].append('-')
 				i -= 1
 			else:
 				t = int(tb[i, j])
 				if t == 1:
-					for k, s in enumerate(p1):
-						np1[k].append(s[i-1])
-					for k, s in enumerate(p2):
-						np2[k].append(s[j-1])
+					for k, r in enumerate(p1): np1[k].append(r[i-1])
+					for k, r in enumerate(p2): np2[k].append(r[j-1])
 					i -= 1; j -= 1
 				elif t == 2:
-					for k, s in enumerate(p1):
-						np1[k].append(s[i-1])
-					for k in range(len(p2)):
-						np2[k].append('-')
+					for k, r in enumerate(p1): np1[k].append(r[i-1])
+					for k in range(len(p2)): np2[k].append('-')
 					i -= 1
 				else:
-					for k in range(len(p1)):
-						np1[k].append('-')
-					for k, s in enumerate(p2):
-						np2[k].append(s[j-1])
+					for k in range(len(p1)): np1[k].append('-')
+					for k, r in enumerate(p2): np2[k].append(r[j-1])
 					j -= 1
-		r1 = [''.join(reversed(row)) for row in np1]
-		r2 = [''.join(reversed(row)) for row in np2]
-		return(r1, r2)
-	def upgma(dist):
-		sizes  = {k: 1 for k in range(n)}
-		active = list(range(n))
-		d      = dist.copy()
-		order  = []
-		for _ in range(n - 1):
-			bi, bj, best = -1, -1, float('inf')
-			for x in range(len(active)):
-				for y in range(x+1, len(active)):
-					ii, jj = active[x], active[y]
-					if d[ii, jj] < best:
-						best, bi, bj = d[ii, jj], ii, jj
-			order.append((bi, bj))
-			ni, nj = sizes[bi], sizes[bj]
-			for k in active:
-				if k == bi or k == bj:
-					continue
-				d[bi, k] = d[k, bi] = (
-					ni * d[bi, k] + nj * d[bj, k]
-				) / (ni + nj)
-			sizes[bi] += sizes[bj]
-			active.remove(bj)
-		return(order)
-	def cons_sym(col):
-		non_gap = [c for c in col if c != '-']
-		if not non_gap:
-			return(' ')
-		if (len(non_gap) == n
-				and all(c == non_gap[0] for c in non_gap)):
-			return('*')
-		pairs = [
-			_blosum(a, b)
-			for x, a in enumerate(non_gap)
-			for b in non_gap[x+1:]]
-		if not pairs:
-			return('*' if len(non_gap) == 1 else ' ')
-		if all(s > 0 for s in pairs):
-			return(':')
-		if sum(pairs) / len(pairs) > 0:
-			return('.')
-		return(' ')
-	dist = np.zeros((n, n))
-	for i in range(n):
-		for j in range(i+1, n):
-			try:
-				_, pct, _ = BLAST(seqs[i], seqs[j])
-				d = 1.0 - pct / 100.0
-			except Exception:
-				d = 1.0
-			dist[i, j] = dist[j, i] = d
-	merge_order = upgma(dist)
-	profiles = {k: [seqs[k]] for k in range(n)}
-	for (ci, cj) in merge_order:
-		a1, a2 = align_profiles(profiles[ci], profiles[cj])
+		a1 = [''.join(reversed(row)) for row in np1]
+		a2 = [''.join(reversed(row)) for row in np2]
 		profiles[ci] = a1 + a2
 		del profiles[cj]
 	final = list(profiles.values())[0]
 	L   = len(final[0])
 	lw  = max(max(len(lb) for lb in labels), 4)
-	con = ''.join(
-		cons_sym([final[k][ci] for k in range(n)])
-		for ci in range(L))
-	hdr = (
-		f'Multiple Sequence Alignment '
-		f'({n} sequences, {L} columns)')
-	out = [hdr, '']
-	pos = [0] * n
-	w   = 60
+	# 5. Per-column conservation symbol: * (all identical), : (all similar), . (mean>0), or space.
+	con = []
+	for ci in range(L):
+		col = [final[k][ci] for k in range(n)]
+		ng  = [c for c in col if c != '-']
+		if not ng:
+			con.append(' ')
+		elif len(ng) == n and all(c == ng[0] for c in ng):
+			con.append('*')
+		else:
+			pairs = [_blosum(a, b) for x, a in enumerate(ng)
+				for b in ng[x+1:]]
+			if not pairs:
+				con.append('*' if len(ng) == 1 else ' ')
+			elif all(s > 0 for s in pairs):
+				con.append(':')
+			elif sum(pairs) / len(pairs) > 0:
+				con.append('.')
+			else:
+				con.append(' ')
+	con = ''.join(con)
+	# 6. ClustalW-style output block, 60 columns per block with running residue counts.
+	out = [f'Multiple Sequence Alignment ({n} sequences, {L} columns)',
+		'']
+	pos, w = [0] * n, 60
 	for st in range(0, L, w):
 		for k, lb in enumerate(labels):
-			blk  = final[k][st:st+w]
-			nres = len(blk) - blk.count('-')
-			pos[k] += nres
-			out.append(
-				f'{lb:<{lw}}  {blk}  {pos[k]}')
+			blk = final[k][st:st+w]
+			pos[k] += len(blk) - blk.count('-')
+			out.append(f'{lb:<{lw}}  {blk}  {pos[k]}')
 		out.append(f'{"":>{lw}}  {con[st:st+w]}')
 		out.append('')
-	# --- conservation, entropy, PSSM, DCA -----------------------
-	# Alphabet: gap + 20 BLOSUM62 amino acids.  q=21.
+	# 7. Encode the MSA as an integer matrix (gap=0, AA=1..20) for downstream stats.
 	alphabet = '-' + _aa
-	q = len(alphabet)
-	a2i = {c: i for i, c in enumerate(alphabet)}
-	B = n
+	q, B = len(alphabet), n
+	a2i  = {c: i for i, c in enumerate(alphabet)}
 	M = np.zeros((B, L), dtype=np.int8)
 	for bi, s in enumerate(final):
 		for ci, ch in enumerate(s):
 			M[bi, ci] = a2i.get(ch, 0)
+	# 8. Shannon entropy and normalised conservation (1 - H/log2(20)) per column.
 	log2_20 = math.log2(20)
-	entropy = []
-	conservation = []
+	entropy, conservation = [], []
 	for ci in range(L):
-		col = M[:, ci]
-		nz = col[col != 0]
+		nz = M[:, ci][M[:, ci] != 0]
 		if len(nz) == 0:
-			entropy.append(0.0)
-			conservation.append(0.0)
-			continue
-		counts = np.bincount(nz, minlength=q)[1:]
-		p = counts / counts.sum()
+			entropy.append(0.0); conservation.append(0.0); continue
+		p = np.bincount(nz, minlength=q)[1:] / len(nz)
 		nzp = p[p > 0]
-		H = float(-np.sum(nzp * np.log2(nzp)))
-		entropy.append(round(H, 4))
-		conservation.append(round(1.0 - H / log2_20, 4))
-	# PSSM with Laplace pseudocount, uniform background 1/20
+		Hc = float(-np.sum(nzp * np.log2(nzp)))
+		entropy.append(round(Hc, 4))
+		conservation.append(round(1.0 - Hc / log2_20, 4))
+	# 9. Position-specific scoring matrix with Laplace pseudocount against uniform 1/20 background.
 	pssm = np.zeros((L, 20), dtype=float)
 	for ci in range(L):
-		col = M[:, ci]
-		nz = col[col != 0]
+		nz = M[:, ci][M[:, ci] != 0]
 		counts = np.bincount(nz, minlength=q)[1:]
-		denom = counts.sum() + 20.0
-		freqs = (counts + 1.0) / denom
-		pssm[ci] = np.log2(freqs * 20.0)
-	# Mean-field DCA with sequence reweighting + APC
-	# Sequence identity reweighting (theta = 0.2, i.e. 80%)
-	theta = 0.2
-	weights = np.ones(B)
+		pssm[ci] = np.log2((counts + 1.0) / (counts.sum() + 20.0) * 20.0)
+	# 10. DCA sequence reweighting by identity clustering (theta=0.2, 80% similarity threshold).
+	theta, weights = 0.2, np.ones(B)
 	if B > 1:
 		simthr = (1.0 - theta) * L
 		eq_count = np.zeros(B)
 		for a in range(B):
 			for b in range(a, B):
 				if a == b:
-					eq_count[a] += 1
-					continue
-				eq = int((M[a] == M[b]).sum())
-				if eq >= simthr:
-					eq_count[a] += 1
-					eq_count[b] += 1
+					eq_count[a] += 1; continue
+				if int((M[a] == M[b]).sum()) >= simthr:
+					eq_count[a] += 1; eq_count[b] += 1
 		weights = 1.0 / eq_count
 	Beff = float(weights.sum())
-	# Single-site frequencies (B_eff weighted), q states
+	# 11. Single-site and two-site frequencies (Beff-weighted) with lambda=0.5 pseudocount.
 	Pi = np.zeros((L, q))
 	for bi in range(B):
 		for ci in range(L):
 			Pi[ci, M[bi, ci]] += weights[bi]
 	Pi /= Beff
-	# Pseudocount lambda
-	lam = 0.5
+	lam   = 0.5
 	Pi_pc = (1.0 - lam) * Pi + lam / q
-	# Two-site frequencies
 	Pij = np.zeros((L, L, q, q))
 	for bi in range(B):
-		w_b = weights[bi]
-		row = M[bi]
+		w_b, row = weights[bi], M[bi]
 		for i in range(L):
 			ai = row[i]
 			for j in range(L):
 				Pij[i, j, ai, row[j]] += w_b
 	Pij /= Beff
 	Pij_pc = (1.0 - lam) * Pij + lam / (q * q)
-	# Diagonal trick: P_ii(a,b) = Pi(a)*delta(a,b)
 	for i in range(L):
 		Pij_pc[i, i] = 0.0
 		for a in range(q):
 			Pij_pc[i, i, a, a] = Pi_pc[i, a]
-	# Build covariance matrix dropping last state (gap as gauge ref)
+	# 12. Covariance matrix with last state dropped as gauge, then invert (pseudo-inverse on failure).
 	qm = q - 1
 	C = np.zeros((L * qm, L * qm))
 	for i in range(L):
 		for j in range(L):
 			for a in range(qm):
 				for b in range(qm):
-					C[i*qm + a, j*qm + b] = (
-						Pij_pc[i, j, a, b]
+					C[i*qm + a, j*qm + b] = (Pij_pc[i, j, a, b]
 						- Pi_pc[i, a] * Pi_pc[j, b])
 	try:
 		invC = np.linalg.inv(C)
 	except np.linalg.LinAlgError:
 		invC = np.linalg.pinv(C)
-	# DI computation per pair via 2-site mean-field
-	def _di_pair(i, j):
-		W = np.ones((q, q))
-		for a in range(qm):
-			for b in range(qm):
-				W[a, b] = math.exp(
-					-invC[i*qm + a, j*qm + b])
-		mu1 = np.ones(q) / q
-		mu2 = np.ones(q) / q
-		pi_i = Pi_pc[i]
-		pi_j = Pi_pc[j]
-		for _ in range(100):
-			scra1 = mu2 @ W.T
-			scra2 = mu1 @ W
-			new_mu1 = pi_i / scra1
-			new_mu2 = pi_j / scra2
-			new_mu1 /= new_mu1.sum()
-			new_mu2 /= new_mu2.sum()
-			if (np.max(np.abs(new_mu1 - mu1)) < 1e-6
-				and np.max(np.abs(new_mu2 - mu2)) < 1e-6):
-				mu1, mu2 = new_mu1, new_mu2
-				break
-			mu1, mu2 = new_mu1, new_mu2
-		Pdir = W * np.outer(mu1, mu2)
-		Pdir /= Pdir.sum()
-		Pfac = np.outer(pi_i, pi_j)
-		mask = (Pdir > 1e-12) & (Pfac > 1e-12)
-		di = float(np.sum(
-			Pdir[mask] * np.log(Pdir[mask] / Pfac[mask])))
-		return di
+	# 13. Direct-information per residue pair via mean-field fixed-point (tolerance 1e-6, 100-iter cap).
 	dca_raw = np.zeros((L, L))
 	for i in range(L):
-		for j in range(i+1, L):
-			d = _di_pair(i, j)
-			dca_raw[i, j] = d
-			dca_raw[j, i] = d
-	# Average product correction (APC)
+		for j in range(i + 1, L):
+			W = np.ones((q, q))
+			for a in range(qm):
+				for b in range(qm):
+					W[a, b] = math.exp(-invC[i*qm + a, j*qm + b])
+			mu1, mu2 = np.ones(q) / q, np.ones(q) / q
+			pi_i, pi_j = Pi_pc[i], Pi_pc[j]
+			for _ in range(100):
+				new_mu1 = pi_i / (mu2 @ W.T)
+				new_mu2 = pi_j / (mu1 @ W)
+				new_mu1 /= new_mu1.sum()
+				new_mu2 /= new_mu2.sum()
+				if (np.max(np.abs(new_mu1 - mu1)) < 1e-6
+						and np.max(np.abs(new_mu2 - mu2)) < 1e-6):
+					mu1, mu2 = new_mu1, new_mu2
+					break
+				mu1, mu2 = new_mu1, new_mu2
+			Pdir  = W * np.outer(mu1, mu2)
+			Pdir /= Pdir.sum()
+			Pfac  = np.outer(pi_i, pi_j)
+			mask  = (Pdir > 1e-12) & (Pfac > 1e-12)
+			di = float(np.sum(
+				Pdir[mask] * np.log(Pdir[mask] / Pfac[mask])))
+			dca_raw[i, j] = dca_raw[j, i] = di
+	# 14. Apply Average Product Correction (APC) to deflate phylogenetic and compositional bias.
 	dca = np.zeros((L, L))
 	if L > 1:
-		row_mean = dca_raw.sum(axis=1) / (L - 1)
+		row_mean   = dca_raw.sum(axis=1) / (L - 1)
 		total_mean = dca_raw.sum() / (L * (L - 1))
 		if total_mean > 0:
 			for i in range(L):
 				for j in range(L):
 					if i == j: continue
 					dca[i, j] = dca_raw[i, j] - (
-						row_mean[i] * row_mean[j]
-						/ total_mean)
+						row_mean[i] * row_mean[j] / total_mean)
 		else:
 			dca = dca_raw.copy()
 		np.fill_diagonal(dca, 0.0)
-	return('\n'.join(out), final, conservation, entropy, pssm, dca)
+	return '\n'.join(out), final, conservation, entropy, pssm, dca
 
 def Isoelectric(sequence):
 	'''
-	Calculate the isoelectric point (pI) of a protein sequence.
-
-	Uses EMBOSS pKa values and Henderson-Hasselbalch with a
-	bisection search on [0, 14].
-
-	Parameters
+	Isoelectric point (pI) of a protein via EMBOSS pKa and bisection on [0, 14]
+	Arguments:
 	----------
-	sequence : str  protein FASTA sequence (one-letter codes).
-
-	Returns
+		sequence : str - Protein FASTA sequence (one-letter codes)
+	Return:
 	-------
-	float : the pH at which the protein has zero net charge,
-	        rounded to 2 decimals.
+		float : pH at which the protein has zero net charge, rounded to 2 decimals
 	'''
-	if not sequence:
-		raise Exception('Empty sequence')
+	# 1. Validate input and uppercase the sequence.
+	if not sequence: raise Exception('Empty sequence')
 	seq = sequence.upper()
-	# EMBOSS pKa values
-	pKa_pos = {'K': 10.53, 'R': 12.48, 'H': 6.00}
-	pKa_neg = {'D': 3.65,  'E': 4.25,  'C': 8.33, 'Y': 10.07}
-	pKa_nt  = 8.6
-	pKa_ct  = 3.6
-	cnt_pos = {a: seq.count(a) for a in pKa_pos}
-	cnt_neg = {a: seq.count(a) for a in pKa_neg}
-	def charge(pH):
-		pos = 1.0 / (1.0 + 10 ** (pH - pKa_nt))
-		for a, n in cnt_pos.items():
-			if n: pos += n / (1.0 + 10 ** (pH - pKa_pos[a]))
-		neg = 1.0 / (1.0 + 10 ** (pKa_ct - pH))
-		for a, n in cnt_neg.items():
-			if n: neg += n / (1.0 + 10 ** (pKa_neg[a] - pH))
-		return pos - neg
+	# 2. Count titratable residues (EMBOSS pKa set: K/R/H positive, D/E/C/Y negative).
+	nK, nR, nH = seq.count('K'), seq.count('R'), seq.count('H')
+	nD, nE     = seq.count('D'), seq.count('E')
+	nC, nY     = seq.count('C'), seq.count('Y')
+	# 3. Bisect net charge on [0, 14] using pKa_NT=8.6, pKa_CT=3.6.
 	lo, hi = 0.0, 14.0
 	for _ in range(100):
 		mid = (lo + hi) / 2.0
-		c   = charge(mid)
+		pos = 1.0 / (1.0 + 10 ** (mid - 8.6))
+		if nK: pos += nK / (1.0 + 10 ** (mid - 10.53))
+		if nR: pos += nR / (1.0 + 10 ** (mid - 12.48))
+		if nH: pos += nH / (1.0 + 10 ** (mid -  6.00))
+		neg = 1.0 / (1.0 + 10 ** (3.6 - mid))
+		if nD: neg += nD / (1.0 + 10 ** ( 3.65 - mid))
+		if nE: neg += nE / (1.0 + 10 ** ( 4.25 - mid))
+		if nC: neg += nC / (1.0 + 10 ** ( 8.33 - mid))
+		if nY: neg += nY / (1.0 + 10 ** (10.07 - mid))
+		c = pos - neg
 		if abs(c) < 1e-4: break
 		if c > 0: lo = mid
 		else:     hi = mid
 	return round(mid, 2)
 
-# Hydrophobicity scales used by Hydrophobicity()
-_HPHOB_SCALES = {
-	'eisenberg': {
-		'A': 0.620, 'R':-2.530, 'N':-0.780, 'D':-0.900, 'C': 0.290,
-		'Q':-0.850, 'E':-0.740, 'G': 0.480, 'H':-0.400, 'I': 1.380,
-		'L': 1.060, 'K':-1.500, 'M': 0.640, 'F': 1.190, 'P': 0.120,
-		'S':-0.180, 'T':-0.050, 'W': 0.810, 'Y': 0.260, 'V': 1.080},
-	'kyte-doolittle': {
-		'A': 1.8, 'R':-4.5, 'N':-3.5, 'D':-3.5, 'C': 2.5,
-		'Q':-3.5, 'E':-3.5, 'G':-0.4, 'H':-3.2, 'I': 4.5,
-		'L': 3.8, 'K':-3.9, 'M': 1.9, 'F': 2.8, 'P':-1.6,
-		'S':-0.8, 'T':-0.7, 'W':-0.9, 'Y':-1.3, 'V': 4.2},
-	'hopp-woods': {
-		'A':-0.5, 'R': 3.0, 'N': 0.2, 'D': 3.0, 'C':-1.0,
-		'Q': 0.2, 'E': 3.0, 'G': 0.0, 'H':-0.5, 'I':-1.8,
-		'L':-1.8, 'K': 3.0, 'M':-1.3, 'F':-2.5, 'P': 0.0,
-		'S': 0.3, 'T':-0.4, 'W':-3.4, 'Y':-2.3, 'V':-1.5},
-	'engelman': {
-		'A': 1.6, 'R':-12.3,'N':-4.8, 'D':-9.2, 'C': 2.0,
-		'Q':-4.1, 'E':-8.2, 'G': 1.0, 'H':-3.0, 'I': 3.1,
-		'L': 2.8, 'K':-8.8, 'M': 3.4, 'F': 3.7, 'P':-0.2,
-		'S': 0.6, 'T': 1.2, 'W': 1.9, 'Y':-0.7, 'V': 2.6}}
-
 def Hydrophobicity(sequence, window=9, scale='eisenberg'):
 	'''
-	Sliding-window hydrophobicity profile (ProtScale-style).
-
-	Parameters
+	Sliding-window hydrophobicity profile (ProtScale-style)
+	Arguments:
 	----------
-	sequence : str    protein FASTA sequence.
-	window   : int    odd window size (default 9).
-	scale    : str    one of {'eisenberg', 'kyte-doolittle',
-	                  'hopp-woods', 'engelman'}.
-
-	Returns
+		sequence : str - Protein FASTA sequence
+		window   : int - Odd window size (default 9)
+		scale    : str - Scale name: 'eisenberg', 'kyte-doolittle', 'hopp-woods', or 'engelman'
+	Return:
 	-------
-	tuple : (positions, scores)
-	    positions : list[int]   0-indexed center of each window.
-	    scores    : list[float] mean score in each window (3 dp).
+		list[int]  : 0-indexed centre position of each window
+		list[float]: Mean hydrophobicity score in each window, rounded to 3 decimals
 	'''
-	seq = sequence.upper()
-	L = len(seq)
+	# 1. Declare the four supported ProtScale hydrophobicity tables.
+	_HPHOB_SCALES = {
+		'eisenberg': {
+			'A': 0.620, 'R':-2.530, 'N':-0.780, 'D':-0.900, 'C': 0.290,
+			'Q':-0.850, 'E':-0.740, 'G': 0.480, 'H':-0.400, 'I': 1.380,
+			'L': 1.060, 'K':-1.500, 'M': 0.640, 'F': 1.190, 'P': 0.120,
+			'S':-0.180, 'T':-0.050, 'W': 0.810, 'Y': 0.260, 'V': 1.080},
+		'kyte-doolittle': {
+			'A': 1.8, 'R':-4.5, 'N':-3.5, 'D':-3.5, 'C': 2.5,
+			'Q':-3.5, 'E':-3.5, 'G':-0.4, 'H':-3.2, 'I': 4.5,
+			'L': 3.8, 'K':-3.9, 'M': 1.9, 'F': 2.8, 'P':-1.6,
+			'S':-0.8, 'T':-0.7, 'W':-0.9, 'Y':-1.3, 'V': 4.2},
+		'hopp-woods': {
+			'A':-0.5, 'R': 3.0, 'N': 0.2, 'D': 3.0, 'C':-1.0,
+			'Q': 0.2, 'E': 3.0, 'G': 0.0, 'H':-0.5, 'I':-1.8,
+			'L':-1.8, 'K': 3.0, 'M':-1.3, 'F':-2.5, 'P': 0.0,
+			'S': 0.3, 'T':-0.4, 'W':-3.4, 'Y':-2.3, 'V':-1.5},
+		'engelman': {
+			'A': 1.6, 'R':-12.3,'N':-4.8, 'D':-9.2, 'C': 2.0,
+			'Q':-4.1, 'E':-8.2, 'G': 1.0, 'H':-3.0, 'I': 3.1,
+			'L': 2.8, 'K':-8.8, 'M': 3.4, 'F': 3.7, 'P':-0.2,
+			'S': 0.6, 'T': 1.2, 'W': 1.9, 'Y':-0.7, 'V': 2.6}}
+	# 2. Validate window size against sequence length and pick the scale table.
+	seq, L = sequence.upper(), len(sequence)
 	if window < 1: raise Exception('window must be >= 1')
-	if window > L:
-		raise Exception(
-			f'window ({window}) larger than sequence ({L})')
+	if window > L: raise Exception(
+		f'window ({window}) larger than sequence ({L})')
 	tbl = _HPHOB_SCALES.get(scale.lower())
-	if tbl is None:
-		raise Exception(
-			f'Unknown scale {scale!r}; choose from '
-			f'{list(_HPHOB_SCALES)}')
-	half = (window - 1) // 2
-	positions, scores = [], []
-	for i in range(L - window + 1):
-		s = sum(tbl.get(seq[i + k], 0.0) for k in range(window))
-		positions.append(i + half)
-		scores.append(round(s / window, 3))
-	return(positions, scores)
+	if tbl is None: raise Exception(
+		f'Unknown scale {scale!r}; choose from '
+		f'{list(_HPHOB_SCALES)}')
+	# 3. Slide the window, emitting the centre position and mean score per window.
+	half, n = (window - 1) // 2, L - window + 1
+	return([i + half for i in range(n)],
+		[round(sum(tbl.get(seq[i+k], 0.0)
+			for k in range(window)) / window, 3) for i in range(n)])
 
 def Aliphatic(sequence):
 	'''
-	Aliphatic index of a protein (Ikai 1980).
-
-	    AI = X(A) + 2.9*X(V) + 3.9*(X(I) + X(L))
-	    where X(aa) is the mole percent of that amino acid.
-
-	Parameters
+	Aliphatic index AI = X(A) + 2.9*X(V) + 3.9*(X(I) + X(L)) from mole percentages (Ikai 1980)
+	Arguments:
 	----------
-	sequence : str  protein FASTA sequence.
-
-	Returns
+		sequence : str - Protein FASTA sequence
+	Return:
 	-------
-	float : aliphatic index, rounded to 2 decimals.
+		float : Aliphatic index, rounded to 2 decimals
 	'''
+	# 1. Validate input and uppercase the sequence.
 	if not sequence: raise Exception('Empty sequence')
 	seq = sequence.upper()
-	L = len(seq)
-	xA = 100.0 * seq.count('A') / L
-	xV = 100.0 * seq.count('V') / L
-	xI = 100.0 * seq.count('I') / L
-	xL = 100.0 * seq.count('L') / L
+	# 2. Compute mole percentages of aliphatic residues A, V, I, L.
+	xA, xV, xI, xL = (100.0 * seq.count(a) / len(seq) for a in 'AVIL')
+	# 3. Weighted sum per Ikai 1980.
 	return round(xA + 2.9 * xV + 3.9 * (xI + xL), 2)
 
 def ExtinctCoeff(sequence, reduced=True):
 	'''
-	Molar extinction coefficient at 280 nm in water (Pace 1995).
-
-	    eps = nW*5500 + nY*1490 + (nC/2)*125
-	    Cysteines contribute only when oxidised (cystines).
-
-	Parameters
+	Molar extinction coefficient at 280 nm via eps = nW*5500 + nY*1490 + (nC/2)*125 (Pace 1995)
+	Arguments:
 	----------
-	sequence : str   protein FASTA sequence.
-	reduced  : bool  True (default) treats Cys as reduced
-	                 (no contribution); False treats them as
-	                 disulphide-bonded cystines.
-
-	Returns
+		sequence : str  - Protein FASTA sequence
+		reduced  : bool - True (default) treats Cys as reduced (no contribution); False as cystines
+	Return:
 	-------
-	int : molar extinction coefficient in M^-1 cm^-1.
+		int : Molar extinction coefficient in M^-1 cm^-1
 	'''
+	# 1. Validate input and uppercase the sequence.
 	if not sequence: raise Exception('Empty sequence')
 	seq = sequence.upper()
-	nW = seq.count('W')
-	nY = seq.count('Y')
-	nC = seq.count('C')
-	eps = nW * 5500 + nY * 1490
-	if not reduced:
-		eps += (nC // 2) * 125
+	# 2. Sum W and Y contributions; add C/2 contribution only when oxidised.
+	eps = (seq.count('W') * 5500 + seq.count('Y') * 1490
+		+ (0 if reduced else (seq.count('C') // 2) * 125))
 	return int(round(eps))
 
 # Guruprasad et al. (1990) DIWV dipeptide instability table.
@@ -1073,32 +978,21 @@ _DIWV = {
 
 def Instability(sequence):
 	'''
-	Instability index of a protein (Guruprasad et al. 1990).
-
-	    II = (10 / L) * sum_{i=0..L-2} DIWV(seq[i], seq[i+1])
-
-	A score below 40 generally indicates a stable protein.
-
-	Parameters
+	Instability index II = (10/L)*sum DIWV(seq[i], seq[i+1]); <40 suggests stable (Guruprasad 1990)
+	Arguments:
 	----------
-	sequence : str  protein FASTA sequence.
-
-	Returns
+		sequence : str - Protein FASTA sequence
+	Return:
 	-------
-	float : instability index, rounded to 2 decimals.
+		float : Instability index, rounded to 2 decimals; 0.0 for single-residue input
 	'''
+	# 1. Validate input, uppercase, and short-circuit on single-residue sequences.
 	if not sequence: raise Exception('Empty sequence')
-	seq = sequence.upper()
-	L = len(seq)
+	seq, L = sequence.upper(), len(sequence)
 	if L < 2: return 0.0
-	total = 0.0
-	for i in range(L - 1):
-		a, b = seq[i], seq[i+1]
-		row = _DIWV.get(a)
-		if row is None: continue
-		v = row.get(b)
-		if v is None: continue
-		total += v
+	# 2. Sum DIWV dipeptide values across the sequence; unknown dipeptides contribute 0.
+	total = sum(_DIWV.get(seq[i], {}).get(seq[i+1], 0) for i in range(L - 1))
+	# 3. Normalise by length and scale by 10.
 	return round(10.0 * total / L, 2)
 
 # Kyte-Doolittle hydropathy (used by GRAVY)
@@ -1110,421 +1004,292 @@ _KD = {
 
 def GRAVY(sequence):
 	'''
-	Grand average of hydropathy (Kyte & Doolittle 1982).
-
-	Parameters
+	Grand average of hydropathy (mean Kyte-Doolittle hydropathy, Kyte & Doolittle 1982)
+	Arguments:
 	----------
-	sequence : str  protein FASTA sequence.
-
-	Returns
+		sequence : str - Protein FASTA sequence
+	Return:
 	-------
-	float : mean Kyte-Doolittle hydropathy, rounded to 3 dp.
+		float : Mean Kyte-Doolittle hydropathy, rounded to 3 decimals
 	'''
+	# 1. Validate input.
 	if not sequence: raise Exception('Empty sequence')
-	seq = sequence.upper()
-	total = sum(_KD.get(a, 0.0) for a in seq)
-	return round(total / len(seq), 3)
+	# 2. Mean KD hydropathy over the uppercased sequence (unknown residues contribute 0).
+	return round(sum(_KD.get(a, 0.0)
+		for a in sequence.upper()) / len(sequence), 3)
 
 def Split(pose, chain=None, start=None, end=None):
 	'''
-	Extract a slice of a Pose into a new Pose object.
-
-	Two mutually-exclusive modes:
-	    Split(pose, chain='A')      - extract one whole chain.
-	    Split(pose, start=i, end=j) - extract residues [i, j]
-	                                  (inclusive, zero-based on the
-	                                  residue table).
-
-	Works for protein, DNA and RNA poses. Atom indices, residue
-	indices, bond adjacency and coordinates are all re-numbered
-	densely from zero in the returned Pose.
+	Extract a slice of a Pose (by chain or residue range) into a new densely-renumbered Pose
+	Arguments:
+	----------
+		pose  : Pose - Source protein, DNA, or RNA pose
+		chain : str  - Chain ID to extract (mutually exclusive with start/end)
+		start : int  - First residue index to keep (inclusive, zero-based)
+		end   : int  - Last residue index to keep (inclusive, zero-based)
+	Return:
+	-------
+		Pose : New pose with atoms, residues, bonds, and coordinates renumbered from zero
 	'''
-	try:
-		from .pose import Pose
-	except ImportError:
-		from pose import Pose
+	# 1. Import Pose locally to avoid a circular import at module load time.
+	try:    from .pose import Pose
+	except ImportError: from pose import Pose
+	# 2. Reject ambiguous arg combos: exactly one of chain= or (start=, end=) must be given.
 	if (chain is None) == (start is None and end is None):
-		raise Exception(
-			"Split requires either chain= OR (start=, end=)")
+		raise Exception("Split requires either chain= OR (start=, end=)")
+	# 3. Resolve molecule type and fetch the residue table.
 	mol = pose.data.get('Type')
-	if mol is None:
-		raise Exception('Source pose is empty')
+	if mol is None: raise Exception('Source pose is empty')
 	is_pro = (mol == 'Protein')
-	rk = 'Amino Acids' if is_pro else 'Nucleotides'
+	rk  = 'Amino Acids' if is_pro else 'Nucleotides'
 	src = pose.data[rk]
-	if not src:
-		raise Exception(f'Source pose has no {rk}')
+	if not src: raise Exception(f'Source pose has no {rk}')
 	all_idx = sorted(src.keys())
+	# 4. Select the residue indices to retain, based on chain or range mode.
 	if chain is not None:
 		keep_res = [i for i in all_idx if src[i][1] == chain]
 		if not keep_res:
 			raise Exception(f'Chain {chain!r} not in pose')
 	else:
 		if start is None or end is None:
-			raise Exception(
-				'Split needs both start and end for range mode')
+			raise Exception('Split needs both start and end for range mode')
 		if start > end:
-			raise Exception(
-				f'start ({start}) > end ({end})')
+			raise Exception(f'start ({start}) > end ({end})')
 		keep_res = [i for i in all_idx if start <= i <= end]
 		if not keep_res:
-			raise Exception(
-				f'Range [{start}, {end}] selects no residues')
-	keep_atoms = []
-	for ri in keep_res:
-		for ai in src[ri][2]:
-			keep_atoms.append(ai)
-		for ai in src[ri][3]:
-			keep_atoms.append(ai)
-	atom_set = set(keep_atoms)
-	keep_atoms = sorted(atom_set)
+			raise Exception(f'Range [{start}, {end}] selects no residues')
+	# 5. Collect kept atom indices and build dense remaps for atoms and residues.
+	keep_atoms = sorted({ai for ri in keep_res
+		for ai in src[ri][2] + src[ri][3]})
 	a_remap = {old: new for new, old in enumerate(keep_atoms)}
 	r_remap = {old: new for new, old in enumerate(keep_res)}
+	src_atoms, src_bonds, src_co = (pose.data['Atoms'],
+		pose.data['Bonds'], pose.data['Coordinates'])
+	# 6. Build the new pose's data skeleton with remapped atoms, bonds, and coordinates.
 	new = Pose()
 	new.data = {
-		'Type'       : mol,
-		'Energy'     : 0,
-		'Rg'         : 0,
-		'Mass'       : 0,
-		'Size'       : {},
-		'FASTA'      : {},
-		'SS'         : {},
-		'Nucleotides': {} if not is_pro else None,
+		'Type':        mol,  'Energy': 0, 'Rg': 0, 'Mass': 0,
+		'Size':        {},   'FASTA':  {}, 'SS': {},
+		'Nucleotides': None if is_pro else {},
 		'Amino Acids': {} if is_pro else None,
-		'Atoms'      : {},
-		'Bonds'      : {},
-		'Coordinates': np.zeros((0, 3))}
-	src_atoms = pose.data['Atoms']
-	for old_ai in keep_atoms:
-		new.data['Atoms'][a_remap[old_ai]] = list(src_atoms[old_ai])
-	src_bonds = pose.data['Bonds']
-	for old_ai in keep_atoms:
-		na = a_remap[old_ai]
-		nbrs = []
-		for ob in src_bonds.get(old_ai, []):
-			if ob in a_remap:
-				nbrs.append(a_remap[ob])
-		new.data['Bonds'][na] = sorted(nbrs)
-	src_co = pose.data['Coordinates']
-	new_co = np.array(
-		[src_co[old_ai] for old_ai in keep_atoms],
-		dtype=float)
-	new.data['Coordinates'] = new_co if len(new_co) \
-		else np.zeros((0, 3))
+		'Atoms':       {a_remap[o]: list(src_atoms[o])
+			for o in keep_atoms},
+		'Bonds':       {a_remap[o]: sorted(a_remap[ob]
+			for ob in src_bonds.get(o, []) if ob in a_remap)
+			for o in keep_atoms},
+		'Coordinates': np.array([src_co[o] for o in keep_atoms],
+			dtype=float) if keep_atoms else np.zeros((0, 3))}
+	# 7. Copy residue rows with atom lists translated to the new indices.
 	tgt = new.data[rk]
 	for old_ri in keep_res:
 		row = list(src[old_ri])
 		row[2] = [a_remap[a] for a in row[2] if a in a_remap]
 		row[3] = [a_remap[a] for a in row[3] if a in a_remap]
 		tgt[r_remap[old_ri]] = row
+	# 8. Refresh derived fields (Size, FASTA, SS, Mass, Rg) and return.
 	new._update()
 	return new
 
 def Concatenate(pose1, pose2, fuse=False):
 	'''
-	Combine two Pose objects of the same Type.
-
-	fuse=False (default): append pose2 to pose1 as additional
-	    chains, preserving original coordinates. Colliding chain
-	    IDs are renamed to the next free letter.
-	fuse=True : rebuild the concatenated FASTA as a single
-	    polymer using Pose.Build (idealised geometry; original
-	    coordinates are discarded).
+	Combine two poses of the same Type by chain-appending or by rebuilding a fused polymer
+	Arguments:
+	----------
+		pose1 : Pose - First pose (protein, DNA, or RNA)
+		pose2 : Pose - Second pose; must share Type with pose1
+		fuse  : bool - False appends pose2 chains (colliding IDs renamed); True rebuilds as one polymer
+	Return:
+	-------
+		Pose : New combined pose; fuse=True discards original coordinates and idealises geometry
 	'''
-	try:
-		from .pose import Pose
-	except ImportError:
-		from pose import Pose
-	t1 = pose1.data.get('Type')
-	t2 = pose2.data.get('Type')
+	# 1. Import Pose locally to avoid a circular import at module load time.
+	try:    from .pose import Pose
+	except ImportError: from pose import Pose
+	# 2. Validate both poses are non-empty and share the same molecule type.
+	t1, t2 = pose1.data.get('Type'), pose2.data.get('Type')
 	if t1 is None or t2 is None:
 		raise Exception('Concatenate: empty pose given')
 	if t1 != t2:
-		raise Exception(
-			f'Cannot concatenate {t1} with {t2}')
+		raise Exception(f'Cannot concatenate {t1} with {t2}')
 	is_pro = (t1 == 'Protein')
-	rk = 'Amino Acids' if is_pro else 'Nucleotides'
+	rk     = 'Amino Acids' if is_pro else 'Nucleotides'
+	# 3. Fuse mode: rebuild a single idealised polymer from the concatenated FASTA.
 	if fuse:
-		f1 = pose1.data['FASTA']
-		f2 = pose2.data['FASTA']
-		merged_seq = ''.join(
-			f1[c] for c in sorted(f1)) + ''.join(
-			f2[c] for c in sorted(f2))
+		f1, f2 = pose1.data['FASTA'], pose2.data['FASTA']
 		new = Pose()
-		new.Build(merged_seq, fmt=t1)
+		new.Build(''.join(f1[c] for c in sorted(f1))
+			+ ''.join(f2[c] for c in sorted(f2)), fmt=t1)
 		return new
+	# 4. Append mode: initialise the new pose's data skeleton.
 	new = Pose()
 	new.data = {
-		'Type'       : t1,
-		'Energy'     : 0,
-		'Rg'         : 0,
-		'Mass'       : 0,
-		'Size'       : {},
-		'FASTA'      : {},
-		'SS'         : {},
-		'Nucleotides': {} if not is_pro else None,
+		'Type': t1, 'Energy': 0, 'Rg': 0, 'Mass': 0,
+		'Size': {}, 'FASTA': {}, 'SS': {},
+		'Nucleotides': None if is_pro else {},
 		'Amino Acids': {} if is_pro else None,
-		'Atoms'      : {},
-		'Bonds'      : {},
-		'Coordinates': np.zeros((0, 3))}
-	def _copy(src_pose, ai_off, ri_off, ch_remap):
-		src_aa = src_pose.data[rk]
-		src_at = src_pose.data['Atoms']
-		src_bd = src_pose.data['Bonds']
-		src_co = src_pose.data['Coordinates']
+		'Atoms': {}, 'Bonds': {}, 'Coordinates': np.zeros((0, 3))}
+	# 5. Two-pass copy: pose1 first, then compute pose2 chain-collision remap, then pose2.
+	coords_all = []
+	ai_off, ri_off = 0, 0
+	ch_remap = {}
+	for step, src_pose in enumerate((pose1, pose2)):
+		if step == 1:
+			taken = {v[1] for v in new.data[rk].values()}
+			for c in sorted({v[1] for v in pose2.data[rk].values()}):
+				if c not in taken:
+					taken.add(c); continue
+				for cand in 'ABCDEFGHIJKLMNOPQRSTUVWXYZ':
+					if cand not in taken:
+						taken.add(cand); ch_remap[c] = cand; break
+				else:
+					raise Exception('Ran out of chain letters')
+		src_at, src_bd = src_pose.data['Atoms'], src_pose.data['Bonds']
+		src_co, src_aa = src_pose.data['Coordinates'], src_pose.data[rk]
 		old_a = sorted(src_at.keys())
-		a_map = {}
-		coords = []
+		a_map = {oa: ai_off + i for i, oa in enumerate(old_a)}
 		for oa in old_a:
-			na = ai_off + len(a_map)
-			a_map[oa] = na
-			new.data['Atoms'][na] = list(src_at[oa])
-			coords.append(src_co[oa])
+			new.data['Atoms'][a_map[oa]] = list(src_at[oa])
+			coords_all.append(src_co[oa])
 		for oa in old_a:
-			na = a_map[oa]
-			new.data['Bonds'][na] = sorted(
-				a_map[ob] for ob in src_bd.get(oa, [])
-				if ob in a_map)
+			new.data['Bonds'][a_map[oa]] = sorted(
+				a_map[ob] for ob in src_bd.get(oa, []) if ob in a_map)
 		old_r = sorted(src_aa.keys())
-		r_map = {}
-		for ori in old_r:
-			nri = ri_off + len(r_map)
-			r_map[ori] = nri
+		for i, ori in enumerate(old_r):
 			row = list(src_aa[ori])
 			row[1] = ch_remap.get(row[1], row[1])
 			row[2] = [a_map[a] for a in row[2] if a in a_map]
 			row[3] = [a_map[a] for a in row[3] if a in a_map]
-			new.data[rk][nri] = row
-		return coords, len(a_map), len(r_map)
-	co1, na1, nr1 = _copy(pose1, 0, 0, {})
-	used_chains = set()
-	for v in new.data[rk].values():
-		used_chains.add(v[1])
-	def _next_ch(taken):
-		for c in 'ABCDEFGHIJKLMNOPQRSTUVWXYZ':
-			if c not in taken:
-				taken.add(c)
-				return c
-		raise Exception('Ran out of chain letters')
-	p2_chains = sorted({
-		v[1] for v in pose2.data[rk].values()})
-	ch_remap = {}
-	taken = set(used_chains)
-	for c in p2_chains:
-		if c in taken:
-			ch_remap[c] = _next_ch(taken)
-		else:
-			taken.add(c)
-	co2, na2, nr2 = _copy(pose2, na1, nr1, ch_remap)
-	all_co = co1 + co2
-	new.data['Coordinates'] = np.array(all_co, dtype=float) \
-		if all_co else np.zeros((0, 3))
+			new.data[rk][ri_off + i] = row
+		ai_off += len(old_a)
+		ri_off += len(old_r)
+	# 6. Finalise coordinates array and refresh derived fields.
+	new.data['Coordinates'] = (np.array(coords_all, dtype=float)
+		if coords_all else np.zeros((0, 3)))
 	new._update()
 	return new
 
-# SantaLucia 1998 unified nearest-neighbor parameters
-# units: dH kcal/mol, dS cal/mol/K
-_NN_DH = {
-	'AA':-7.9, 'TT':-7.9, 'AT':-7.2, 'TA':-7.2,
-	'CA':-8.5, 'TG':-8.5, 'GT':-8.4, 'AC':-8.4,
-	'CT':-7.8, 'AG':-7.8, 'GA':-8.2, 'TC':-8.2,
-	'CG':-10.6,'GC':-9.8, 'GG':-8.0, 'CC':-8.0}
-_NN_DS = {
-	'AA':-22.2,'TT':-22.2,'AT':-20.4,'TA':-21.3,
-	'CA':-22.7,'TG':-22.7,'GT':-22.4,'AC':-22.4,
-	'CT':-21.0,'AG':-21.0,'GA':-22.2,'TC':-22.2,
-	'CG':-27.2,'GC':-24.4,'GG':-19.9,'CC':-19.9}
-
-def _revcomp(s):
-	c = {'A':'T','T':'A','G':'C','C':'G','N':'N'}
-	return ''.join(c[x] for x in reversed(s))
-
-def _gc_pct(s):
-	if not s: return 0.0
-	return 100.0 * (s.count('G') + s.count('C')) / len(s)
-
-def _tm_nn(seq, conc=250e-9, na=0.05):
-	'''
-	SantaLucia 1998 unified nearest-neighbor Tm with
-	salt correction (Owczarzy 2004 simplified).
-	conc = primer molar concentration (default 250 nM).
-	na   = Na+ molar concentration (default 50 mM).
-	'''
-	s = seq.upper()
-	if len(s) < 2: return 0.0
-	dH = 0.0
-	dS = 0.0
-	for i in range(len(s) - 1):
-		nn = s[i:i+2]
-		dH += _NN_DH.get(nn, 0.0)
-		dS += _NN_DS.get(nn, 0.0)
-	# Initiation terms
-	if s[0]  in 'GC': dH += 0.1; dS += -2.8
-	else:             dH += 2.3; dS +=  4.1
-	if s[-1] in 'GC': dH += 0.1; dS += -2.8
-	else:             dH += 2.3; dS +=  4.1
-	# Salt correction (Owczarzy 2004 linear)
-	N = len(s)
-	dS_salt = dS + 0.368 * (N - 1) * math.log(na)
-	R = 1.987
-	# Non-self-complementary => x = 4
-	tm_k = (dH * 1000.0) / (dS_salt + R * math.log(conc / 4.0))
-	return tm_k - 273.15
-
-def _has_run(s, n=4):
-	for base in 'ACGT':
-		if base * n in s: return True
-	return False
-
-def _has_hairpin(s, stem=4):
-	rc = _revcomp(s)
-	for i in range(len(s) - stem + 1):
-		motif = s[i:i+stem]
-		# look for reverse complement of motif later in s
-		j = s.find(_revcomp(motif), i + stem + 3)
-		if j != -1: return True
-	return False
-
-def _has_self_dimer(s, k=4):
-	rc = _revcomp(s)
-	# Slide 3' end of s against rc looking for >=k contiguous
-	# matching bases at the 3' end (alignment of s onto rc).
-	tail = s[-k:]
-	return tail in rc
-
-# PCR primer-design relaxation tiers, tried in order until one
-# produces a usable pair. Tier 0 is the ideal target; lower tiers
-# progressively drop gates so that PCR() always returns a pair for
-# any chemically valid template (>= 36 bp).
-_PCR_TIERS = [
-	{'label':'Ideal',       'len':(18,25),
-		'gc':(40.0, 60.0),  'tm':(55.0, 65.0),
-		'clamp':True,  'max_run':4,
-		'no_hairpin':True,  'no_dimer':True,  'dtm':2.0},
-	{'label':'Good',        'len':(18,28),
-		'gc':(35.0, 65.0),  'tm':(50.0, 68.0),
-		'clamp':True,  'max_run':5,
-		'no_hairpin':True,  'no_dimer':True,  'dtm':3.0},
-	{'label':'Fair',        'len':(18,30),
-		'gc':(25.0, 75.0),  'tm':(45.0, 72.0),
-		'clamp':False, 'max_run':5,
-		'no_hairpin':False, 'no_dimer':True,  'dtm':5.0},
-	{'label':'Poor',        'len':(18,30),
-		'gc':None,          'tm':None,
-		'clamp':False, 'max_run':None,
-		'no_hairpin':False, 'no_dimer':False, 'dtm':8.0},
-	{'label':'Last resort', 'len':(18,30),
-		'gc':None,          'tm':None,
-		'clamp':False, 'max_run':None,
-		'no_hairpin':False, 'no_dimer':False, 'dtm':float('inf')}]
-
 def PCR(dna_sequence):
 	'''
-	Design forward and reverse PCR primers for a DNA template.
-
-	Uses a 5-tier relaxation strategy so that any chemically valid
-	template (A/C/G/T only, length >= 36 bp) always yields a primer
-	pair. Tier 0 ('Ideal') applies the standard constraints:
-	    - length 18-25
-	    - GC% in [40, 60]
-	    - Nearest-neighbor (SantaLucia 1998) Tm in [55, 65] degC
-	    - 3' GC clamp
-	    - no run of 4 identical bases
-	    - no internal palindrome of >= 4 (hairpin)
-	    - 3' tail not contained in self reverse complement
-	    - |Tm_fwd - Tm_rev| <= 2 degC
-	If no pair satisfies tier 0, the search moves to Good, Fair,
-	Poor, then Last-resort tiers, each dropping or widening gates.
-	When the result comes from any tier below Ideal, a warning is
-	printed to stdout naming the tier and what was relaxed.
-
-	Parameters
+	Design forward and reverse PCR primers for a DNA template via a 5-tier relaxation search
+	Arguments:
 	----------
-	dna_sequence : str
-	    Template DNA sequence (A/C/G/T only).
-
-	Returns
+		dna_sequence : str - Template DNA sequence (A/C/G/T only, length >= 36 bp)
+	Return:
 	-------
-	tuple : (forward, reverse)
-	    forward : str  forward primer (5' end of template).
-	    reverse : str  reverse primer (revcomp of 3' end).
+		str : Forward primer (5' end of template)
+		str : Reverse primer (reverse complement of 3' end of template)
+		str : Suboptimal-tier warning, or None if the Ideal tier was satisfied
 	'''
+	# 1. Validate: uppercase, reject illegal bases, require at least 36 bp template.
 	seq = dna_sequence.upper()
 	for ch in seq:
 		if ch not in 'ACGT':
-			raise Exception(
-				f'Illegal base {ch!r} in template')
+			raise Exception(f'Illegal base {ch!r} in template')
 	if len(seq) < 36:
-		raise Exception(
-			'Template too short for primer design (<36 bp)')
-	rc = _revcomp(seq)
+		raise Exception('Template too short for primer design (<36 bp)')
+	# 2. Reverse-complement the template via str.translate (replaces _revcomp helper).
+	cmap = str.maketrans('ACGTN', 'TGCAN')
+	rc = seq[::-1].translate(cmap)
+	# 3. SantaLucia 1998 nearest-neighbor thermodynamics (dH kcal/mol, dS cal/mol/K).
+	DH = {'AA':-7.9,'TT':-7.9,'AT':-7.2,'TA':-7.2,
+		'CA':-8.5,'TG':-8.5,'GT':-8.4,'AC':-8.4,
+		'CT':-7.8,'AG':-7.8,'GA':-8.2,'TC':-8.2,
+		'CG':-10.6,'GC':-9.8,'GG':-8.0,'CC':-8.0}
+	DS = {'AA':-22.2,'TT':-22.2,'AT':-20.4,'TA':-21.3,
+		'CA':-22.7,'TG':-22.7,'GT':-22.4,'AC':-22.4,
+		'CT':-21.0,'AG':-21.0,'GA':-22.2,'TC':-22.2,
+		'CG':-27.2,'GC':-24.4,'GG':-19.9,'CC':-19.9}
+	# 4. Relaxation tier table: Ideal -> Good -> Fair -> Poor -> Last resort.
+	tiers = [
+		{'label':'Ideal',      'len':(18,25),'gc':(40.0,60.0),
+			'tm':(55.0,65.0),'clamp':True, 'max_run':4,
+			'no_hairpin':True, 'no_dimer':True, 'dtm':2.0},
+		{'label':'Good',       'len':(18,28),'gc':(35.0,65.0),
+			'tm':(50.0,68.0),'clamp':True, 'max_run':5,
+			'no_hairpin':True, 'no_dimer':True, 'dtm':3.0},
+		{'label':'Fair',       'len':(18,30),'gc':(25.0,75.0),
+			'tm':(45.0,72.0),'clamp':False,'max_run':5,
+			'no_hairpin':False,'no_dimer':True, 'dtm':5.0},
+		{'label':'Poor',       'len':(18,30),'gc':None,'tm':None,
+			'clamp':False,'max_run':None,
+			'no_hairpin':False,'no_dimer':False,'dtm':8.0},
+		{'label':'Last resort','len':(18,30),'gc':None,'tm':None,
+			'clamp':False,'max_run':None,
+			'no_hairpin':False,'no_dimer':False,'dtm':float('inf')}]
+	# 5. Walk tiers from strict to permissive, building candidate pools and pairing primers.
 	max_off = max(0, min(60, len(seq) - 18))
-	def _candidates(region, tier):
-		out = []
+	chosen, chosen_tier = None, None
+	for ti, tier in enumerate(tiers):
+		# 5a. Build fwd_pool (from seq) and rev_pool (from rc); all helper logic inlined.
+		fwd_pool, rev_pool = [], []
 		lo, hi = tier['len']
-		for L in range(lo, hi + 1):
-			if L > len(region): continue
-			cand = region[:L]
-			if tier['clamp'] and cand[-1] not in 'GC':
-				continue
-			gc = _gc_pct(cand)
-			if tier['gc'] is not None:
-				glo, ghi = tier['gc']
-				if not (glo <= gc <= ghi): continue
-			if tier['max_run'] is not None:
-				if _has_run(cand, tier['max_run']):
-					continue
-			if tier['no_hairpin'] and _has_hairpin(cand, 4):
-				continue
-			if tier['no_dimer'] and _has_self_dimer(cand, 5):
-				continue
-			tm = _tm_nn(cand)
-			if tier['tm'] is not None:
-				tlo, thi = tier['tm']
-				if not (tlo <= tm <= thi): continue
-			out.append((cand, tm, gc))
-		return out
-	def _pool(source, tier):
-		pool = []
-		for off in range(0, max_off + 1):
-			pool.extend(
-				(off,) + c for c in _candidates(
-					source[off:], tier))
-		return pool
-	chosen = None
-	chosen_tier = None
-	for ti, tier in enumerate(_PCR_TIERS):
-		fwd_pool = _pool(seq, tier)
-		rev_pool = _pool(rc,  tier)
+		for source, pool in ((seq, fwd_pool), (rc, rev_pool)):
+			for off in range(max_off + 1):
+				region = source[off:]
+				for L in range(lo, hi + 1):
+					if L > len(region): continue
+					cand = region[:L]
+					if tier['clamp'] and cand[-1] not in 'GC':
+						continue
+					gc = 100.0 * (cand.count('G') + cand.count('C')) / L
+					if tier['gc'] is not None:
+						glo, ghi = tier['gc']
+						if not (glo <= gc <= ghi): continue
+					mr = tier['max_run']
+					if mr is not None and any(
+							b * mr in cand for b in 'ACGT'):
+						continue
+					if tier['no_hairpin']:
+						hp = False
+						for i in range(L - 3):
+							motif = cand[i:i+4]
+							if cand.find(motif[::-1].translate(cmap),
+									i + 7) != -1:
+								hp = True; break
+						if hp: continue
+					if (tier['no_dimer']
+							and cand[-5:] in cand[::-1].translate(cmap)):
+						continue
+					# 5b. Tm via SantaLucia 1998 with Owczarzy 2004 salt correction.
+					dH = dS = 0.0
+					for i in range(L - 1):
+						nn = cand[i:i+2]
+						dH += DH.get(nn, 0.0)
+						dS += DS.get(nn, 0.0)
+					if cand[0]  in 'GC': dH += 0.1; dS += -2.8
+					else:                dH += 2.3; dS +=  4.1
+					if cand[-1] in 'GC': dH += 0.1; dS += -2.8
+					else:                dH += 2.3; dS +=  4.1
+					dS_salt = dS + 0.368 * (L - 1) * math.log(0.05)
+					tm = ((dH * 1000.0) / (dS_salt
+						+ 1.987 * math.log(250e-9 / 4.0))) - 273.15
+					if tier['tm'] is not None:
+						tlo, thi = tier['tm']
+						if not (tlo <= tm <= thi): continue
+					pool.append((off, cand, tm, gc))
 		if not fwd_pool or not rev_pool: continue
+		# 5c. Score every fwd/rev pair under the tier's dTm gate; keep the best.
 		best, best_score = None, float('inf')
 		dtm_max = tier['dtm']
 		for off1, fwd, tmf, gcf in fwd_pool:
 			for off2, rev, tmr, gcr in rev_pool:
 				dT = abs(tmf - tmr)
 				if dT > dtm_max: continue
-				score = (
-					dT * 5.0
-					+ abs(tmf - 60.0)
-					+ abs(tmr - 60.0)
-					+ abs(gcf - 50.0) * 0.1
-					+ abs(gcr - 50.0) * 0.1
+				score = (dT * 5.0 + abs(tmf - 60.0) + abs(tmr - 60.0)
+					+ abs(gcf - 50.0) * 0.1 + abs(gcr - 50.0) * 0.1
 					+ (off1 + off2) * 0.05)
 				if score < best_score:
 					best_score = score
 					best = (fwd, rev, tmf, tmr, gcf, gcr)
 		if best is not None:
-			chosen = best
-			chosen_tier = ti
+			chosen, chosen_tier = best, ti
 			break
 	if chosen is None:
-		# Should not happen: Last-resort tier has all gates open.
-		raise Exception(
-			'No primer pair found even at last-resort tier')
+		raise Exception('No primer pair found even at last-resort tier')
+	# 6. Build a suboptimal-tier warning message if the Ideal tier failed.
 	fwd, rev, tmf, tmr, gcf, gcr = chosen
 	msg = None
 	if chosen_tier > 0:
-		# Build a short reason string vs the Ideal tier.
 		reasons = []
 		if not (40.0 <= gcf <= 60.0 and 40.0 <= gcr <= 60.0):
 			reasons.append('GC% outside 40-60')
@@ -1534,386 +1299,228 @@ def PCR(dna_sequence):
 			reasons.append('|\u0394Tm| > 2 \u00b0C')
 		if fwd[-1] not in 'GC' or rev[-1] not in 'GC':
 			reasons.append('GC clamp missing')
-		reason = '; '.join(reasons) if reasons \
-			else 'gates relaxed'
-		label = _PCR_TIERS[chosen_tier]['label']
-		msg = f'Warning: Suboptimal PCR primers ({label} tier) \u2014 {reason}'
+		reason = '; '.join(reasons) if reasons else 'gates relaxed'
+		msg = (f'Warning: Suboptimal PCR primers '
+			f'({tiers[chosen_tier]["label"]} tier) \u2014 {reason}')
 	return (fwd, rev, msg)
-
-# Standard genetic code (DNA -> single-letter AA, '*' = stop)
-_CODON_TABLE = {
-	'TTT':'F','TTC':'F','TTA':'L','TTG':'L',
-	'CTT':'L','CTC':'L','CTA':'L','CTG':'L',
-	'ATT':'I','ATC':'I','ATA':'I','ATG':'M',
-	'GTT':'V','GTC':'V','GTA':'V','GTG':'V',
-	'TCT':'S','TCC':'S','TCA':'S','TCG':'S',
-	'CCT':'P','CCC':'P','CCA':'P','CCG':'P',
-	'ACT':'T','ACC':'T','ACA':'T','ACG':'T',
-	'GCT':'A','GCC':'A','GCA':'A','GCG':'A',
-	'TAT':'Y','TAC':'Y','TAA':'*','TAG':'*',
-	'CAT':'H','CAC':'H','CAA':'Q','CAG':'Q',
-	'AAT':'N','AAC':'N','AAA':'K','AAG':'K',
-	'GAT':'D','GAC':'D','GAA':'E','GAG':'E',
-	'TGT':'C','TGC':'C','TGA':'*','TGG':'W',
-	'CGT':'R','CGC':'R','CGA':'R','CGG':'R',
-	'AGT':'S','AGC':'S','AGA':'R','AGG':'R',
-	'GGT':'G','GGC':'G','GGA':'G','GGG':'G'}
-
-# Codon usage (relative frequencies). Source: Kazusa codon usage db.
-# Highest-weight codon per amino acid is selected for back-translation.
-_CODON_USAGE = {
-	'ecoli': {
-		'F':[('TTT',0.58),('TTC',0.42)],
-		'L':[('CTG',0.50),('TTA',0.13),('TTG',0.13),
-			('CTT',0.10),('CTC',0.10),('CTA',0.04)],
-		'I':[('ATT',0.49),('ATC',0.39),('ATA',0.11)],
-		'M':[('ATG',1.00)],
-		'V':[('GTG',0.37),('GTT',0.28),('GTC',0.20),('GTA',0.15)],
-		'S':[('AGC',0.28),('TCT',0.17),('TCC',0.15),
-			('AGT',0.15),('TCG',0.14),('TCA',0.12)],
-		'P':[('CCG',0.52),('CCA',0.19),('CCT',0.16),('CCC',0.12)],
-		'T':[('ACC',0.44),('ACG',0.27),('ACT',0.16),('ACA',0.13)],
-		'A':[('GCG',0.36),('GCC',0.27),('GCA',0.21),('GCT',0.16)],
-		'Y':[('TAT',0.59),('TAC',0.41)],
-		'*':[('TAA',0.61),('TGA',0.30),('TAG',0.09)],
-		'H':[('CAT',0.57),('CAC',0.43)],
-		'Q':[('CAG',0.66),('CAA',0.34)],
-		'N':[('AAC',0.55),('AAT',0.45)],
-		'K':[('AAA',0.74),('AAG',0.26)],
-		'D':[('GAT',0.63),('GAC',0.37)],
-		'E':[('GAA',0.68),('GAG',0.32)],
-		'C':[('TGC',0.55),('TGT',0.45)],
-		'W':[('TGG',1.00)],
-		'R':[('CGC',0.40),('CGT',0.38),('CGG',0.10),
-			('CGA',0.06),('AGA',0.04),('AGG',0.02)],
-		'G':[('GGC',0.40),('GGT',0.34),('GGG',0.15),('GGA',0.11)]},
-	'human': {
-		'F':[('TTC',0.55),('TTT',0.45)],
-		'L':[('CTG',0.41),('CTC',0.20),('CTT',0.13),
-			('TTG',0.13),('TTA',0.07),('CTA',0.07)],
-		'I':[('ATC',0.48),('ATT',0.36),('ATA',0.16)],
-		'M':[('ATG',1.00)],
-		'V':[('GTG',0.47),('GTC',0.24),('GTT',0.18),('GTA',0.11)],
-		'S':[('AGC',0.24),('TCC',0.22),('TCT',0.15),
-			('AGT',0.15),('TCA',0.15),('TCG',0.06)],
-		'P':[('CCC',0.33),('CCT',0.28),('CCA',0.27),('CCG',0.11)],
-		'T':[('ACC',0.36),('ACA',0.28),('ACT',0.24),('ACG',0.12)],
-		'A':[('GCC',0.40),('GCT',0.26),('GCA',0.23),('GCG',0.11)],
-		'Y':[('TAC',0.57),('TAT',0.43)],
-		'*':[('TGA',0.52),('TAA',0.28),('TAG',0.20)],
-		'H':[('CAC',0.59),('CAT',0.41)],
-		'Q':[('CAG',0.75),('CAA',0.25)],
-		'N':[('AAC',0.54),('AAT',0.46)],
-		'K':[('AAG',0.58),('AAA',0.42)],
-		'D':[('GAC',0.54),('GAT',0.46)],
-		'E':[('GAG',0.58),('GAA',0.42)],
-		'C':[('TGC',0.55),('TGT',0.45)],
-		'W':[('TGG',1.00)],
-		'R':[('AGA',0.20),('AGG',0.20),('CGG',0.21),
-			('CGC',0.19),('CGA',0.11),('CGT',0.08)],
-		'G':[('GGC',0.34),('GGA',0.25),('GGG',0.25),('GGT',0.16)]}}
-
-def _detect_alphabet(s):
-	chars = set(s.upper()) - {'-', '*', 'N'}
-	if not chars: return 'protein'
-	dna  = set('ACGT')
-	rna  = set('ACGU')
-	prot = set('ACDEFGHIKLMNPQRSTVWY')
-	if chars <= dna: return 'dna'
-	if chars <= rna: return 'rna'
-	if chars <= prot: return 'protein'
-	# Fall back: more amino-acid only letters wins
-	if chars - dna - rna: return 'protein'
-	return 'dna'
 
 def Translate(sequence, fmt='protein', organism='ecoli'):
 	'''
-	Translate between DNA, RNA and protein representations.
-
-	Parameters
+	Translate between DNA, RNA, and protein with auto-detected source alphabet
+	Arguments:
 	----------
-	sequence : str
-	    Input sequence. Alphabet auto-detected (DNA / RNA / protein).
-	fmt : str
-	    Target alphabet: 'protein' (default), 'dna', or 'rna'.
-	organism : str
-	    Codon usage table for back-translation (protein -> DNA/RNA).
-	    'ecoli' (default) or 'human'.
-
-	Returns
+		sequence : str - Input sequence (alphabet auto-detected: DNA, RNA, or protein)
+		fmt      : str - Target alphabet: 'protein' (default), 'dna', or 'rna'
+		organism : str - Codon usage for back-translation: 'ecoli' (default) or 'human'
+	Return:
 	-------
-	str : the translated sequence (uppercase).
+		str : Translated sequence (uppercase, with gaps and spaces stripped)
 	'''
+	# 1. Validate input and target format.
 	if not sequence: raise Exception('Empty sequence')
-	src = _detect_alphabet(sequence)
 	tgt = fmt.lower()
 	if tgt not in ('protein', 'dna', 'rna'):
 		raise Exception(f'Unknown target fmt: {fmt}')
+	# 2. Detect source alphabet by character set (gap, *, N excluded from the test).
+	chars = set(sequence.upper()) - {'-', '*', 'N'}
+	if not chars: src = 'protein'
+	elif chars <= set('ACGT'): src = 'dna'
+	elif chars <= set('ACGU'): src = 'rna'
+	elif chars <= set('ACDEFGHIKLMNPQRSTVWY'): src = 'protein'
+	elif chars - set('ACGT') - set('ACGU'): src = 'protein'
+	else: src = 'dna'
+	# 3. Normalise: uppercase, strip gaps and spaces.
 	s = sequence.upper().replace('-', '').replace(' ', '')
-	# Identity / alphabet swap
+	# 4. Identity and DNA<->RNA alphabet swaps.
 	if src == tgt: return s
-	if src == 'dna' and tgt == 'rna':
-		return s.replace('T', 'U')
-	if src == 'rna' and tgt == 'dna':
-		return s.replace('U', 'T')
-	# Nucleotide -> protein
+	if src == 'dna' and tgt == 'rna': return s.replace('T', 'U')
+	if src == 'rna' and tgt == 'dna': return s.replace('U', 'T')
+	# 5. Nucleotide -> protein via the standard genetic code ('*' = stop, unknown codons -> 'X').
 	if src in ('dna', 'rna') and tgt == 'protein':
+		CODON = {
+			'TTT':'F','TTC':'F','TTA':'L','TTG':'L',
+			'CTT':'L','CTC':'L','CTA':'L','CTG':'L',
+			'ATT':'I','ATC':'I','ATA':'I','ATG':'M',
+			'GTT':'V','GTC':'V','GTA':'V','GTG':'V',
+			'TCT':'S','TCC':'S','TCA':'S','TCG':'S',
+			'CCT':'P','CCC':'P','CCA':'P','CCG':'P',
+			'ACT':'T','ACC':'T','ACA':'T','ACG':'T',
+			'GCT':'A','GCC':'A','GCA':'A','GCG':'A',
+			'TAT':'Y','TAC':'Y','TAA':'*','TAG':'*',
+			'CAT':'H','CAC':'H','CAA':'Q','CAG':'Q',
+			'AAT':'N','AAC':'N','AAA':'K','AAG':'K',
+			'GAT':'D','GAC':'D','GAA':'E','GAG':'E',
+			'TGT':'C','TGC':'C','TGA':'*','TGG':'W',
+			'CGT':'R','CGC':'R','CGA':'R','CGG':'R',
+			'AGT':'S','AGC':'S','AGA':'R','AGG':'R',
+			'GGT':'G','GGC':'G','GGA':'G','GGG':'G'}
 		dna = s.replace('U', 'T')
-		L = len(dna)
-		if L % 3 != 0:
-			dna = dna[:L - (L % 3)]
-		out = []
-		for i in range(0, len(dna), 3):
-			codon = dna[i:i+3]
-			aa = _CODON_TABLE.get(codon, 'X')
-			out.append(aa)
-		return ''.join(out)
-	# Protein -> DNA / RNA (codon optimised)
+		dna = dna[:len(dna) - len(dna) % 3]
+		return ''.join(CODON.get(dna[i:i+3], 'X')
+			for i in range(0, len(dna), 3))
+	# 6. Protein -> nucleotide via highest-weight Kazusa codon per amino acid.
 	if src == 'protein' and tgt in ('dna', 'rna'):
-		usage = _CODON_USAGE.get(organism.lower())
-		if usage is None:
+		BEST = {
+			'ecoli': {'F':'TTT','L':'CTG','I':'ATT','M':'ATG','V':'GTG',
+				'S':'AGC','P':'CCG','T':'ACC','A':'GCG','Y':'TAT',
+				'*':'TAA','H':'CAT','Q':'CAG','N':'AAC','K':'AAA',
+				'D':'GAT','E':'GAA','C':'TGC','W':'TGG','R':'CGC','G':'GGC'},
+			'human': {'F':'TTC','L':'CTG','I':'ATC','M':'ATG','V':'GTG',
+				'S':'AGC','P':'CCC','T':'ACC','A':'GCC','Y':'TAC',
+				'*':'TGA','H':'CAC','Q':'CAG','N':'AAC','K':'AAG',
+				'D':'GAC','E':'GAG','C':'TGC','W':'TGG','R':'CGG','G':'GGC'}
+			}.get(organism.lower())
+		if BEST is None:
 			raise Exception(
-				f"Unknown organism {organism!r}; "
-				f"use 'ecoli' or 'human'")
-		best = {aa: max(opts, key=lambda x: x[1])[0]
-			for aa, opts in usage.items()}
+				f"Unknown organism {organism!r}; use 'ecoli' or 'human'")
 		out = []
 		for aa in s:
-			c = best.get(aa)
+			c = BEST.get(aa)
 			if c is None:
-				raise Exception(
-					f'No codon for residue {aa!r}')
+				raise Exception(f'No codon for residue {aa!r}')
 			out.append(c)
 		dna = ''.join(out)
 		return dna if tgt == 'dna' else dna.replace('T', 'U')
-	raise Exception(
-		f'Unsupported translation {src} -> {tgt}')
+	raise Exception(f'Unsupported translation {src} -> {tgt}')
 
 def PROSITE(sequence, pattern):
 	'''
-	Search a protein sequence for a PROSITE-style pattern.
-
-	Pattern grammar (subset of the official PROSITE syntax):
-	    -        token separator (stripped)
-	    A        literal residue
-	    [ABC]    any of A/B/C
-	    {ABC}    any except A/B/C
-	    x        any residue
-	    x(n)     exactly n residues
-	    x(n,m)   between n and m residues
-	    A(n)     exactly n A's
-	    A(n,m)   between n and m A's
-	    <        anchor at sequence start
-	    >        anchor at sequence end
-
-	Parameters
+	Search a protein sequence for a PROSITE-style pattern (subset grammar: [..], {..}, x(n,m), < >)
+	Arguments:
 	----------
-	pattern  : str  PROSITE pattern.
-	sequence : str  protein sequence to search.
-
-	Returns
+		sequence : str - Protein sequence to search
+		pattern  : str - PROSITE pattern using literals, [ABC], {ABC}, x, x(n), x(n,m), < anchors >
+	Return:
 	-------
-	list of (start, end, match)
-	    start, end : 1-based, inclusive positions.
-	    match      : matched substring.
+		list[tuple] : Each hit is (start, end, match) with 1-based inclusive positions
 	'''
+	# 1. Validate: empty pattern is fatal; empty sequence yields no hits.
 	if not pattern: raise Exception('Empty pattern')
 	if not sequence: return []
-	# Tokenise and translate to a regex.
+	# 2. Tokenise PROSITE pattern into regex: [..]/{..} -> char classes, x -> '.', < > -> ^ $.
 	p = pattern.replace('-', '').replace(' ', '')
-	out = []
-	i = 0
+	out, i = [], 0
 	while i < len(p):
 		c = p[i]
-		if c == '<':
-			out.append('^')
-			i += 1
-		elif c == '>':
-			out.append('$')
-			i += 1
-		elif c == '[':
-			j = p.find(']', i)
+		if   c == '<':       out.append('^'); i += 1
+		elif c == '>':       out.append('$'); i += 1
+		elif c in '[{':
+			close = ']' if c == '[' else '}'
+			j = p.find(close, i)
 			if j == -1:
-				raise Exception('Unclosed [ in pattern')
-			out.append('[' + p[i+1:j] + ']')
+				raise Exception(f'Unclosed {c} in pattern')
+			out.append(('[' if c == '[' else '[^') + p[i+1:j] + ']')
 			i = j + 1
-		elif c == '{':
-			j = p.find('}', i)
-			if j == -1:
-				raise Exception('Unclosed { in pattern')
-			out.append('[^' + p[i+1:j] + ']')
-			i = j + 1
-		elif c == 'x' or c == 'X':
-			out.append('.')
-			i += 1
-		elif c.isalpha():
-			out.append(c.upper())
-			i += 1
+		elif c in 'xX':      out.append('.'); i += 1
+		elif c.isalpha():    out.append(c.upper()); i += 1
 		else:
 			raise Exception(
-				f'Unexpected character {c!r} '
-				f'at position {i} of pattern')
-		# Optional quantifier (n) or (n,m)
+				f'Unexpected character {c!r} at position {i} of pattern')
 		if i < len(p) and p[i] == '(':
 			j = p.find(')', i)
-			if j == -1:
-				raise Exception('Unclosed ( in pattern')
+			if j == -1: raise Exception('Unclosed ( in pattern')
 			body = p[i+1:j]
-			if ',' in body:
-				lo, hi = body.split(',', 1)
-				out.append('{' + lo.strip() + ','
-					+ hi.strip() + '}')
-			else:
-				out.append('{' + body.strip() + '}')
+			out.append('{' + ','.join(
+				s.strip() for s in body.split(',', 1)) + '}')
 			i = j + 1
-	regex = '(?=(' + ''.join(out) + '))'
-	rx   = re.compile(regex, re.IGNORECASE)
-	hits = []
-	for m in rx.finditer(sequence):
-		mstr  = m.group(1)
-		start = m.start() + 1
-		end   = start + len(mstr) - 1
-		hits.append((start, end, mstr))
-	return hits
+	# 3. Compile as a zero-width lookahead so overlapping hits are found; scan the sequence.
+	rx = re.compile('(?=(' + ''.join(out) + '))', re.IGNORECASE)
+	return [(m.start() + 1, m.start() + len(m.group(1)), m.group(1))
+		for m in rx.finditer(sequence)]
 
 def HydrogenBondMap(pose):
 	'''
-	Backbone hydrogen-bond donor/acceptor map for a protein pose.
-
-	Uses the same DSSP electrostatic criterion as Pose.CalcDSSP
-	(Kabsch & Sander 1983):
-	    E = 0.084 * (1/r_ON + 1/r_CH - 1/r_OH - 1/r_CN) * 332
-	A backbone NH (residue i) -> C=O (residue j) bond is accepted
-	when E < -0.5 kcal/mol, |i - j| > 1, and i, j share a chain.
-
-	Parameters
+	Backbone H-bond donor/acceptor map via the DSSP electrostatic criterion (Kabsch-Sander 1983)
+	Arguments:
 	----------
-	pose : Pose object containing a protein.
-
-	Returns
+		pose : Pose - Protein pose with backbone N, C, O atoms
+	Return:
 	-------
-	np.ndarray of shape (N_atoms, N_atoms) with values:
-	    0 - no bond
-	    1 - this atom is a donor (backbone N) in a bond
-	    2 - this atom is an acceptor (backbone O) in a bond
+		np.ndarray : (N_atoms, N_atoms) int8 matrix; 0 = no bond, 1 = donor N, 2 = acceptor O
 	'''
+	# 1. Validate molecule type and presence of amino-acid residues.
 	if pose.data.get('Type') != 'Protein':
-		raise Exception(
-			'HydrogenBondMap only supports protein poses')
+		raise Exception('HydrogenBondMap only supports protein poses')
 	AAs = pose.data.get('Amino Acids') or {}
 	if not AAs:
 		raise Exception('Pose has no amino acids')
+	# 2. Allocate output matrix and gather residue indices, chain IDs, and tricodes.
 	atoms = pose.data['Atoms']
+	co    = pose.data['Coordinates']
 	N_atoms = max(atoms.keys()) + 1 if atoms else 0
 	M = np.zeros((N_atoms, N_atoms), dtype=np.int8)
-	N_res = len(AAs)
-	res_idx = sorted(AAs.keys())
-	chains   = [AAs[i][1] for i in res_idx]
-	tricodes = [AAs[i][5].upper() for i in res_idx]
-	def _hasatom(r, name):
-		try:
-			pose._hasatom(r, name)
-		except Exception:
-			pass
-		for ai in AAs[r][2]:
-			if atoms[ai][0] == name: return True
-		return False
-	def _atomidx(r, name):
-		for ai in AAs[r][2]:
-			if atoms[ai][0] == name: return ai
-		return -1
-	co = pose.data['Coordinates']
-	# Compute virtual H positions (DSSP rule: H is N + unit(C->O) of i-1)
+	res_idx  = sorted(AAs.keys())
+	N_res    = len(res_idx)
+	chains   = [AAs[r][1] for r in res_idx]
+	tricodes = [AAs[r][5].upper() for r in res_idx]
+	# 3. Precompute per-residue backbone atom-name -> atom-index lookup.
+	ai_of = {r: {atoms[ai][0]: ai for ai in AAs[r][2]} for r in res_idx}
+	# 4. Place virtual amide-H: use explicit H/1H when available, else N + unit(C_{i-1}->O_{i-1}).
 	H_pos = [None] * N_res
 	for k, r in enumerate(res_idx):
 		if tricodes[k] == 'PRO': continue
 		if k == 0 or chains[k] != chains[k-1]: continue
-		if _hasatom(r, 'H'):
-			H_pos[k] = co[_atomidx(r, 'H')]
-		elif _hasatom(r, '1H'):
-			H_pos[k] = co[_atomidx(r, '1H')]
-		elif (_hasatom(r, 'N')
-			and _hasatom(res_idx[k-1], 'C')
-			and _hasatom(res_idx[k-1], 'O')):
-			Ni = co[_atomidx(r, 'N')]
-			Cp = co[_atomidx(res_idx[k-1], 'C')]
-			Op = co[_atomidx(res_idx[k-1], 'O')]
-			cdir = Cp - Op
+		idx = ai_of[r]
+		ah = idx.get('H', idx.get('1H'))
+		if ah is not None:
+			H_pos[k] = co[ah]
+			continue
+		prev = ai_of[res_idx[k-1]]
+		if 'N' in idx and 'C' in prev and 'O' in prev:
+			cdir = co[prev['C']] - co[prev['O']]
 			nm = float(np.linalg.norm(cdir))
 			if nm > 0.001:
-				H_pos[k] = Ni + (cdir / nm)
+				H_pos[k] = co[idx['N']] + cdir / nm
+	# 5. For every (i, j) pair on the same chain with |i-j|>1, apply DSSP energy threshold E<-0.5.
 	for ki in range(N_res):
 		if H_pos[ki] is None: continue
-		ri = res_idx[ki]
-		Ni_idx = _atomidx(ri, 'N')
+		Ni_idx = ai_of[res_idx[ki]].get('N', -1)
 		if Ni_idx < 0: continue
-		Ni = co[Ni_idx]
-		Hi = H_pos[ki]
+		Ni, Hi = co[Ni_idx], H_pos[ki]
 		for kj in range(N_res):
-			if abs(ki - kj) <= 1: continue
-			if chains[ki] != chains[kj]: continue
-			rj = res_idx[kj]
-			if not _hasatom(rj, 'O'): continue
-			Cj_idx = _atomidx(rj, 'C')
-			Oj_idx = _atomidx(rj, 'O')
-			if Cj_idx < 0 or Oj_idx < 0: continue
-			Cj = co[Cj_idx]
-			Oj = co[Oj_idx]
+			if abs(ki - kj) <= 1 or chains[ki] != chains[kj]: continue
+			idxj = ai_of[res_idx[kj]]
+			if 'O' not in idxj or 'C' not in idxj: continue
+			Cj_idx, Oj_idx = idxj['C'], idxj['O']
+			Cj, Oj = co[Cj_idx], co[Oj_idx]
 			r_ON = float(np.linalg.norm(Oj - Ni))
 			r_CH = float(np.linalg.norm(Cj - Hi))
 			r_OH = float(np.linalg.norm(Oj - Hi))
 			r_CN = float(np.linalg.norm(Cj - Ni))
 			if min(r_ON, r_CH, r_OH, r_CN) < 0.001: continue
-			E = 0.084 * (
-				1/r_ON + 1/r_CH - 1/r_OH - 1/r_CN) * 332
-			if E < -0.5:
+			if 0.084 * (1/r_ON + 1/r_CH - 1/r_OH - 1/r_CN) * 332 < -0.5:
 				M[Ni_idx, Oj_idx] = 1
 				M[Oj_idx, Ni_idx] = 2
 	return M
 
 def ContactMap(pose):
 	'''
-	Residue-residue distance map (in angstroms).
-
-	Uses CA atoms for proteins and C1' atoms for DNA / RNA.
-
-	Parameters
+	Residue-residue Euclidean distance map (angstroms) using CA for protein, C1' for DNA/RNA
+	Arguments:
 	----------
-	pose : Pose object containing a protein or nucleic acid.
-
-	Returns
+		pose : Pose - Protein or nucleic-acid pose with a non-empty residue table
+	Return:
 	-------
-	np.ndarray of shape (N_residues, N_residues) with pairwise
-	Euclidean distances in angstroms (zero on the diagonal).
+		np.ndarray : (N_residues, N_residues) pairwise distances, zero on the diagonal
 	'''
+	# 1. Resolve molecule type, residue table, and reference-atom name.
 	mol = pose.data.get('Type')
-	if mol is None:
-		raise Exception('Empty pose')
-	if mol == 'Protein':
-		src = pose.data['Amino Acids']
-		ref = 'CA'
-	elif mol in ('DNA', 'RNA'):
-		src = pose.data['Nucleotides']
-		ref = "C1'"
-	else:
-		raise Exception(f'Unknown molecule type: {mol}')
-	if not src:
-		raise Exception('Pose has no residues')
-	atoms = pose.data['Atoms']
-	co    = pose.data['Coordinates']
-	keys  = sorted(src.keys())
-	N     = len(keys)
-	pts   = np.zeros((N, 3))
+	if mol is None: raise Exception('Empty pose')
+	if   mol == 'Protein':      src, ref = pose.data['Amino Acids'], 'CA'
+	elif mol in ('DNA', 'RNA'): src, ref = pose.data['Nucleotides'], "C1'"
+	else: raise Exception(f'Unknown molecule type: {mol}')
+	if not src: raise Exception('Pose has no residues')
+	# 2. Gather reference-atom coordinates for every residue (must exist per residue).
+	atoms, co = pose.data['Atoms'], pose.data['Coordinates']
+	keys = sorted(src.keys())
+	pts  = np.zeros((len(keys), 3))
 	for k, ri in enumerate(keys):
-		hit = False
-		for ai in src[ri][2]:
-			if atoms[ai][0] == ref:
-				pts[k] = co[ai]
-				hit = True
-				break
-		if not hit:
-			raise Exception(
-				f'Residue {ri} has no {ref} atom')
+		pos = next((co[ai] for ai in src[ri][2]
+			if atoms[ai][0] == ref), None)
+		if pos is None:
+			raise Exception(f'Residue {ri} has no {ref} atom')
+		pts[k] = pos
+	# 3. Broadcast pairwise difference, take Euclidean norm, zero the diagonal.
 	diff = pts[:, None, :] - pts[None, :, :]
 	mat  = np.sqrt((diff * diff).sum(-1))
 	np.fill_diagonal(mat, 0.0)
