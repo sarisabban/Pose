@@ -1852,6 +1852,14 @@ class Pose():
 					saved[aname] = F @ (pos - c4)
 				ring_local[i] = saved
 			orig_chains = sorted(set(v[1] for v in nts.values()))
+			self.data = {
+				'Type': None, 'Energy': 0,
+				'Rg': 0, 'Mass': 0, 'Size': {},
+				'FASTA': {}, 'SS': {},
+				'Nucleotides': None,
+				'Amino Acids': None,
+				'Atoms': {}, 'Bonds': {}, 'BondOrders': {},
+				'Coordinates': np.zeros((0, 3))}
 			self._buildnucleotide(seq_a, fmt, chains=orig_chains)
 			self.CalcCharge()
 			nts2 = self.data['Nucleotides']
