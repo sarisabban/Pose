@@ -17,6 +17,9 @@ class Pose():
 		with open(f'{path}/database.json') as f: database = json.load(f)
 		self.aminoacids=database['Amino Acids']
 		self.nucleotides=database['Nucleotides']
+		for aa in self.aminoacids.values():
+			if isinstance(aa, dict) and 'BBDEP' in aa:
+				aa['BBDEP']=[np.asarray(g, dtype=np.int16) for g in aa['BBDEP']]
 		self.probbatoms = {
 			'N', 'H', '1H', '2H', '3H', 'H1', 'H2', 'H3',
 			'HT1', 'HT2', 'HT3', 'HN',

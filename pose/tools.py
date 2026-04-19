@@ -255,6 +255,25 @@ def Parameterise(filename, unicode, tricode):
 				out.append(
 					'            "' + str(bk) + '":[' + inner + ']' + tail)
 			return out
+		if field == 'BBDEP':
+			# list of 2-D int grids; per-row inline (no spaces between
+			# commas) at 12-space indent, grids separated by `], [`,
+			# matching the existing ARG entry's layout.
+			out = [f'        "{field}": [[']
+			last_gi = len(val) - 1
+			for gi, g in enumerate(val):
+				last_ri = len(g) - 1
+				for ri, row in enumerate(g):
+					body = ','.join(str(int(x)) for x in row)
+					if ri < last_ri:
+						out.append('            [' + body + '],')
+					elif gi < last_gi:
+						out.append('            [' + body + ']], [')
+					else:
+						# Last row of last grid: close row, grid, outer
+						# BBDEP list. _fmt_entry appends the `}` after.
+						out.append('            [' + body + ']]]')
+			return out
 		encoded = json.dumps(val, indent=4)
 		enc_lines = encoded.split('\n')
 		out = [f'        "{field}": {enc_lines[0]}']
@@ -289,10 +308,201 @@ def Parameterise(filename, unicode, tricode):
 				L.append('')
 		L.append('}')
 		return '\n'.join(L) + '\n'
+	# 15a. Snapshot pre-Parameterise file bytes for full rollback if
+	#      step 16 fails (the new residue must land on disk before
+	#      GenerateBBDEP can see it via Pose()).
+	try:
+		with open(db_path, 'rb') as _fh: _rollback_bytes = _fh.read()
+	except FileNotFoundError:
+		_rollback_bytes = None
 	tmp_path = db_path + '.tmp'
-	with open(tmp_path, 'w') as fh: fh.write(_fmt_db(db))
-	os.replace(tmp_path, db_path)
-	print(f'Added {tricode} as "{unicode}" to database.json')
+	try:
+		with open(tmp_path, 'w') as fh: fh.write(_fmt_db(db))
+		os.replace(tmp_path, db_path)
+		# 16. Generate and embed BBDEP rotamer grid if this NCAA has
+		#     chi angles. All scanning logic is inlined here; the only
+		#     external helper called is `energy()` (defined below in this
+		#     file). database.json is written a second time via _fmt_db
+		#     so the entry layout stays consistent.
+		if entry['Chi Angle Atoms']:
+			from pose import Pose
+			p = Pose()
+			p.Build('G' + unicode + 'G', chain='A', fmt='Protein')
+			res_idx = 1
+			n_chi = len(entry['Chi Angle Atoms'])
+			# Precompute LJ pair params + 1-2/1-3 exclusion mask; these are
+			# invariant under chi rotation, so build once and pass to energy().
+			atoms = p.data['Atoms']
+			n_atoms = len(atoms)
+			elems = [atoms[i][1] for i in range(n_atoms)]
+			_sig = np.array([_LJ.get(e, _LJ['C'])[0] for e in elems],
+				dtype=np.float64)
+			_eps = np.array([_LJ.get(e, _LJ['C'])[1] for e in elems],
+				dtype=np.float64)
+			sigma_ij = 0.5 * (_sig[:, None] + _sig[None, :])
+			eps_ij = np.sqrt(_eps[:, None] * _eps[None, :])
+			_nbrs = [set() for _ in range(n_atoms)]
+			for kk, vs in p.data['Bonds'].items():
+				ii = int(kk)
+				for jj in vs:
+					_nbrs[ii].add(int(jj))
+					_nbrs[int(jj)].add(ii)
+			_excl = np.eye(n_atoms, dtype=bool)
+			for ii in range(n_atoms):
+				for jj in _nbrs[ii]:
+					_excl[ii, jj] = True
+					for kk in _nbrs[jj]:
+						_excl[ii, kk] = True
+			pair_mask = ((~_excl)
+				& np.triu(np.ones_like(_excl), k=1).astype(bool))
+			_terms = (sigma_ij, eps_ij, pair_mask)
+			# Coordinate-descent chi minimizer per (phi, psi) grid cell.
+			COARSE, REFINE, HALF, MAX_PASS = 30.0, 2.0, 14.0, 4
+			coarse_a = np.arange(-180.0, 180.0, COARSE)
+			refine_a = np.arange(-HALF, HALF + REFINE, REFINE)
+			sin_gs = [np.zeros((36, 36), dtype=np.int16)
+				for _ in range(n_chi)]
+			cos_gs = [np.zeros((36, 36), dtype=np.int16)
+				for _ in range(n_chi)]
+			phis = np.arange(-180, 180, 10)
+			psis = np.arange(-180, 180, 10)
+			for gi, phi in enumerate(phis):
+				for gj, psi in enumerate(psis):
+					p.RotateDihedral(res_idx, float(phi), 'PHI')
+					p.RotateDihedral(res_idx, float(psi), 'PSI')
+					chis = [180.0] * n_chi
+					for ci in range(n_chi):
+						p.RotateDihedral(res_idx, 180.0, 'chi', ci + 1)
+					for _ in range(MAX_PASS):
+						changed = False
+						for ci in range(n_chi):
+							best_e, best_a = float('inf'), chis[ci]
+							for a in coarse_a:
+								p.RotateDihedral(res_idx, float(a),
+									'chi', ci + 1)
+								e = energy(p, _terms)
+								if e < best_e:
+									best_e, best_a = e, float(a)
+							if abs(best_a - chis[ci]) > 1e-6:
+								changed = True
+							chis[ci] = best_a
+							p.RotateDihedral(res_idx, best_a, 'chi', ci + 1)
+						if not changed: break
+					for ci in range(n_chi):
+						best_e = energy(p, _terms)
+						best_a = chis[ci]
+						base = chis[ci]
+						for d in refine_a:
+							a = base + float(d)
+							p.RotateDihedral(res_idx, a, 'chi', ci + 1)
+							e = energy(p, _terms)
+							if e < best_e:
+								best_e, best_a = e, a
+						chis[ci] = best_a
+						p.RotateDihedral(res_idx, best_a, 'chi', ci + 1)
+					for ci, chi in enumerate(chis):
+						rad = math.radians(chi)
+						sin_gs[ci][gi, gj] = int(round(
+							math.sin(rad) * 10000))
+						cos_gs[ci][gi, gj] = int(round(
+							math.cos(rad) * 10000))
+			grids = []
+			for ci in range(n_chi):
+				grids.append(sin_gs[ci].tolist())
+				grids.append(cos_gs[ci].tolist())
+			entry['BBDEP'] = grids
+			_validate_db(db)
+			with open(tmp_path, 'w') as fh: fh.write(_fmt_db(db))
+			os.replace(tmp_path, db_path)
+			print(f'Added {tricode} as "{unicode}" to database.json '
+				'(with BBDEP)')
+		else:
+			print(f'Added {tricode} as "{unicode}" to database.json')
+	except BaseException:
+		if _rollback_bytes is not None:
+			with open(db_path, 'wb') as _fh: _fh.write(_rollback_bytes)
+		elif os.path.exists(db_path):
+			os.remove(db_path)
+		if os.path.exists(tmp_path):
+			os.remove(tmp_path)
+		raise
+
+# Universal Force Field (Rappe 1992) Lennard-Jones parameters, in units
+# of (sigma [Angstrom], epsilon [kcal/mol]). Used by `energy()` below and
+# by the BBDEP scanner inside Parameterise(). Unknown elements fall back
+# to carbon. Extend this table if you register NCAAs containing exotic
+# elements (e.g. boron, metals).
+_LJ = {
+	'H':  (2.886, 0.044), 'C':  (3.851, 0.105),
+	'N':  (3.660, 0.069), 'O':  (3.500, 0.060),
+	'F':  (3.364, 0.050), 'P':  (4.147, 0.305),
+	'S':  (4.035, 0.274), 'Cl': (3.947, 0.227),
+	'Br': (4.189, 0.251), 'I':  (4.500, 0.339),
+	'Se': (4.205, 0.291),
+}
+
+def energy(pose, _terms=None):
+	'''
+	Total Lennard-Jones 12-6 potential energy (kcal/mol) for a Pose's
+	current conformation. 1-2 and 1-3 bonded atom pairs are excluded
+	(standard convention: directly bonded atoms and atoms two bonds
+	apart don't contribute to the non-bonded energy).
+
+	Arguments:
+	----------
+		pose   : Pose - a built protein/nucleic-acid pose whose
+				 current coordinates are the conformation to evaluate.
+		_terms : tuple or None - optional precomputed
+				 (sigma_ij, epsilon_ij, pair_mask) triple for hot-loop
+				 callers (e.g. Parameterise's chi scanner). When None, the
+				 element-pair parameters and the 1-2/1-3 exclusion mask are
+				 derived from `pose.data['Atoms']` and `pose.data['Bonds']`
+				 on each call.
+
+	Returns:
+	--------
+		float - total LJ energy in kcal/mol.
+
+	This is a deliberately minimal ranker: sterics dominate side-chain
+	rotamer preference, and the rotameric (+/- 60, 180) wells are
+	already sampled by the scanner's starting points. Replace this
+	function with a full force field (MMFF94, AMBER) when available --
+	the BBDEP scanner only assumes `(pose, _terms=None) -> float`.
+	'''
+	if _terms is None:
+		atoms = pose.data['Atoms']
+		n = len(atoms)
+		elems = [atoms[i][1] for i in range(n)]
+		sig = np.array([_LJ.get(e, _LJ['C'])[0] for e in elems],
+			dtype=np.float64)
+		eps = np.array([_LJ.get(e, _LJ['C'])[1] for e in elems],
+			dtype=np.float64)
+		sigma = 0.5 * (sig[:, None] + sig[None, :])
+		epsilon = np.sqrt(eps[:, None] * eps[None, :])
+		nbrs = [set() for _ in range(n)]
+		for k, vs in pose.data['Bonds'].items():
+			i = int(k)
+			for j in vs:
+				nbrs[i].add(int(j))
+				nbrs[int(j)].add(i)
+		excl = np.eye(n, dtype=bool)
+		for i in range(n):
+			for j in nbrs[i]:
+				excl[i, j] = True
+				for kk in nbrs[j]:
+					excl[i, kk] = True
+		mask = (~excl) & np.triu(np.ones_like(excl), k=1).astype(bool)
+	else:
+		sigma, epsilon, mask = _terms
+	coords = np.asarray(pose.data['Coordinates'], dtype=np.float64)
+	diff = coords[:, None, :] - coords[None, :, :]
+	r2 = np.einsum('ijk,ijk->ij', diff, diff)
+	np.fill_diagonal(r2, 1.0)
+	sr2 = (sigma * sigma) / r2
+	sr6 = sr2 * sr2 * sr2
+	sr12 = sr6 * sr6
+	lj = 4.0 * epsilon * (sr12 - sr6)
+	return float(np.sum(lj[mask]))
 
 def RMSD(pose1, pose2, alg='align', export=None):
 	'''
@@ -1639,4 +1849,53 @@ def ContactMap(pose):
 	np.fill_diagonal(mat, 0.0)
 	return mat
 
-
+def Rotamers(index, pose):
+	'''
+	Update CHI dihedrals (rotamers) with the most-probable chi angles for a residue given backbone phi, psi.
+	Arguments:
+	----------
+		index : The residue to updates its rotamers
+		pose  : Pose - Protein or nucleic-acid pose with a non-empty residue table
+	Return:
+	-------
+		Updates the residues rotamers using pose.RotateDihedral(index, ideal_CHI, 'CHI', CHI_type)
+	'''
+	aa  = pose.data['Amino Acids'][index][0].upper()
+	phi = pose.GetDihedral(index, 'PHI')
+	psi = pose.GetDihedral(index, 'PSI')
+	_SCALE = 1.0 / 10000.0  # undo the integer scaling applied when BBDEP was built
+	_N = 36                 # grid is 36x36 (every 10 degrees of phi and psi)
+	_STEP = 10.0
+	def _bilinear(grid, phi, psi):
+		'''
+		Local bilinear interpolation on a 36x36 periodic grid.
+		grid is an int16 numpy array holding sin(chi)*10000 or cos(chi)*10000
+		at every (phi, psi) node in {-180, -170, ..., 170} x {-180, -170, ..., 170}.
+		phi and psi are already normalized to [-180, 180).
+		'''
+		fx = (phi + 180.0) / _STEP
+		fy = (psi + 180.0) / _STEP
+		i0 = int(math.floor(fx)) % _N
+		j0 = int(math.floor(fy)) % _N
+		i1 = (i0 + 1) % _N
+		j1 = (j0 + 1) % _N
+		u = fx - math.floor(fx)
+		v = fy - math.floor(fy)
+		s00 = grid[i0, j0]
+		s10 = grid[i1, j0]
+		s01 = grid[i0, j1]
+		s11 = grid[i1, j1]
+		blended = ((1.0 - u) * (1.0 - v) * s00
+			+ u * (1.0 - v) * s10
+			+ (1.0 - u) * v * s01
+			+ u * v * s11)
+		return float(blended) * _SCALE
+	d = pose.aminoacids[aa]['BBDEP']
+	n = len(pose.aminoacids[aa]['Chi Angle Atoms'])
+	phi = ((float(phi) + 180.0) % 360.0) - 180.0
+	psi = ((float(psi) + 180.0) % 360.0) - 180.0
+	for ci in range(n):
+		s = _bilinear(d[2 * ci], phi, psi)
+		c = _bilinear(d[2 * ci + 1], phi, psi)
+		result = math.degrees(math.atan2(s, c))
+		pose.RotateDihedral(index, result, 'CHI', ci+1)
