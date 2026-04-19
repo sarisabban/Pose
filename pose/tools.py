@@ -175,68 +175,123 @@ def Parameterise(filename, unicode, tricode):
 	if unicode in db['Amino Acids']:
 		print(f'Warning: "{unicode}" already exists... overwriting.')
 	db['Amino Acids'][unicode] = entry
-	# 14. Custom serialiser preserves exact layout (padded vectors, compact bond rows, section closers).
-	L    = ['{']
-	secs = list(db.items())
-	for si, (sname, entries) in enumerate(secs):
-		sec_last = (si == len(secs) - 1)
-		L.append(f'"{sname}": {{')
-		items = list(entries.items())
-		for ei, (ekey, e) in enumerate(items):
-			elast = (ei == len(items) - 1)
-			sep    = '' if elast else ','
-			has_bo = 'BondOrders' in e
-			L.append(f'"{ekey}": {{')
-			for field, val in e.items():
-				if field == 'Vectors':
-					L.append('    "Vectors": [')
-					n = len(val) - 1
-					for vi, v in enumerate(val):
-						L.append('        ['
-							f'{round(v[0],3):6.3f},'
-							f'{round(v[1],3):7.3f},'
-							f'{round(v[2],3):7.3f}]'
-							+ (',' if vi < n else '],'))
-				elif field in ('Tricode', 'Type'):
-					L.append(f'    "{field}": "{val}",')
-				elif field == 'Fused':
-					L.append('    "Fused": '
-						+ ('true' if val else 'false') + ',')
-				elif field in (
-						'Sidechain Atoms','Backbone Atoms','Base Atoms'):
-					L.append(f'    "{field}": [')
-					n = len(val) - 1
-					for ai, a in enumerate(val):
-						af = (f'["{a[0]}", "{a[1]}", ' + (
-							f'{float(a[2]):.1f}, {float(a[3]):.1f}, '
-							f'{float(a[4]):.1f}]' if len(a) == 5
-							else f'{int(a[2])}, {int(a[3])}]'))
-						L.append(f'        {af}' + (',' if ai < n else '],'))
-				elif field == 'Chi Angle Atoms':
-					L.append('    "Chi Angle Atoms": [')
-					if not val: L.append('        ],')
-					else:
-						n = len(val) - 1
-						for ci, c in enumerate(val):
-							L.append('        [' + ', '.join(
-								f'"{x}"' for x in c) + ']'
-								+ (',' if ci < n else '],'))
-				elif field in ('Bonds', 'BondOrders'):
-					L.append(f'    "{field}": {{')
-					bi = list(val.items()); n = len(bi) - 1
-					is_bonds = (field == 'Bonds')
-					for k, (bk, bv) in enumerate(bi):
-						row = f'        "{bk}":[' + ', '.join(
-							(f'{x:g}' if isinstance(x, float)
-								else str(x)) for x in bv) + ']'
-						if k < n:                 L.append(row + ',')
-						elif is_bonds and has_bo: L.append(row + '},')
-						else:                     L.append(row + '}}' + sep)
-			if not elast: L.append('')
-		L[-1] = L[-1] + ('}' if sec_last else '},')
-		L.append('')
-	L.append('}')
-	with open(db_path, 'w') as fh: fh.write('\n'.join(L))
+	# 14. Validate Bonds/BondOrders symmetry across the whole DB before
+	#     writing anything. Fails loudly on any malformed entry so the
+	#     hot paths in Pose (_bondtree, Import) can stay guard-free.
+	def _validate_db(db):
+		for section in ('Amino Acids', 'Nucleotides'):
+			for ekey, e in db.get(section, {}).items():
+				if 'Bonds' not in e: continue
+				bonds = e['Bonds']
+				if 'BondOrders' not in e:
+					raise ValueError(
+						f'{section}[{ekey!r}]: '
+						f'has Bonds but no BondOrders')
+				bo = e['BondOrders']
+				for k, nbrs in bonds.items():
+					if k not in bo:
+						raise ValueError(
+							f'{section}[{ekey!r}]: '
+							f'BondOrders missing key {k!r}')
+					if len(bo[k]) != len(nbrs):
+						raise ValueError(
+							f'{section}[{ekey!r}][{k!r}]: '
+							f'Bonds has {len(nbrs)} entries but '
+							f'BondOrders has {len(bo[k])}')
+	_validate_db(db)
+	# 15. Serialise preserving the compact layout; atomic write via rename.
+	def _fmt_field(field, val):
+		'''Format one database.json field as a list of pre-indented
+		lines (no trailing comma; the enclosing entry closes the dict).
+		Unknown fields fall back to json.dumps so no data is dropped.'''
+		if field == 'Vectors':
+			out = ['        "Vectors": [']
+			n = len(val) - 1
+			for vi, v in enumerate(val):
+				tail = ',' if vi < n else ']'
+				body = '[' + ', '.join(
+					json.dumps(round(float(x), 3)) for x in v) + ']'
+				out.append('            ' + body + tail)
+			return out
+		if field in ('Tricode', 'Type'):
+			return [f'        "{field}": "{val}"']
+		if field == 'Fused':
+			return ['        "Fused": ' + ('true' if val else 'false')]
+		if field in ('Sidechain Atoms', 'Backbone Atoms', 'Base Atoms'):
+			out = [f'        "{field}": [']
+			n = len(val) - 1
+			for ai, a in enumerate(val):
+				if len(a) == 5:
+					body = (f'["{a[0]}", "{a[1]}", '
+						f'{float(a[2]):.1f}, {float(a[3]):.1f}, '
+						f'{float(a[4]):.1f}]')
+				else:
+					body = (f'["{a[0]}", "{a[1]}", '
+						f'{int(a[2])}, {int(a[3])}]')
+				tail = ',' if ai < n else ']'
+				out.append('            ' + body + tail)
+			return out
+		if field == 'Chi Angle Atoms':
+			if not val:
+				return [f'        "{field}": []']
+			if isinstance(val[0], str):
+				inner = ', '.join(f'"{x}"' for x in val)
+				return [f'        "{field}": [{inner}]']
+			out = [f'        "{field}": [']
+			n = len(val) - 1
+			for ci, c in enumerate(val):
+				tail = ',' if ci < n else ']'
+				inner = ', '.join(f'"{x}"' for x in c)
+				out.append('            [' + inner + ']' + tail)
+			return out
+		if field in ('Bonds', 'BondOrders'):
+			out = [f'        "{field}": {{']
+			bi = list(val.items()); n = len(bi) - 1
+			for k, (bk, bv) in enumerate(bi):
+				inner = ', '.join(
+					(f'{x:g}' if isinstance(x, float) else str(x))
+					for x in bv)
+				tail = ',' if k < n else '}'
+				out.append(
+					'            "' + str(bk) + '":[' + inner + ']' + tail)
+			return out
+		encoded = json.dumps(val, indent=4)
+		enc_lines = encoded.split('\n')
+		out = [f'        "{field}": {enc_lines[0]}']
+		for el in enc_lines[1:]:
+			out.append('        ' + el)
+		return out
+	def _fmt_entry(entry_key, entry):
+		out = [f'    "{entry_key}": {{']
+		blocks = [_fmt_field(f, v) for f, v in entry.items()]
+		for bi, block in enumerate(blocks):
+			if bi < len(blocks) - 1:
+				block[-1] = block[-1] + ','
+			out.extend(block)
+		out[-1] = out[-1] + '}'
+		return out
+	def _fmt_db(db):
+		L = ['{']
+		sections = list(db.items())
+		for si, (sname, entries) in enumerate(sections):
+			L.append(f'"{sname}": {{')
+			items = list(entries.items())
+			for ei, (ekey, e) in enumerate(items):
+				block = _fmt_entry(ekey, e)
+				if ei < len(items) - 1:
+					block[-1] = block[-1] + ','
+				L.extend(block)
+				if ei < len(items) - 1:
+					L.append('')
+			L[-1] = L[-1] + '}'
+			if si < len(sections) - 1:
+				L[-1] = L[-1] + ','
+				L.append('')
+		L.append('}')
+		return '\n'.join(L) + '\n'
+	tmp_path = db_path + '.tmp'
+	with open(tmp_path, 'w') as fh: fh.write(_fmt_db(db))
+	os.replace(tmp_path, db_path)
 	print(f'Added {tricode} as "{unicode}" to database.json')
 
 def RMSD(pose1, pose2, alg='align', export=None):
@@ -443,12 +498,28 @@ def BLAST(seq1, seq2):
 	E  = np.full((m+1, n+1), INF)
 	F  = np.full((m+1, n+1), INF)
 	tb = np.zeros((m+1, n+1), dtype=np.int8)
+	# 2a. Precompute (m, n) substitution score matrix once, using BLOSUM62
+	# for alphabet residues and (+4 self-match / -1 mismatch) fallback for
+	# anything outside the 20-letter alphabet.
+	BM   = np.array(_bm, dtype=float)
+	idx1 = np.array([_idx.get(c, -1) for c in seq1], dtype=np.int64)
+	idx2 = np.array([_idx.get(c, -1) for c in seq2], dtype=np.int64)
+	valid = (idx1[:, None] >= 0) & (idx2[None, :] >= 0)
+	S = np.where(valid,
+		BM[np.clip(idx1[:, None], 0, 19),
+		   np.clip(idx2[None, :], 0, 19)],
+		0.0)
+	arr1 = np.array(list(seq1))
+	arr2 = np.array(list(seq2))
+	eq   = arr1[:, None] == arr2[None, :]
+	S    = np.where(valid, S, np.where(eq, 4.0, -1.0))
 	best, bi, bj = 0.0, 0, 0
 	for i in range(1, m+1):
+		# 2b. Vectorised F column update: depends only on H[i-1], F[i-1].
+		F[i, 1:] = np.maximum(H[i-1, 1:] - go - ge, F[i-1, 1:] - ge)
 		for j in range(1, n+1):
-			diag    = H[i-1, j-1] + _blosum(seq1[i-1], seq2[j-1])
+			diag    = H[i-1, j-1] + S[i-1, j-1]
 			E[i, j] = max(H[i, j-1] - go - ge, E[i, j-1] - ge)
-			F[i, j] = max(H[i-1, j] - go - ge, F[i-1, j] - ge)
 			h       = max(0.0, diag, E[i, j], F[i, j])
 			H[i, j] = h
 			if h > best: best, bi, bj = h, i, j
@@ -561,6 +632,21 @@ def MSA(sequences):
 		sizes[bi] += sizes[bj]
 		active.remove(bj)
 	# 4. Progressive profile-to-profile Needleman-Wunsch with affine gaps and BLOSUM62 column scoring.
+	BM_aa = np.array(_bm, dtype=float)
+	def _profile_freq(profile):
+		'''Per-column frequency vector (L, 20) over the 20-letter
+		BLOSUM alphabet, normalised by non-gap count. Residues outside
+		the alphabet and gaps contribute zero weight.'''
+		L = len(profile[0])
+		F = np.zeros((L, 20))
+		for row in profile:
+			for ci, c in enumerate(row):
+				k = _idx.get(c, -1)
+				if k >= 0: F[ci, k] += 1
+		denom = F.sum(axis=1, keepdims=True)
+		with np.errstate(divide='ignore', invalid='ignore'):
+			return np.divide(F, denom, where=(denom > 0),
+				out=np.zeros_like(F))
 	profiles = {k: [seqs[k]] for k in range(n)}
 	for (ci, cj) in merge_order:
 		p1, p2 = profiles[ci], profiles[cj]
@@ -573,16 +659,17 @@ def MSA(sequences):
 			H[i, 0], tb[i, 0] = -(go + ge * i), 2
 		for j in range(1, L2+1):
 			H[0, j], tb[0, j] = -(go + ge * j), 3
+		# Precompute profile-profile BLOSUM column scores in one shot.
+		Fp1 = _profile_freq(p1)
+		Fp2 = _profile_freq(p2)
+		with np.errstate(all='ignore'):
+			CS = Fp1 @ BM_aa @ Fp2.T     # shape (L1, L2)
 		for i in range(1, L1+1):
+			# Vectorised F column update: depends only on H[i-1], F[i-1].
+			F[i, 1:] = np.maximum(H[i-1, 1:] - go - ge, F[i-1, 1:] - ge)
 			for j in range(1, L2+1):
-				ca = [r[i-1] for r in p1 if r[i-1] != '-']
-				cb = [r[j-1] for r in p2 if r[j-1] != '-']
-				cs = 0.0 if (not ca or not cb) else sum(
-					_blosum(a, b) for a in ca for b in cb
-					) / (len(ca) * len(cb))
-				diag    = H[i-1, j-1] + cs
+				diag    = H[i-1, j-1] + CS[i-1, j-1]
 				E[i, j] = max(H[i, j-1] - go - ge, E[i, j-1] - ge)
-				F[i, j] = max(H[i-1, j] - go - ge, F[i-1, j] - ge)
 				h       = max(diag, E[i, j], F[i, j])
 				H[i, j] = h
 				tb[i, j] = (1 if h == diag
@@ -699,28 +786,27 @@ def MSA(sequences):
 	Pi /= Beff
 	lam   = 0.5
 	Pi_pc = (1.0 - lam) * Pi + lam / q
-	Pij = np.zeros((L, L, q, q))
-	for bi in range(B):
-		w_b, row = weights[bi], M[bi]
-		for i in range(L):
-			ai = row[i]
-			for j in range(L):
-				Pij[i, j, ai, row[j]] += w_b
-	Pij /= Beff
-	Pij_pc = (1.0 - lam) * Pij + lam / (q * q)
-	for i in range(L):
-		Pij_pc[i, i] = 0.0
-		for a in range(q):
-			Pij_pc[i, i, a, a] = Pi_pc[i, a]
+	def _pij_pc(i, j):
+		'''On-demand q-by-q pair frequency with pseudocount and
+		diagonal reset. Replaces the full (L,L,q,q) tensor.'''
+		pij = np.zeros((q, q))
+		np.add.at(pij, (M[:, i], M[:, j]), weights)
+		pij /= Beff
+		pij = (1.0 - lam) * pij + lam / (q * q)
+		if i == j:
+			pij[:] = 0.0
+			for a in range(q):
+				pij[a, a] = Pi_pc[i, a]
+		return pij
 	# 12. Covariance matrix with last state dropped as gauge, then invert (pseudo-inverse on failure).
 	qm = q - 1
 	C = np.zeros((L * qm, L * qm))
 	for i in range(L):
 		for j in range(L):
-			for a in range(qm):
-				for b in range(qm):
-					C[i*qm + a, j*qm + b] = (Pij_pc[i, j, a, b]
-						- Pi_pc[i, a] * Pi_pc[j, b])
+			pij = _pij_pc(i, j)
+			block = (pij[:qm, :qm]
+				- np.outer(Pi_pc[i, :qm], Pi_pc[j, :qm]))
+			C[i*qm:(i+1)*qm, j*qm:(j+1)*qm] = block
 	try:
 		invC = np.linalg.inv(C)
 	except np.linalg.LinAlgError:
@@ -1168,6 +1254,31 @@ def Concatenate(pose1, pose2, fuse=False):
 	new._update()
 	return new
 
+def _has_hairpin(seq, cmap, min_stem=4, min_loop=3):
+	'''True if seq has an internal inverted repeat of length >= min_stem
+	separated by a loop of >= min_loop nt. Crude proxy for hairpin stability.'''
+	L = len(seq)
+	for stem in range(min_stem, L // 2 + 1):
+		for i in range(L - 2 * stem - min_loop + 1):
+			target = seq[i:i+stem][::-1].translate(cmap)
+			j = seq.find(target, i + stem + min_loop)
+			if j != -1:
+				return True
+	return False
+
+def _has_3p_selfdimer(seq, cmap, window=5):
+	'''True if the 3' last `window` bases of seq pair elsewhere in seq
+	(ignoring the trivial self-overlap at the end).'''
+	tail_rc = seq[-window:][::-1].translate(cmap)
+	hit = seq.find(tail_rc)
+	return hit != -1 and hit + window <= len(seq) - 1
+
+def _has_cross_dimer(fwd, rev, cmap, window=5):
+	'''True if the 3' tail of either primer pairs with the other primer.'''
+	a = fwd[-window:][::-1].translate(cmap)
+	b = rev[-window:][::-1].translate(cmap)
+	return (a in rev) or (b in fwd)
+
 def PCR(dna_sequence):
 	'''
 	Design forward and reverse PCR primers for a DNA template via a 5-tier relaxation search
@@ -1203,19 +1314,24 @@ def PCR(dna_sequence):
 	tiers = [
 		{'label':'Ideal',      'len':(18,25),'gc':(40.0,60.0),
 			'tm':(55.0,65.0),'clamp':True, 'max_run':4,
-			'no_hairpin':True, 'no_dimer':True, 'dtm':2.0},
+			'no_hairpin':True, 'no_dimer':True,
+			'no_cross_dimer':True, 'dtm':2.0},
 		{'label':'Good',       'len':(18,28),'gc':(35.0,65.0),
 			'tm':(50.0,68.0),'clamp':True, 'max_run':5,
-			'no_hairpin':True, 'no_dimer':True, 'dtm':3.0},
+			'no_hairpin':True, 'no_dimer':True,
+			'no_cross_dimer':True, 'dtm':3.0},
 		{'label':'Fair',       'len':(18,30),'gc':(25.0,75.0),
 			'tm':(45.0,72.0),'clamp':False,'max_run':5,
-			'no_hairpin':False,'no_dimer':True, 'dtm':5.0},
+			'no_hairpin':False,'no_dimer':True,
+			'no_cross_dimer':False,'dtm':5.0},
 		{'label':'Poor',       'len':(18,30),'gc':None,'tm':None,
 			'clamp':False,'max_run':None,
-			'no_hairpin':False,'no_dimer':False,'dtm':8.0},
+			'no_hairpin':False,'no_dimer':False,
+			'no_cross_dimer':False,'dtm':8.0},
 		{'label':'Last resort','len':(18,30),'gc':None,'tm':None,
 			'clamp':False,'max_run':None,
-			'no_hairpin':False,'no_dimer':False,'dtm':float('inf')}]
+			'no_hairpin':False,'no_dimer':False,
+			'no_cross_dimer':False,'dtm':float('inf')}]
 	# 5. Walk tiers from strict to permissive, building candidate pools and pairing primers.
 	max_off = max(0, min(60, len(seq) - 18))
 	chosen, chosen_tier = None, None
@@ -1239,16 +1355,9 @@ def PCR(dna_sequence):
 					if mr is not None and any(
 							b * mr in cand for b in 'ACGT'):
 						continue
-					if tier['no_hairpin']:
-						hp = False
-						for i in range(L - 3):
-							motif = cand[i:i+4]
-							if cand.find(motif[::-1].translate(cmap),
-									i + 7) != -1:
-								hp = True; break
-						if hp: continue
-					if (tier['no_dimer']
-							and cand[-5:] in cand[::-1].translate(cmap)):
+					if tier['no_hairpin'] and _has_hairpin(cand, cmap):
+						continue
+					if tier['no_dimer'] and _has_3p_selfdimer(cand, cmap):
 						continue
 					# 5b. Tm via SantaLucia 1998 with Owczarzy 2004 salt correction.
 					dH = dS = 0.0
@@ -1271,10 +1380,12 @@ def PCR(dna_sequence):
 		# 5c. Score every fwd/rev pair under the tier's dTm gate; keep the best.
 		best, best_score = None, float('inf')
 		dtm_max = tier['dtm']
+		no_xd = tier['no_cross_dimer']
 		for off1, fwd, tmf, gcf in fwd_pool:
 			for off2, rev, tmr, gcr in rev_pool:
 				dT = abs(tmf - tmr)
 				if dT > dtm_max: continue
+				if no_xd and _has_cross_dimer(fwd, rev, cmap): continue
 				score = (dT * 5.0 + abs(tmf - 60.0) + abs(tmr - 60.0)
 					+ abs(gcf - 50.0) * 0.1 + abs(gcr - 50.0) * 0.1
 					+ (off1 + off2) * 0.05)
@@ -1299,6 +1410,8 @@ def PCR(dna_sequence):
 			reasons.append('|\u0394Tm| > 2 \u00b0C')
 		if fwd[-1] not in 'GC' or rev[-1] not in 'GC':
 			reasons.append('GC clamp missing')
+		if _has_cross_dimer(fwd, rev, cmap):
+			reasons.append('primer-pair cross-dimer')
 		reason = '; '.join(reasons) if reasons else 'gates relaxed'
 		msg = (f'Warning: Suboptimal PCR primers '
 			f'({tiers[chosen_tier]["label"]} tier) \u2014 {reason}')
