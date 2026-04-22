@@ -3,8 +3,8 @@ import os
 import json
 import math
 import numpy as np
+from .energy import Energy
 from collections import defaultdict, deque
-from energy import Energy
 
 def Parameterise(filename, unicode, tricode):
 	'''
@@ -39,7 +39,7 @@ def Parameterise(filename, unicode, tricode):
 				BONDS.append((t[1], t[2], t[3], t[4]))
 			elif len(t) >= 18:
 				try:
-					try:    c = [float(t[i]) for i in (15, 16, 17)]
+					try:c = [float(t[i]) for i in (15, 16, 17)]
 					except (ValueError, IndexError):
 						c = [float(t[i]) for i in (12, 13, 14)]
 					COORD_RAW.append(c)
@@ -331,32 +331,6 @@ def Parameterise(filename, unicode, tricode):
 			p.Build('G' + unicode + 'G', chain='A', fmt='Protein')
 			res_idx = 1
 			n_chi = len(entry['Chi Angle Atoms'])
-			# Precompute LJ pair params + 1-2/1-3 exclusion mask; these are
-			# invariant under chi rotation, so build once and pass to _energy().
-			atoms = p.data['Atoms']
-			n_atoms = len(atoms)
-			elems = [atoms[i][1] for i in range(n_atoms)]
-			_sig = np.array([_LJ.get(e, _LJ['C'])[0] for e in elems],
-				dtype=np.float64)
-			_eps = np.array([_LJ.get(e, _LJ['C'])[1] for e in elems],
-				dtype=np.float64)
-			sigma_ij = 0.5 * (_sig[:, None] + _sig[None, :])
-			eps_ij = np.sqrt(_eps[:, None] * _eps[None, :])
-			_nbrs = [set() for _ in range(n_atoms)]
-			for kk, vs in p.data['Bonds'].items():
-				ii = int(kk)
-				for jj in vs:
-					_nbrs[ii].add(int(jj))
-					_nbrs[int(jj)].add(ii)
-			_excl = np.eye(n_atoms, dtype=bool)
-			for ii in range(n_atoms):
-				for jj in _nbrs[ii]:
-					_excl[ii, jj] = True
-					for kk in _nbrs[jj]:
-						_excl[ii, kk] = True
-			pair_mask = ((~_excl)
-				& np.triu(np.ones_like(_excl), k=1).astype(bool))
-			_terms = (sigma_ij, eps_ij, pair_mask)
 			# Coordinate-descent chi minimizer per (phi, psi) grid cell.
 			COARSE, REFINE, HALF, MAX_PASS = 30.0, 2.0, 14.0, 4
 			coarse_a = np.arange(-180.0, 180.0, COARSE)
@@ -381,7 +355,7 @@ def Parameterise(filename, unicode, tricode):
 							for a in coarse_a:
 								p.RotateDihedral(res_idx, float(a),
 									'chi', ci + 1)
-								e = _energy(p, terms)
+								e = _energy(p)
 								if e < best_e:
 									best_e, best_a = e, float(a)
 							if abs(best_a - chis[ci]) > 1e-6:
@@ -390,13 +364,13 @@ def Parameterise(filename, unicode, tricode):
 							p.RotateDihedral(res_idx, best_a, 'chi', ci + 1)
 						if not changed: break
 					for ci in range(n_chi):
-						best_e = _energy(p, terms)
+						best_e = _energy(p)
 						best_a = chis[ci]
 						base = chis[ci]
 						for d in refine_a:
 							a = base + float(d)
 							p.RotateDihedral(res_idx, a, 'chi', ci + 1)
-							e = _energy(p, terms)
+							e = _energy(p)
 							if e < best_e:
 								best_e, best_a = e, a
 						chis[ci] = best_a
@@ -428,9 +402,9 @@ def Parameterise(filename, unicode, tricode):
 			os.remove(tmp_path)
 		raise
 
-def _energy(pose, terms=None):
+def _energy(pose):
 	''' Calculate potential energy for BBDEP values in Parameterise() '''
-	E = Energy(pose, alg='Lennard_Jones', terms=terms)
+	E = Energy(pose, alg='Lennard_Jones', terms=None)
 	return E
 
 def RMSD(pose1, pose2, alg='align', export=None):
