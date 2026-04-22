@@ -1186,7 +1186,7 @@ class Pose():
 			print(f'Secondary Structure:\tChain: {i[0]}\tDSSP: {i[1]}')
 		for i in self.data['Size'].items():
 			print(f'Size:\t\t\tChain: {i[0]}\tLength: {i[1]}')
-	def GetDihedral(self, res, angle_type'PHI', chi_type=None):
+	def GetDihedral(self, res, angle_type='PHI', chi_type=None):
 		'''
 		Measure a named dihedral angle of a residue or nucleotide
 		Arguments:
