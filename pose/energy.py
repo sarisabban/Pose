@@ -1,6 +1,6 @@
 import numpy as np
 
-def harmonic_bond(r, r0, Kb):
+def harmonic_bond_potential(r, r0, Kb):
 	'''
 	Calculates the Harmonic Bond Stretching potential energy between two atoms
 	Arguments:
@@ -16,7 +16,7 @@ def harmonic_bond(r, r0, Kb):
 
 def morse_potential(r, r0, De, a):
 	'''
-	Calculates Morse Bond potential energy between two atoms
+	Calculates the Morse Bond potential energy between two atoms
 	Arguments:
 	----------
 		r:  Current bond length between two atoms
@@ -29,9 +29,9 @@ def morse_potential(r, r0, De, a):
 	'''
 	return De * (1 - np.exp(-a * (r - r0)))**2
 
-def harmonic_angle(theta, theta0, K_theta):
+def harmonic_angle_potential(theta, theta0, K_theta):
 	'''
-	Calculates Harmonic Angle Bending potential energy between two atoms
+	Calculates the Harmonic Angle Bending potential energy between two atoms
 	Arguments:
 	----------
 		theta:   Current bond angle between two atoms (rad)
@@ -43,49 +43,14 @@ def harmonic_angle(theta, theta0, K_theta):
 	'''
 	return K_theta * (theta - theta0)**2
 
-
-
-def dihedral_potential(phi, phi0, k_phi, n):
-    """
-    Calculates Torsional (Dihedral) Potential energy.
-    phi:   current dihedral angle (radians)
-    phi0:  phase offset/target angle (radians)
-    k_phi: force constant (barrier height)
-    n:     multiplicity (number of peaks in 360 degrees)
-    """
-    return k_phi * (1 + np.cos(n * phi - phi0))
-
-
-def improper_dihedral_potential(psi, psi0, k_imp):
-    """
-    Calculates Improper Dihedral energy.
-    psi: current out-of-plane angle, psi0: target angle, k_imp: force constant
-    """
-    return k_imp * (psi - psi0)**2
-
-
-def electrostatic_potential(r, q1, q2, epsilon_r=1.0):
-    """
-    Calculates Coulombic Potential energy.
-    r: distance between atoms
-    q1, q2: partial charges of the atoms
-    epsilon_r: dielectric constant (default 1.0 for vacuum/explicit solvent)
-    """
-    # Coulomb constant (k_e) in kcal*A/(mol*e^2) is approx 332.06
-    ke = 332.06 
-    return (ke * q1 * q2) / (epsilon_r * r)
-
-
-
-
 def lennard_jones(r, sigma, epsilon, variant='12-6'):
 	'''
-	Calculates Lennard-Jones potential energy between two atoms
+	Calculates the Lennard-Jones potential energy between two atoms
 	Arguments:
 	----------
 		r:       Current bond length between two atoms
 		sigma:   Distance where energy is zero (or energy minima in 9-6 variant)
-		epsilon: Well depth (strength)
+		epsilon: Energy well depth (strength)
 	Returns:
 	--------
 		float: potential energy in kcal/mol
@@ -101,73 +66,115 @@ def lennard_jones(r, sigma, epsilon, variant='12-6'):
 	else:
 		raise Exception('Incorrect variant type')
 
-
-
-import numpy as np
-
-def scaled_14_interaction(r, sigma, epsilon, q1, q2, f_lj=0.5, f_elec=0.833):
-    """
-    Applies scaling factors to non-bonded interactions between 1-4 atom pairs.
-    f_lj: scaling for Lennard-Jones (default 0.5 for AMBER)
-    f_elec: scaling for Electrostatics (default 0.833 for AMBER)
-    """
-    # Reuse your existing LJ and Coulomb functions
-    e_lj = lennard_jones(r, sigma, epsilon)
-    e_elec = coulomb_potential(r, q1, q2)
-    
-    return (e_lj * f_lj) + (e_elec * f_elec)
-
-def urey_bradley(r13, s0, k_ub):
-    """
-    Calculates Urey-Bradley energy (Harmonic 1-3 interaction).
-    r13: distance between the 1st and 3rd atoms in an angle
-    s0: equilibrium distance, k_ub: force constant
-    """
-    return k_ub * (r13 - s0)**2
-
-def drude_self_energy(d, k_drude):
-    """
-    Calculates the harmonic 'self-energy' of a Drude oscillator.
-    d: distance between the Drude particle and its parent atom core
-    k_drude: the spring constant (polarizability constant)
-    """
-    return 0.5 * k_drude * d**2
-
-
-
-
-
-
-
-
-
-
-def Lennard_Jones(pose, terms):
+def electrostatic_potential(r, q1, q2, epsilon_r=1.0):
 	'''
-	Total Lennard-Jones 12-6 potential energy
+	Calculates the Electrostatic potential energy between two atoms
 	Arguments:
 	----------
-		pose:  Pose()
-		terms: (sigma [Angstrom], epsilon [kcal/mol], mask [bool])
+		r:         Distance between two atom centers
+		q1:        Partial charge of atom 1
+		q2:        Partial charge of atom 2
+		epsilon_r: Dielectric constant
 	Returns:
 	--------
 		float: potential energy in kcal/mol
 	'''
-	sigma, epsilon, mask = terms
-	coords = np.asarray(pose.data['Coordinates'], dtype=np.float64)
-	diff = coords[:, None, :] - coords[None, :, :]
-	r2 = np.einsum('ijk,ijk->ij', diff, diff)
-	np.fill_diagonal(r2, 1.0)
-	sr2 = (sigma * sigma) / r2
-	sr6 = sr2 * sr2 * sr2
-	sr12 = sr6 * sr6
-	lj = 4.0 * epsilon * (sr12 - sr6)
+	return (332.06 * q1 * q2) / (epsilon_r * r)
+
+def dihedral_potential(phi, phi0, k_phi, n):
+	'''
+	Calculates the Dihedral potential energy between two atoms
+	Arguments:
+	----------
+		phi:   Current dihedral angle
+		phi0:  Phi at equillibrium
+		k_phi: Force constant
+		n:     Multiplicity
+	Returns:
+	--------
+		float: potential energy in kcal/mol
+	'''
+	return k_phi * (1 + np.cos(n * phi - phi0))
+
+def improper_dihedral_potential(psi, psi0, k_imp):
+	'''
+	Calculates the Improper Dihedral potential energy between two atoms
+	Arguments:
+	----------
+		psi:   Current dihedral angle
+		psi0:  Psi at equillibrium
+		k_imp: Force constant
+	Returns:
+	--------
+		float: potential energy in kcal/mol
+	'''
+	return k_imp * (psi - psi0)**2
+
+def scaling_potential(r14, sigma, epsilon, q1, q2, f_lj=0.5, f_elec=0.833):
+	'''
+	Calculates the Scaling potential energy between two distant atoms
+	Arguments:
+	----------
+		r14:     Distance between atom 1 and atom 4 (3 atoms between them)
+		sigma:   Distance where potential energy is zero
+		epsilon: Energy well
+		q1:      Charge of atom 1
+		q2:      Charge of atom 4
+		f_lj:    Scaling of the Lenndard-Jones potential
+		e_elec:  Scaling of the Electrostatic potential
+	Returns:
+	--------
+		float: potential energy in kcal/mol
+	'''
+	e_lj = lennard_jones(r14, sigma, epsilon)
+	e_elec = coulomb_potential(r14, q1, q2)
+	return (e_lj * f_lj) + (e_elec * f_elec)
+
+def polarisation_potential(alpha, E):
+	'''
+	Calculates the Polarisation potential energy between two atoms
+	Arguments:
+	----------
+		alpha: Polarisability
+		E:     Electric field
+	Returns:
+	--------
+		float: potential energy in kcal/mol
+	'''
+	return 0.5 * alpha * E**2
+
+def urey_bradley_potential(r13, s0, k_ub):
+	'''
+	Calculates the Urey-Bradley potential energy between two atoms
+	Arguments:
+	----------
+		r13:   Distance between atom 1 and atom 3 (2 atoms between them)
+		s0:    Equillibrium distamce
+		k_ub:  Force constant
+	Returns:
+	--------
+		float: potential energy in kcal/mol
+	'''
+	return k_ub * (r13 - s0)**2
+
+
+
+
+
+
+
+
+def Lennard_Jones(r, sigma, epsilon, mask):
+	ratio_12 = (sigma / r)**12
+	ratio_6  = (sigma / r)**6
+	lj = 4.0 * epsilon * (ratio_12 - ratio_6)
 	return float(np.sum(lj[mask]))
 
 
 
 
-def Energy(pose, alg='lennard_jones', terms=None):
+
+def Energy(pose, alg='lennard_jones'):
 	''' Main energy function where you choose wich force field to use '''
 	if alg.upper() == 'LENNARD_JONES':
 		_LJ = {
@@ -177,30 +184,30 @@ def Energy(pose, alg='lennard_jones', terms=None):
 			'S':  (4.035, 0.274), 'Cl': (3.947, 0.227),
 			'Br': (4.189, 0.251), 'I':  (4.500, 0.339),
 			'Se': (4.205, 0.291)}
-		if terms is None:
-			atoms = pose.data['Atoms']
-			n = len(atoms)
-			elems = [atoms[i][1] for i in range(n)]
-			sig = np.array([_LJ.get(e, _LJ['C'])[0] for e in elems],
-				dtype=np.float64)
-			eps = np.array([_LJ.get(e, _LJ['C'])[1] for e in elems],
-				dtype=np.float64)
-			sigma = 0.5 * (sig[:, None] + sig[None, :])
-			epsilon = np.sqrt(eps[:, None] * eps[None, :])
-			nbrs = [set() for _ in range(n)]
-			for k, vs in pose.data['Bonds'].items():
-				i = int(k)
-				for j in vs:
-					nbrs[i].add(int(j))
-					nbrs[int(j)].add(i)
-			excl = np.eye(n, dtype=bool)
-			for i in range(n):
-				for j in nbrs[i]:
-					excl[i, j] = True
-					for kk in nbrs[j]:
-						excl[i, kk] = True
-			mask = (~excl) & np.triu(np.ones_like(excl), k=1).astype(bool)
-			terms = (sigma, epsilon, mask)
-		return Lennard_Jones(pose, terms)
+		atoms = pose.data['Atoms']
+		n = len(atoms)
+		elems = [atoms[i][1] for i in range(n)]
+		sig = np.array([_LJ.get(e,_LJ['C'])[0] for e in elems],dtype=np.float64)
+		eps = np.array([_LJ.get(e,_LJ['C'])[1] for e in elems],dtype=np.float64)
+		sigma = 0.5 * (sig[:, None] + sig[None, :])
+		epsilon = np.sqrt(eps[:, None] * eps[None, :])
+		nbrs = [set() for _ in range(n)]
+		for k, vs in pose.data['Bonds'].items():
+			i = int(k)
+			for j in vs:
+				nbrs[i].add(int(j))
+				nbrs[int(j)].add(i)
+		excl = np.eye(n, dtype=bool)
+		for i in range(n):
+			for j in nbrs[i]:
+				excl[i, j] = True
+				for kk in nbrs[j]:
+					excl[i, kk] = True
+		mask = (~excl) & np.triu(np.ones_like(excl), k=1).astype(bool)
+		coords = np.asarray(pose.data['Coordinates'], dtype=np.float64)
+		r = coords[:, None, :] - coords[None, :, :]
+		r = np.linalg.norm(r, axis=-1)
+		np.fill_diagonal(r, 1.0)
+		return Lennard_Jones(r, sigma, epsilon, mask)
 	else:
 		raise Exception('Algorithm no supported')
