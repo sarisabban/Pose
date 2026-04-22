@@ -13,6 +13,18 @@ from collections import defaultdict
 class Pose():
 	''' A class that builds and manipulates protein, DNA, and RNA '''
 	def __init__(self):
+		'''
+		Initialise an empty pose and load the residue/nucleotide database
+		Arguments:
+		----------
+			No arguments taken
+		Returns:
+		--------
+			self.aminoacids and self.nucleotides loaded from database.json,
+			element masses cached in self.masses,
+			protein and nucleic-acid backbone atom-name sets cached,
+			self.data initialised as an empty pose
+		'''
 		path, modulename = os.path.split(__file__)
 		with open(f'{path}/database.json') as f: database = json.load(f)
 		self.aminoacids=database['Amino Acids']
@@ -59,7 +71,16 @@ class Pose():
 		'Atoms':{}, 'Bonds':{}, 'BondOrders':{},
 		'Coordinates':np.zeros((0, 3))}
 	def _rotmat(self, theta, u):
-		''' Rotate a matrix around axis u by theta angle '''
+		'''
+		Build a 3×3 rotation matrix about axis u by theta (Rodrigues)
+		Arguments:
+		----------
+			theta: Rotation angle in degrees
+			u:     Length-3 unit vector defining the rotation axis
+		Returns:
+		--------
+			np.ndarray: 3×3 right-handed rotation matrix
+		'''
 		ux, uy, uz = u[0], u[1], u[2]
 		S = math.sin(math.radians(theta))
 		C = math.cos(math.radians(theta))
@@ -69,7 +90,16 @@ class Pose():
 		[uz*ux*(1-C)-uy*S, uz*uy*(1-C)+ux*S, C+uz**2*(1-C)   ]])
 		return R
 	def _atomiter(self):
-		''' Yield (atom, coord, res_idx) for all atoms '''
+		'''
+		Iterate atoms yielding id, coordinates, and residue index
+		Arguments:
+		----------
+			No arguments taken
+		Returns:
+		--------
+			generator: yields ((atom_index, atom_info), xyz, res_index)
+			for every atom of every residue in the pose
+		'''
 		src = (self.data['Amino Acids'] or self.data['Nucleotides'])
 		At = self.data['Atoms']
 		Co = self.data['Coordinates']
@@ -77,7 +107,17 @@ class Pose():
 			for ai in info[2] + info[3]:
 				yield (ai, At[ai]), Co[ai], ri
 	def _bondtreefused(self, BB, SC):
-		''' Construct bond graph for when a sidechain is fused to a backbone '''
+		'''
+		Construct residue bond graph for a fused-sidechain amino acid
+		Arguments:
+		----------
+			BB: Backbone variant ('Backbone' or 'start' or 'middle' or 'end')
+			SC: Amino acid unicode whose sidechain is fused to BB
+		Returns:
+		--------
+			dict: residue-local bond graph {atom_idx: [neighbour_idx, ...]}
+			with fused-residue index reshuffling applied (e.g. PRO)
+		'''
 		BBb = {int(k): v for k, v in
 			copy.deepcopy(self.aminoacids[BB]['Bonds']).items()}
 		SCb = {int(k): v for k, v in
@@ -112,7 +152,16 @@ class Pose():
 			BBb[k] = sorted(v)
 		return BBb
 	def _bondtreenotfused(self, BB, SC):
-		''' Construct amino acid bond graph by adding sidechain to backbone '''
+		'''
+		Construct residue bond graph by splicing sidechain on backbone
+		Arguments:
+		----------
+			BB: Backbone variant ('Backbone' or 'start' or 'middle' or 'end')
+			SC: Amino acid unicode (fused residues delegate to _bondtreefused)
+		Returns:
+		--------
+			dict: residue-local bond graph {atom_idx: [neighbour_idx, ...]}
+		'''
 		SC = SC.upper()
 		if self.aminoacids[SC]['Fused']: return self._bondtreefused(BB, SC)
 		BBb = {int(k): v for k, v in
@@ -140,7 +189,18 @@ class Pose():
 			BBb[k] = sorted(v)
 		return BBb
 	def _bondtree(self, BB, AA, new_chain=False):
-		''' Update the pose bond graph when adding a new amino acid '''
+		'''
+		Extend pose-level bond graph when appending a new amino acid
+		Arguments:
+		----------
+			BB:        Backbone variant for this residue's position
+			AA:        Amino acid unicode letter being appended
+			new_chain: If True, do not peptide-bond to the previous residue
+		Returns:
+		--------
+			self.data['Bonds'] and self.data['BondOrders'] extended
+			with the new residue's intra- and peptide-bond edges
+		'''
 		BBb = self._bondtreenotfused(BB, AA)
 		BT = self.data['Bonds']
 		BO = self.data.setdefault('BondOrders', {})
@@ -207,8 +267,19 @@ class Pose():
 		self.data['Bonds'] = BT
 		self.data['BondOrders'] = BO
 	def _downstreamatoms(self, res1, atom1, res2, atom2):
-		''' Atom indices on the atom2 side of the (atom1, atom2) pivot edge.
-		    BFS over the pose bond graph, refusing to cross the pivot bond. '''
+		'''
+		Collect atom indices downstream of the (atom1, atom2) pivot edge
+		Arguments:
+		----------
+			res1:  Residue index of the pivot's anchor atom
+			atom1: PDB name of the anchor atom (stays fixed)
+			res2:  Residue index of the pivot's moving atom
+			atom2: PDB name of the moving atom (BFS seed)
+		Returns:
+		--------
+			set: atom indices on the atom2 side of the pivot bond
+			(BFS over the bond graph, refusing to cross the pivot)
+		'''
 		Ai = self.GetAtomIdx(res1, atom1)
 		Bi = self.GetAtomIdx(res2, atom2)
 		bonds = self.data['Bonds']
@@ -223,22 +294,56 @@ class Pose():
 				stack.append(nb)
 		return result
 	def _prevres(self, i):
-		''' Previous residue on same chain, or None '''
+		'''
+		Return the previous residue index on the same chain
+		Arguments:
+		----------
+			i: Residue index
+		Returns:
+		--------
+			int or None: index i-1 if it exists and shares chain with i
+		'''
 		src = (self.data['Amino Acids'] or self.data['Nucleotides'])
 		if i-1 in src and src[i-1][1] == src[i][1]: return i - 1
 		return None
 	def _nextres(self, i):
-		''' Next residue on same chain, or None '''
+		'''
+		Return the next residue index on the same chain
+		Arguments:
+		----------
+			i: Residue index
+		Returns:
+		--------
+			int or None: index i+1 if it exists and shares chain with i
+		'''
 		src = (self.data['Amino Acids'] or self.data['Nucleotides'])
 		if i+1 in src and src[i+1][1] == src[i][1]: return i + 1
 		return None
 	def _hasatom(self, res, atom):
-		''' Check if atom exists in a residue '''
+		'''
+		Test whether a residue contains an atom with the given PDB name
+		Arguments:
+		----------
+			res:  Residue index
+			atom: PDB atom name to look for (e.g. 'CA', "O3'")
+		Returns:
+		--------
+			bool: True if the residue contains an atom with that name
+		'''
 		source = (self.data['Amino Acids'] or self.data['Nucleotides'])
 		info = source[res]
 		return any(self.data['Atoms'][i][0] == atom for i in info[2] + info[3])
 	def _phosphobonds(self, nt_ch):
-		''' Add O3'-P phosphodiester bonds '''
+		'''
+		Add O3'-P phosphodiester bonds between consecutive nucleotides
+		Arguments:
+		----------
+			nt_ch: Dict that maps chain id to ordered list of nucleotide indices
+		Returns:
+		--------
+			self.data['Bonds'] and self.data['BondOrders'] extended
+			with the inter-residue O3'-P backbone bonds
+		'''
 		At = self.data['Atoms']
 		Bd = self.data['Bonds']
 		BO = self.data.setdefault('BondOrders', {})
@@ -259,7 +364,17 @@ class Pose():
 					Bd[p].append(o3)
 					BO[p].append(1)
 	def _buildprotein(self, sequence, chain):
-		''' Build one protein chain, append to data '''
+		'''
+		Build one protein chain from sequence and append it to the pose
+		Arguments:
+		----------
+			sequence: One-letter FASTA string (uppercase=L-AA, lowercase=D-AA)
+			chain:    Chain identifier letter
+		Returns:
+		--------
+			self.data populated (or extended) with the new chain's
+			atoms, coordinates, bonds, and residue records
+		'''
 		is_new = (self.data['Type'] is None or self.data['Amino Acids'] is None)
 		if is_new:
 			self.data['Type'] = 'Protein'
@@ -354,7 +469,19 @@ class Pose():
 			new_ch = (i == 0 and aa_start > 0)
 			self._bondtree(bb, aa, new_chain=new_ch)
 	def _buildnucleotide(self, sequence, fmt, chains=None):
-		''' Build DNA or RNA (single or double strand) '''
+		'''
+		Build a DNA or RNA strand (optionally duplex) into the pose
+		Arguments:
+		----------
+			sequence: unicode nucleotide FASTA (A/T/G/C -> DNA, A/U/G/C -> RNA)
+			fmt:      'DNA' or 'RNA'
+			chains:   Chain id for one strand, two chain ids or None for duplex
+		Returns:
+		--------
+			self.data populated (or extended) with the new strand's
+			atoms, coordinates, bonds, and nucleotide records,
+			phosphodiester bonds added automatically
+		'''
 		sequence = sequence.upper()
 		N = len(sequence)
 		if fmt == 'DNA':
@@ -511,7 +638,17 @@ class Pose():
 			np.array(Co) if Co else np.zeros((0, 3)))
 		self._phosphobonds(nt_ch)
 	def _update(self):
-		''' Update cached properties after structural changes '''
+		'''
+		Refresh cached pose properties after a structural change
+		Arguments:
+		----------
+			No arguments taken
+		Returns:
+		--------
+			self.data['Mass'], ['Size'], ['FASTA'], ['Rg'] all
+			recomputed, self.data['SS'] recomputed for proteins but cleared
+			for nucleic acids
+		'''
 		self.CalcMass()
 		self.CalcSize()
 		self.CalcFASTA()
@@ -519,13 +656,30 @@ class Pose():
 		if self.data['Type'] == 'Protein': self.CalcDSSP()
 		else: self.data['SS'] = {}
 	def CalcMass(self):
-		''' Calculate mass of peptide in Da'''
+		'''
+		Sum atomic masses to compute the total molecular mass
+		Arguments:
+		----------
+			No arguments taken
+		Returns:
+		--------
+			self.data['Mass'] updated with the total mass in Daltons
+			(float, rounded to 3 decimals)
+		'''
 		ids = sorted(self.data['Atoms'].keys())
 		mass = round(sum(
 			self.masses.get(self.data['Atoms'][i][1], 0.0) for i in ids), 3)
 		self.data['Mass'] = mass
 	def CalcSize(self):
-		''' Calculate length of each chain '''
+		'''
+		Count monomers per chain
+		Arguments:
+		----------
+			No arguments taken
+		Returns:
+		--------
+			self.data['Size'] updated with {chain_id: n_monomers}
+		'''
 		source = (self.data['Amino Acids'] or self.data['Nucleotides'])
 		if not source:
 			self.data['Size'] = {}
@@ -534,7 +688,15 @@ class Pose():
 		for v in source.values(): size[v[1]] = size.get(v[1], 0) + 1
 		self.data['Size'] = size
 	def CalcFASTA(self):
-		''' Return per-chain FASTA dict '''
+		'''
+		Compile the one-letter sequence of each chain
+		Arguments:
+		----------
+			No arguments taken
+		Returns:
+		--------
+			self.data['FASTA'] updated with {chain_id: sequence_str}
+		'''
 		source = (self.data['Amino Acids'] or self.data['Nucleotides'])
 		if not source:
 			self.data['FASTA'] = {}
@@ -543,7 +705,16 @@ class Pose():
 		for v in source.values(): fasta.setdefault(v[1], []).append(v[0])
 		self.data['FASTA'] = {k: ''.join(v) for k, v in fasta.items()}
 	def CalcRg(self):
-		''' Calculate the radius of gyration of a peptide '''
+		'''
+		Compute the mass-weighted radius of gyration of the pose
+		Arguments:
+		----------
+			No arguments taken
+		Returns:
+		--------
+			self.data['Rg'] updated with the radius of gyration in
+			Angstroms (float, rounded to 3 decimals)
+		'''
 		ids   = sorted(self.data['Atoms'].keys())
 		mass  = np.array([
 			self.masses.get(self.data['Atoms'][i][1], 0.0) for i in ids])
@@ -557,7 +728,16 @@ class Pose():
 		rg    = round(math.sqrt(max(0.0, rr/tmass - mm)), 3)
 		self.data['Rg'] = rg
 	def CalcCharge(self, iterations=6):
-		''' Calculate Gasteiger-Marsili partial charges to all atoms '''
+		'''
+		Assign Gasteiger-Marsili partial charges to every atom
+		Arguments:
+		----------
+			iterations: Number of charge-equalisation passes (default 6)
+		Returns:
+		--------
+			self.data['Atoms'][i][2] updated with each atom's
+			partial charge (float, rounded to 4 decimals)
+		'''
 		PARAMS = {
 			'C3':(7.98,  9.18,  1.88), 'C2':(8.79,  9.32,  1.51),
 			'C1':(10.39, 9.45,  0.73), 'H' :(7.17,  6.24, -0.56),
@@ -615,7 +795,17 @@ class Pose():
 			for i in ids: charges[i] += delta[i]
 		for i in ids: self.data['Atoms'][i][2] = round(charges[i], 4)
 	def CalcDSSP(self):
-		''' Assign secondary structures to each amino acid '''
+		'''
+		Assign DSSP secondary structure labels to every amino acid
+		Arguments:
+		----------
+			No arguments taken
+		Returns:
+		--------
+			self.data['Amino Acids'][i][4] updated with the
+			one-letter SS code (H/G/I/E/B/T/S/L/P); self.data['SS']
+			updated with {chain_id: ss_sequence_str}
+		'''
 		if self.data['Amino Acids'] is None:
 			raise Exception('No protein loaded. ' 'Call Import() first')
 		N = len(self.data['Amino Acids'])
@@ -790,7 +980,17 @@ class Pose():
 		ss = {k: ''.join(v) for k, v in ss.items()}
 		self.data['SS'] = ss
 	def CalcSASA(self, n_points=960, probe_radius=1.4):
-		''' Calculate SASA per residue '''
+		'''
+		Compute per-residue Solvent-Accessible Surface Area
+		Arguments:
+		----------
+			n_points:     Golden-sphere sampling density per atom (default 960)
+			probe_radius: Solvent probe radius in Angstroms (default 1.4 water)
+		Returns:
+		--------
+			self.data['Amino Acids'][i][6] updated with each
+			residue's SASA in square Angstroms (float, rounded to 5 decimals)
+		'''
 		if self.data['Amino Acids'] is None:
 			raise Exception('No protein loaded. Call Import() first')
 		VDW = {
@@ -835,12 +1035,36 @@ class Pose():
 			sasa = sum(atom_sasa[id_map[a]] for a in all_atoms if a in id_map)
 			self.data['Amino Acids'][aa_idx][6] = round(float(sasa), 5)
 	def GetDistance(self, res1, atom1, res2, atom2):
-		''' Measure distance between any two atoms '''
+		'''
+		Measure the Euclidean distance between two atoms
+		Arguments:
+		----------
+			res1:  Residue index of the first atom
+			atom1: PDB name of the first atom
+			res2:  Residue index of the second atom
+			atom2: PDB name of the second atom
+		Returns:
+		--------
+			float: distance in Angstroms
+		'''
 		A = self.GetAtomCoord(res1, atom1)
 		B = self.GetAtomCoord(res2, atom2)
 		return np.linalg.norm(B - A)
 	def GetAngle(self, AA1, atom1, AA2, atom2, AA3, atom3):
-		''' Measure the angle between three atoms '''
+		'''
+		Measure the angle formed by three atoms (AA2 is the pivot)
+		Arguments:
+		----------
+			AA1:   Residue index of the first atom
+			atom1: PDB name of the first atom
+			AA2:   Residue index of the pivot atom
+			atom2: PDB name of the pivot atom
+			AA3:   Residue index of the third atom
+			atom3: PDB name of the third atom
+		Returns:
+		--------
+			float: angle in degrees
+		'''
 		atom1 = self.GetAtomCoord(AA1, atom1)
 		atom2 = self.GetAtomCoord(AA2, atom2)
 		atom3 = self.GetAtomCoord(AA3, atom3)
@@ -852,14 +1076,35 @@ class Pose():
 		cos_theta = max(-1.0, min(1.0, cos_theta))
 		return math.degrees(math.acos(cos_theta))
 	def GetAtomBonds(self, index1, index2):
-		''' Get the atom pair that participate in a bond from their index '''
+		'''
+		Retrieve the PDB names and elements of a bonded atom pair
+		Arguments:
+		----------
+			index1: Atom index of the first atom
+			index2: Atom index of the second atom (must be bonded to index 1)
+		Returns:
+		--------
+			list: [name1, element1, name2, element2]; raises an
+			exception if the two atoms are not bonded
+		'''
 		bonds = self.data['Bonds'][index1]
 		if index2 not in bonds:
 			raise Exception('Requested two atoms are not bonded')
 		A = self.data['Atoms']
 		return [A[index1][0], A[index1][1], A[index2][0], A[index2][1]]
 	def GetIdentity(self, index, item, charge=False):
-		''' Identify an atom, atom charge, or amino acid given its index '''
+		'''
+		Identify an atom, residue, or nucleotide by its global index
+		Arguments:
+		----------
+			index:  Global atom or residue index
+			item:   'Atom', 'Residue'/'Amino Acid', or 'Nucleotide'/'DNA'/'RNA'
+			charge: If True and item='Atom', return the partial charge
+		Returns:
+		--------
+			str or float: PDB atom name, amino-acid letter,
+			nucleotide letter, or atom partial charge
+		'''
 		if item.upper() == 'ATOM':
 			Atom = self.data['Atoms'][index]
 			if charge: return Atom[2]
@@ -874,7 +1119,16 @@ class Pose():
 			return self.data['Nucleotides'][index][0]
 		else: raise Exception('Incorrect item')
 	def GetAtomCoord(self, res, atom):
-		''' Get specific atom coordinates '''
+		'''
+		Fetch the XYZ coordinates of a named atom in a residue
+		Arguments:
+		----------
+			res:  Residue index
+			atom: PDB atom name (e.g. 'CA', "O3'")
+		Returns:
+		--------
+			np.ndarray: length-3 XYZ vector in Angstroms
+		'''
 		source = (self.data['Amino Acids'] or self.data['Nucleotides'])
 		info = source[res]
 		for i in info[2] + info[3]:
@@ -882,19 +1136,47 @@ class Pose():
 				return self.data['Coordinates'][i]
 		raise Exception(f'Atom {atom} not found in residue {res}')
 	def GetAtomIdx(self, res, atom):
-		''' Get atom coordinate index by name '''
+		'''
+		Look up the global atom index of a named atom in a residue
+		Arguments:
+		----------
+			res:  Residue index
+			atom: PDB atom name (e.g. 'CA', "O3'")
+		Returns:
+		--------
+			int: global atom index into self.data['Atoms'] and
+			self.data['Coordinates']
+		'''
 		source = (self.data['Amino Acids'] or self.data['Nucleotides'])
 		info = source[res]
 		for i in info[2] + info[3]:
 			if self.data['Atoms'][i][0] == atom: return i
 		raise Exception(f'Atom {atom} not found in residue {res}')
 	def GetAtomList(self, PDB=False):
-		''' Return list of all the atoms '''
+		'''
+		List every atom's name or element symbol across the pose
+		Arguments:
+		----------
+			PDB: If True return PDB atom names, else return element symbols
+		Returns:
+		--------
+			list: atom names (PDB=True) or element symbols
+			(PDB=False) in global atom index order
+		'''
 		idx = 0 if PDB else 1
 		ids = sorted(self.data['Atoms'].keys())
 		return [self.data['Atoms'][i][idx] for i in ids]
 	def GetInfo(self):
-		''' Print all basic info about a peptide '''
+		'''
+		Print a formatted summary of the pose's structural information
+		Arguments:
+		----------
+			No arguments taken
+		Returns:
+		--------
+			Energy, Mass, Rg, FASTA sequence(s), DSSP secondary
+			structure, and chain sizes printed to stdout
+		'''
 		print(f"Energy:\t\t\t{self.data['Energy']}")
 		print(f"Mass:\t\t\t{self.data['Mass']:,} Da")
 		print(f"Rg:\t\t\t{self.data['Rg']} Å")
@@ -904,8 +1186,19 @@ class Pose():
 			print(f'Secondary Structure:\tChain: {i[0]}\tDSSP: {i[1]}')
 		for i in self.data['Size'].items():
 			print(f'Size:\t\t\tChain: {i[0]}\tLength: {i[1]}')
-	def GetDihedral(self, res, angle_type, chi_type=None):
-		''' Get dihedral angles (phi/psi/omega/chi or alpha-zeta) '''
+	def GetDihedral(self, res, angle_type'PHI', chi_type=None):
+		'''
+		Measure a named dihedral angle of a residue or nucleotide
+		Arguments:
+		----------
+			res:        Residue or nucleotide index
+			angle_type: Protein: φ/ψ/ω/χ or for Nucleic: α/β/γ/δ/ε/ζ/χ
+			chi_type:   Required when angle_type='CHI' for proteins
+		Returns:
+		--------
+			float: dihedral angle in degrees, or NaN if the angle
+			is undefined at this residue (e.g. PHI of N-terminus)
+		'''
 		at = angle_type.upper()
 		mol = self.data['Type']
 		prv = self._prevres(res)
@@ -1001,7 +1294,19 @@ class Pose():
 		b = mag * np.dot(c12, c23)
 		return math.atan2(a, b) * 180 / math.pi
 	def Import(self, filename, chain=None, model=1):
-		''' Import Protein/DNA/RNA from .pdb/.cif '''
+		'''
+		Import a protein or nucleic-acid structure from PDB or mmCIF
+		Arguments:
+		----------
+			filename: Path to a .pdb or .cif file
+			chain:    Chain id (str), list of chains, None to import all chains
+			model:    Model number to import from multi-model files
+		Returns:
+		--------
+			self.data fully populated from the file; partial
+			charges, DSSP labels, and SASA computed; the
+			highest-occupancy alt-conformer is kept when duplicates are present
+		'''
 		if isinstance(chain, str): chain = [chain]
 		if chain is not None and not isinstance(chain, list):
 			raise Exception(
@@ -1420,7 +1725,15 @@ class Pose():
 			self.CalcCharge()
 		self._update()
 	def Export(self, filename):
-		''' Export structure to a .pdb or .cif file '''
+		'''
+		Write the pose to a PDB or mmCIF file
+		Arguments:
+		----------
+			filename: Output path ending in .pdb or .cif
+		Returns:
+		--------
+			The full structure (all chains and atoms) written to disk
+		'''
 		ext = os.path.splitext(filename)[1].lower()
 		if ext not in ('.pdb', '.cif'):
 			raise Exception(
@@ -1526,7 +1839,19 @@ class Pose():
 					f.write(cifentry)
 				f.write('#\n')
 	def MovePose(self, theta=None, u=None, l=None, ori=None):
-		''' Rotate and/or translate the full pose rigidly '''
+		'''
+		Rigidly rotate and/or translate the entire pose
+		Arguments:
+		----------
+			theta: Rotation angle in degrees (requires u)
+			u:     Length-3 rotation-axis vector (requires theta)
+			l:     Translation distance in Angstroms (requires ori)
+			ori:   Target point to translate towards (requires l)
+		Returns:
+		--------
+			self.data['Coordinates'] rotated about the pose
+			centroid and/or translated toward ori by l Angstroms
+		'''
 		coords = self.data['Coordinates'].copy()
 		if len(coords) == 0:
 			raise Exception('No atoms to move')
@@ -1562,7 +1887,21 @@ class Pose():
 			coords = coords + (d / mag) * l
 		self.data['Coordinates'] = coords
 	def AdjustDistance(self, res1, atom1, res2, atom2, length):
-		''' Change distance between two atoms '''
+		'''
+		Set the distance between two atoms (atom1 fixed, atom2 moves)
+		Arguments:
+		----------
+			res1:   Residue index of the fixed atom
+			atom1:  PDB name of the fixed atom
+			res2:   Residue index of the moving atom
+			atom2:  PDB name of the moving atom
+			length: Target distance in Angstroms
+		Returns:
+		--------
+			self.data['Coordinates'] updated: atom2 and every atom
+			downstream of the (atom1, atom2) edge shifted so the
+			atom1-atom2 separation equals length
+		'''
 		Ai = self.GetAtomIdx(res1, atom1)
 		Bi = self.GetAtomIdx(res2, atom2)
 		coords = self.data['Coordinates']
@@ -1574,7 +1913,22 @@ class Pose():
 		res1, atom1, res2, atom2): coords[idx] += shift
 		self.data['Coordinates'] = coords
 	def AdjustAngle(self, res1, atom1, res2, atom2, res3, atom3, theta):
-		''' Change angle between three atoms, res2/atom2 is the pivot '''
+		'''
+		Rotate about a three-atom angle's pivot by theta degrees
+		Arguments:
+		----------
+			res1:  Residue index of the first atom
+			atom1: PDB name of the first atom
+			res2:  Residue index of the pivot atom
+			atom2: PDB name of the pivot atom
+			res3:  Residue index of the third atom
+			atom3: PDB name of the third atom
+			theta: Rotation in degrees added about (atom2, atom3)
+		Returns:
+		--------
+			self.data['Coordinates'] updated: atom3 and every atom
+			downstream of it rotated by theta about atom2
+		'''
 		A = (self.GetAtomCoord(res3, atom3)- self.GetAtomCoord(res1, atom1))
 		B = (self.GetAtomCoord(res3, atom3)- self.GetAtomCoord(res2, atom2))
 		u = np.cross(B, A)
@@ -1590,7 +1944,20 @@ class Pose():
 			coords[idx] = np.matmul(v, RM) + ori
 		self.data['Coordinates'] = coords
 	def RotateDihedral(self, res, theta, angle_type, chi_type=None):
-		''' Set a dihedral angle to theta degrees '''
+		'''
+		Set a named dihedral of a residue or nucleotide to theta degrees
+		Arguments:
+		----------
+			res:        Residue or nucleotide index
+			theta:      Target dihedral angle in degrees
+			angle_type: Protein: φ/ψ/ω/χ or for Nucleic: α/β/γ/δ/ε/ζ/χ
+			chi_type:   Required when angle_type='CHI' for proteins
+		Returns:
+		--------
+			self.data['Coordinates'] updated: every atom downstream
+			of the dihedral's pivot bond rotated so the named
+			dihedral equals theta
+		'''
 		at = angle_type.upper()
 		mol = self.data['Type']
 		nxt = self._nextres(res)
@@ -1648,7 +2015,19 @@ class Pose():
 			coords[idx] = v + ori
 		self.data['Coordinates'] = coords
 	def Build(self, sequence, chain='A', fmt='Protein'):
-		''' Build protein/DNA/RNA from sequence '''
+		'''
+		Build a polypeptide or nucleic acid from a one-letter sequence
+		Arguments:
+		----------
+			sequence: One-letter sequence (uppercase=L-AA, lowercase=D-AA)
+			chain:    Chain identifier letter (default 'A')
+			fmt:      'Protein', 'DNA', or 'RNA' (default 'Protein')
+		Returns:
+		--------
+			self.data populated (or extended) with the new chain's
+			atoms, coordinates, bonds, and residues; charges, SASA
+			(protein only), and cached properties refreshed
+		'''
 		fmt = {'protein': 'Protein',
 			'dna': 'DNA', 'rna': 'RNA'}.get(fmt.lower(), fmt)
 		if fmt == 'Protein': self._buildprotein(sequence, chain)
@@ -1659,7 +2038,22 @@ class Pose():
 		if fmt == 'Protein': self.CalcSASA()
 		self._update()
 	def ReBuild(self, sequence=None, mirror=False, _mutated=None):
-		''' Rebuild a structure from internal coords '''
+		'''
+		Rebuild the pose from internal coords, optionally with mutations
+		Arguments:
+		----------
+			sequence: New sequence (str for single chain, dict for multi-chain)
+				None keeps the current sequence
+			mirror: If True, swap every L-amino acid with
+				its D-enantiomer (and vice-versa)
+			_mutated: Internal set of mutated residue
+				indices (populated by Mutate())
+		Returns:
+		--------
+			self.data fully regenerated with idealised geometry for
+			mutated/new residues and preserved dihedrals for the
+			rest; missing hydrogens are added
+		'''
 		mol = self.data['Type']
 		if mol == 'Protein':
 			AAs = self.data['Amino Acids']
@@ -2039,7 +2433,19 @@ class Pose():
 				'No structure loaded. Call Import() first')
 		self._update()
 	def Mutate(self, index, residue):
-		''' Mutate a residue or nucleotide '''
+		'''
+		Mutate a single residue or nucleotide to a new identity
+		Arguments:
+		----------
+			index:   Residue or nucleotide index to mutate
+			residue: One-letter amino acid (uppercase=L, lowercase=D)
+				or one-letter nucleotide (A/T/G/C for DNA, A/U/G/C for RNA)
+		Returns:
+		--------
+			self.data rebuilt with the mutated residue in place;
+			for duplex DNA/RNA the complementary base on the paired
+			chain is also updated
+		'''
 		mol = self.data['Type']
 		if mol == 'Protein':
 			ru = residue.upper()
@@ -2097,6 +2503,17 @@ class Pose():
 
 class Molecule():
 	def __init__(self):
+		'''
+		Initialise an empty small-molecule pose with element metadata
+		Arguments:
+		----------
+			No arguments taken
+		Returns:
+		--------
+			self.masses and self.elements populated; self.data
+			initialised as an empty Molecule (no atoms, bonds, or coordinates),
+			self._bond_orders and self._formal_charges initialised empty
+		'''
 		self.masses = {
 			'H':1.008, 'He':4.003, 'Li':6.941, 'Be':9.012,
 			'B':10.811, 'C':12.011, 'N':14.007, 'O':15.999,
@@ -2135,14 +2552,43 @@ class Molecule():
 		self._bond_orders = {}
 		self._formal_charges = {}
 	def _invalidate(self):
+		'''
+		Mark cached scalar properties stale after a coordinate change
+		Arguments:
+		----------
+			No arguments taken
+		Returns:
+		--------
+			self.data['Rg'] and self.data['Energy'] set to None so
+			callers know they must recompute
+		'''
 		self.data['Rg'] = None
 		self.data['Energy'] = None
 	def _check_idx(self, *idxs):
+		'''
+		Validate that every atom index lies inside the coordinate array
+		Arguments:
+		----------
+			*idxs: One or more atom indices to bounds-check
+		Returns:
+		--------
+			None on success; raises IndexError if any index is out of range
+		'''
 		n = len(self.data['Coordinates'])
 		for i in idxs:
 			if i < 0 or i >= n:
 				raise IndexError(f'Atom index {i} out of range [0, {n})')
 	def _rotmat(self, theta, u):
+		'''
+		Build a 3×3 rotation matrix about axis u by theta (Rodrigues)
+		Arguments:
+		----------
+			theta: Rotation angle in degrees
+			u:     Length-3 axis vector (normalised internally)
+		Returns:
+		--------
+			np.ndarray: 3×3 right-handed rotation matrix
+		'''
 		mg = np.linalg.norm(u)
 		if mg > 1e-10: u = u / mg
 		ux, uy, uz = u
@@ -2153,6 +2599,18 @@ class Molecule():
 			[uy*ux*(1-C)+uz*S, C+uy**2*(1-C), uy*uz*(1-C)-ux*S],
 			[uz*ux*(1-C)-uy*S, uz*uy*(1-C)+ux*S, C+uz**2*(1-C)]])
 	def _downstream(self, idx1, idx2):
+		'''
+		Collect atom indices downstream of the (idx1, idx2) pivot edge
+		Arguments:
+		----------
+			idx1: Anchor atom index (stays fixed)
+			idx2: Moving atom index (BFS seed)
+		Returns:
+		--------
+			set: atom indices on the idx2 side of the pivot bond
+			(BFS over the bond graph, refusing to cross the
+			pivot); raises ValueError if idx1 == idx2
+		'''
 		if idx1 == idx2: raise ValueError('_downstream: idx1 == idx2')
 		visited = {idx2}; queue = [idx2]; qi = 0
 		while qi < len(queue):
@@ -2162,6 +2620,18 @@ class Molecule():
 				visited.add(nb); queue.append(nb)
 		return visited
 	def Import(self, filename):
+		'''
+		Import a small molecule from PDB, mmCIF, SDF, MOL, or MOL2
+		Arguments:
+		----------
+			filename: Path to the input file, or an RDKit mol-block string
+		Returns:
+		--------
+			self.data populated with atoms, bonds, coordinates, and
+			molecular formula; partial charges, mass, Rg, SMILES,
+			and SMARTS computed; bonds inferred by distance when
+			the input format lacks them
+		'''
 		if isinstance(filename, str) and '\n' in filename:
 			lines = filename.splitlines(); ext = 'string'
 		else:
@@ -2474,6 +2944,16 @@ class Molecule():
 		self.CalcSMILES()
 		self.CalcSMARTS()
 	def Export(self, filename):
+		'''
+		Write the molecule to PDB, mmCIF, SDF/MOL, or MOL2
+		Arguments:
+		----------
+			filename: Output path, format chosen by extension
+				(.pdb, .cif, .sdf, .mol, .mol2)
+		Returns:
+		--------
+			Molecule atoms, bonds, and coordinates written to disk at filename
+		'''
 		ext = os.path.splitext(filename)[1].lower()
 		A = self.data['Atoms']
 		C = self.data['Coordinates']
@@ -2569,6 +3049,15 @@ class Molecule():
 			else:
 				raise Exception(f'Unsupported format: {ext}')
 	def CalcSMILES(self):
+		'''
+		Derive the SMILES string from the molecule's bond graph
+		Arguments:
+		----------
+			No arguments taken
+		Returns:
+		--------
+			str: SMILES representation (also written to self.data['SMILES'])
+		'''
 		A = self.data['Atoms']; B = self.data['Bonds']
 		heavy = sorted(i for i, v in A.items() if v[1] != 'H')
 		if not heavy: self.data['SMILES'] = ''; return ''
@@ -2645,6 +3134,15 @@ class Molecule():
 		result = '.'.join(parts)
 		self.data['SMILES'] = result; return result
 	def CalcSMARTS(self):
+		'''
+		Derive the SMARTS string from the molecule's bond graph
+		Arguments:
+		----------
+			No arguments taken
+		Returns:
+		--------
+			str: SMARTS representation (also written to self.data['SMARTS'])
+		'''
 		ANUM = {k: i+1 for i, k in enumerate(self.masses)}
 		A = self.data['Atoms']; B = self.data['Bonds']
 		heavy = sorted(i for i, v in A.items() if v[1] != 'H')
@@ -2716,6 +3214,16 @@ class Molecule():
 		result = '.'.join(parts)
 		self.data['SMARTS'] = result; return result
 	def CalcRg(self):
+		'''
+		Compute the mass-weighted radius of gyration of the molecule
+		Arguments:
+		----------
+			No arguments taken
+		Returns:
+		--------
+			self.data['Rg'] updated with the radius of gyration in
+			Angstroms (float, rounded to 3 decimals)
+		'''
 		A = self.data['Atoms']
 		if not A: self.data['Rg'] = 0.0; return
 		mass = np.array([self.masses.get(A[i][1], 0.0) for i in sorted(A)])
@@ -2730,6 +3238,16 @@ class Molecule():
 		mm = np.sum((xm.sum(0) / tm) ** 2)
 		self.data['Rg'] = round(math.sqrt(max(0.0, rr / tm - mm)), 3)
 	def CalcCharge(self, iterations=6):
+		'''
+		Assign Gasteiger-Marsili partial charges to every atom
+		Arguments:
+		----------
+			iterations: Number of charge-equalisation passes (default 6)
+		Returns:
+		--------
+			self.data['Atoms'][i][2] updated with each atom's
+			partial charge (float, rounded to 4 decimals)
+		'''
 		PARAMS = {
 			'C3':(7.98,  9.18,  1.88), 'C2':(8.79,  9.32,  1.51),
 			'C1':(10.39, 9.45,  0.73), 'H' :(7.17,  6.24, -0.56),
@@ -2787,14 +3305,45 @@ class Molecule():
 			for i in ids: charges[i] += delta[i]
 		for i in ids: A[i][2] = round(charges[i], 4)
 	def CalcMass(self):
+		'''
+		Sum atomic masses to compute the total molecular mass
+		Arguments:
+		----------
+			No arguments taken
+		Returns:
+		--------
+			self.data['Mass'] updated with the total mass in
+			Daltons (float, rounded to 3 decimals)
+		'''
 		A = self.data['Atoms']
 		self.data['Mass'] = round(
 			sum(self.masses.get(v[1], 0.0) for v in A.values()), 3)
 	def GetDistance(self, idx1, idx2):
+		'''
+		Measure the Euclidean distance between two atoms
+		Arguments:
+		----------
+			idx1: Global index of the first atom
+			idx2: Global index of the second atom
+		Returns:
+		--------
+			float: distance in Angstroms
+		'''
 		self._check_idx(idx1, idx2)
 		return np.linalg.norm(
 			self.data['Coordinates'][idx2] - self.data['Coordinates'][idx1])
 	def GetAngle(self, idx1, idx2, idx3):
+		'''
+		Measure the angle formed by three atoms (idx2 is the pivot)
+		Arguments:
+		----------
+			idx1: Global index of the first atom
+			idx2: Global index of the pivot atom
+			idx3: Global index of the third atom
+		Returns:
+		--------
+			float: angle in degrees
+		'''
 		self._check_idx(idx1, idx2, idx3)
 		C = self.data['Coordinates']
 		a, b = C[idx2] - C[idx1], C[idx2] - C[idx3]
@@ -2802,6 +3351,18 @@ class Molecule():
 		if d < 1e-10: return 0.0
 		return math.degrees(math.acos(max(-1.0, min(1.0, np.dot(a, b) / d))))
 	def GetDihedral(self, idx1, idx2, idx3, idx4):
+		'''
+		Measure the dihedral angle defined by four atoms
+		Arguments:
+		----------
+			idx1: Global index of the first atom
+			idx2: Global index of the second atom
+			idx3: Global index of the third atom
+			idx4: Global index of the fourth atom
+		Returns:
+		--------
+			float: dihedral angle in degrees
+		'''
 		self._check_idx(idx1, idx2, idx3, idx4)
 		C = self.data['Coordinates']
 		u1, u2, u3 = C[idx2]-C[idx1], C[idx3]-C[idx2], C[idx4]-C[idx3]
@@ -2810,14 +3371,54 @@ class Molecule():
 			np.dot(u2, np.cross(c12, c23)),
 			np.linalg.norm(u2) * np.dot(c12, c23)) * 180 / math.pi
 	def GetAtomCoord(self, idx):
+		'''
+		Fetch the XYZ coordinates of an atom by index
+		Arguments:
+		----------
+			idx: Global atom index
+		Returns:
+		--------
+			np.ndarray: length-3 XYZ vector in Angstroms
+		'''
 		self._check_idx(idx)
 		return self.data['Coordinates'][idx]
 	def GetAtomList(self):
+		'''
+		List every atom's element symbol across the molecule
+		Arguments:
+		----------
+			No arguments taken
+		Returns:
+		--------
+			list: element symbols in global atom index order
+		'''
 		return [v[1] for v in self.data['Atoms'].values()]
 	def GetAtomBonds(self, idx):
+		'''
+		List the PDB names of every atom bonded to a given atom
+		Arguments:
+		----------
+			idx: Global atom index whose bonded neighbours are wanted
+		Returns:
+		--------
+			list: PDB atom names of the bonded neighbours
+		'''
 		A = self.data['Atoms']
 		return [A[j][0] for j in self.data['Bonds'].get(idx, [])]
 	def AdjustDistance(self, idx1, idx2, length):
+		'''
+		Set the distance between two atoms (idx1 fixed, idx2 moves)
+		Arguments:
+		----------
+			idx1:   Global index of the fixed atom
+			idx2:   Global index of the moving atom
+			length: Target distance in Angstroms
+		Returns:
+		--------
+			self.data['Coordinates'] updated: idx2 and every atom
+			downstream of the (idx1, idx2) edge shifted so the
+			separation equals length; cached scalars invalidated
+		'''
 		self._check_idx(idx1, idx2)
 		C = self.data['Coordinates']
 		v = C[idx2] - C[idx1]; mg = np.linalg.norm(v)
@@ -2826,6 +3427,20 @@ class Molecule():
 		for i in self._downstream(idx1, idx2): C[i] += shift
 		self._invalidate()
 	def AdjustAngle(self, idx1, idx2, idx3, theta):
+		'''
+		Rotate about a three-atom angle's pivot by theta degrees
+		Arguments:
+		----------
+			idx1:  Global index of the first atom
+			idx2:  Global index of the pivot atom
+			idx3:  Global index of the third atom
+			theta: Rotation in degrees added about (idx2, idx3)
+		Returns:
+		--------
+			self.data['Coordinates'] updated: idx3 and every atom
+			downstream of it rotated by theta about idx2; cached
+			scalars invalidated
+		'''
 		self._check_idx(idx1, idx2, idx3)
 		C = self.data['Coordinates']
 		u = np.cross(C[idx3] - C[idx2], C[idx3] - C[idx1])
@@ -2836,6 +3451,21 @@ class Molecule():
 			C[i] = np.matmul(C[i] - ori, RM) + ori
 		self._invalidate()
 	def RotateDihedral(self, idx1, idx2, idx3, idx4, theta):
+		'''
+		Set a four-atom dihedral to theta degrees
+		Arguments:
+		----------
+			idx1:  Global index of the first atom
+			idx2:  Global index of the second atom
+			idx3:  Global index of the third atom
+			idx4:  Global index of the fourth atom
+			theta: Target dihedral angle in degrees
+		Returns:
+		--------
+			self.data['Coordinates'] updated: every atom downstream
+			of the (idx2, idx3) pivot bond rotated so the dihedral
+			equals theta; cached scalars invalidated
+		'''
 		self._check_idx(idx1, idx2, idx3, idx4)
 		C = self.data['Coordinates']
 		current = self.GetDihedral(idx1, idx2, idx3, idx4)
@@ -2850,6 +3480,20 @@ class Molecule():
 			C[i] = np.matmul(v, RM_new) + ori
 		self._invalidate()
 	def MovePose(self, theta=None, u=None, l=None, ori=None):
+		'''
+		Rigidly rotate and/or translate the entire molecule
+		Arguments:
+		----------
+			theta: Rotation angle in degrees (requires u)
+			u:     Length-3 rotation-axis vector (requires theta)
+			l:     Translation distance in Angstroms (requires ori)
+			ori:   Target point to translate towards (requires l)
+		Returns:
+		--------
+			self.data['Coordinates'] rotated about the centroid
+			and/or translated toward ori by l Angstroms; cached
+			scalars invalidated
+		'''
 		C = self.data['Coordinates'].copy()
 		if len(C) == 0: return
 		rot_args   = (theta is not None, u is not None)
@@ -2876,6 +3520,17 @@ class Molecule():
 		self.data['Coordinates'] = C
 		self._invalidate()
 	def GetInfo(self):
+		'''
+		Print a formatted summary and a Braille diagram of the molecule
+		Arguments:
+		----------
+			No arguments taken
+		Returns:
+		--------
+			Energy, Mass, Rg, Formula, SMILES, SMARTS, and an
+			ASCII/Braille 2D skeletal diagram (for molecules with
+			2-199 heavy atoms) printed to stdout
+		'''
 		d = self.data
 		print(f"Energy:  {d['Energy']}")
 		print(f"Mass:    {d['Mass']} Da")
