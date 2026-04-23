@@ -2928,6 +2928,16 @@ class Molecule():
 			np.array(coords) if coords else np.zeros((0, 3)))
 		self._bond_orders = bords
 		self._formal_charges = {}
+		metals = {'Li', 'Na', 'K', 'Mg', 'Ca', 'Cu', 'Fe', 'Zn', 'Mn', 'Co',
+			'Ni', 'Al', 'Ag', 'Cd', 'Hg', 'Pb', 'Sn', 'Cr'}
+		for i, v in atoms.items():
+			if v[1] not in metals: continue
+			c = v[2]
+			if c == 0.0:
+				continue
+			ic = int(round(c))
+			if abs(c - ic) < 1e-3 and ic != 0:
+				self._formal_charges[i] = ic
 		self.CalcCharge(); self.CalcMass(); self.CalcRg()
 		counts = {}
 		for v in self.data['Atoms'].values():

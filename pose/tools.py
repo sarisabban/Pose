@@ -1755,6 +1755,8 @@ def ContactMap(pose):
 def Rotamers(index, pose):
 	'''
 	Update CHI dihedrals (rotamers) with the most-probable chi angles for a residue given backbone phi, psi.
+	Derived from the Dunbrack BBDEP2010 library (CC-BY-4.0, https://dunbrack.fccc.edu/lab/bbdep2010)
+	Shapovalov MV, Dunbrack RL Jr. *A smoothed backbone-dependent rotamer library for proteins derived from adaptive kernel density estimates and regressions. Structure. 2011;19(6):844–858. doi:10.1016/j.str.2011.03.019
 	Arguments:
 	----------
 		index : The residue to updates its rotamers
