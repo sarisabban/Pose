@@ -161,11 +161,33 @@ def Parameterise(filename, unicode, tricode):
 		chis.append(full_chain[-2:] + ['N', 'CA'])
 	# 12. Assemble the new entry in the same field order as existing AAs.
 	id_to_i = {cid: i for i, cid in enumerate(CIF_IDS)}
+	def _infer_hybridisation(elem, bond_orders):
+		'''
+		Classify an atom's hybridization from its element and the list of
+		bond orders incident on it. Relies on aromatic/resonance bonds
+		having been encoded as order 1.5 by the caller (true of Parameterise
+		after the two-pass aromaticity rewrite, and of Molecule.Import after
+		bond-order inference).
+		Arguments:
+		----------
+			elem:        str, element symbol (case-insensitive)
+			bond_orders: iterable of numeric bond orders on this atom
+		Returns:
+		--------
+			str: one of 's', 'sp', 'sp2', 'sp3'
+		'''
+		if elem and elem.upper() == 'H': return 's'
+		bos = list(bond_orders)
+		if any(bo == 3 for bo in bos):   return 'sp'
+		if any(bo >= 1.5 for bo in bos): return 'sp2'
+		return 'sp3'
 	entry = {
 		'Vectors':         [COORD[id_to_i[n]].tolist() for n in ordered],
 		'Tricode':         tricode,
 		'Fused':           fused,
-		'Sidechain Atoms': [[name_map[n], elem[n], 0, 1.0, 0] for n in ordered],
+		'Sidechain Atoms': [[name_map[n], elem[n], 0, 1.0, 0,
+			_infer_hybridisation(elem[n], sc_orders[new_idx[n]])]
+			for n in ordered],
 		'Chi Angle Atoms': chis,
 		'Bonds':           {str(k): v for k, v in final_bonds.items()},
 		'BondOrders':      {str(k): v for k, v in final_orders.items()}}
@@ -222,7 +244,11 @@ def Parameterise(filename, unicode, tricode):
 			out = [f'        "{field}": [']
 			n = len(val) - 1
 			for ai, a in enumerate(val):
-				if len(a) == 5:
+				if len(a) == 6:
+					body = (f'["{a[0]}", "{a[1]}", '
+						f'{float(a[2]):.1f}, {float(a[3]):.1f}, '
+						f'{float(a[4]):.1f}, "{a[5]}"]')
+				elif len(a) == 5:
 					body = (f'["{a[0]}", "{a[1]}", '
 						f'{float(a[2]):.1f}, {float(a[3]):.1f}, '
 						f'{float(a[4]):.1f}]')
@@ -404,7 +430,7 @@ def Parameterise(filename, unicode, tricode):
 
 def _energy(pose):
 	''' Calculate potential energy for BBDEP values in Parameterise() '''
-	E = Energy(pose, alg='Lennard_Jones', terms=None)
+	E = Energy(pose, alg='Lennard_Jones')
 	return E
 
 def RMSD(pose1, pose2, alg='align', export=None):

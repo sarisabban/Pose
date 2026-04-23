@@ -450,7 +450,7 @@ class Pose():
 			full = bb_atoms + sc_atoms + tail
 			BBi, SCi = [], []
 			for v in full:
-				self.data['Atoms'][I] = [v[0], v[1], v[2], v[3], v[4]]
+				self.data['Atoms'][I] = [v[0],v[1],v[2],v[3],v[4],v[5]]
 				if v[0] in self.probbatoms: BBi.append(I)
 				else: SCi.append(I)
 				I += 1
@@ -554,14 +554,14 @@ class Pose():
 			bbi, bsi = [], []
 			for li in range(n_bb):
 				am = bbm[li]
-				self.data['Atoms'][ai] = [am[0], am[1], am[2], 1.0, 0.0]
+				self.data['Atoms'][ai]=[am[0],am[1],am[2],1.0,0.0,am[5]]
 				Co.append(tr[li])
 				ltg[li] = ai
 				bbi.append(ai)
 				ai += 1
 			for li2, am in enumerate(bsm):
 				li = n_bb + li2
-				self.data['Atoms'][ai] = [am[0], am[1], am[2], 1.0, 0.0]
+				self.data['Atoms'][ai]=[am[0],am[1],am[2],1.0,0.0,am[5]]
 				Co.append(tr[li])
 				ltg[li] = ai
 				bsi.append(ai)
@@ -604,14 +604,14 @@ class Pose():
 				bbi, bsi = [], []
 				for li in range(n_bb):
 					am = bbm[li]
-					self.data['Atoms'][ai] = [am[0], am[1], am[2], 1.0, 0.0]
+					self.data['Atoms'][ai]=[am[0],am[1],am[2],1.0,0.0,am[5]]
 					Co.append(tr[li])
 					ltg[li] = ai
 					bbi.append(ai)
 					ai += 1
 				for li2, am in enumerate(bsm):
 					li = n_bb + li2
-					self.data['Atoms'][ai] = [am[0], am[1], am[2], 1.0, 0.0]
+					self.data['Atoms'][ai]=[am[0],am[1],am[2],1.0,0.0,am[5]]
 					Co.append(tr[li])
 					ltg[li] = ai
 					bsi.append(ai)
@@ -1166,6 +1166,19 @@ class Pose():
 		idx = 0 if PDB else 1
 		ids = sorted(self.data['Atoms'].keys())
 		return [self.data['Atoms'][i][idx] for i in ids]
+	def GetAtomHybridisation(self):
+		'''
+		List every atom's hybridisation across the pose
+		Arguments:
+		----------
+			No arguments taken
+		Returns:
+		--------
+			list: atom hybridisation
+		'''
+		idx = 5
+		ids = sorted(self.data['Atoms'].keys())
+		return [self.data['Atoms'][i][idx] for i in ids]
 	def GetInfo(self):
 		'''
 		Print a formatted summary of the pose's structural information
@@ -1522,10 +1535,17 @@ class Pose():
 					self.aminoacids.items()
 					if v['Tricode'] == tri), None)
 				if sym is None: continue
+				hm = {v[0]: v[5] for v in (
+					self.aminoacids[sym].get('Sidechain Atoms',[]) +
+					self.aminoacids['Backbone middle']['Backbone Atoms']+
+					self.aminoacids['Backbone start']['Backbone Atoms'] +
+					self.aminoacids['Backbone end']['Backbone Atoms'])}
 				BB, SC = [], []
 				for r in uniq:
 					Co.append([r[4], r[5], r[6]])
-					At[count] = [r[0], r[9], 0.0, r[7], r[8]]
+					hy = hm.get(r[0],
+						's' if r[9].upper()=='H' else 'sp3')
+					At[count] = [r[0],r[9],0.0,r[7],r[8],hy]
 					(BB if r[0] in self.probbatoms else SC).append(count)
 					count += 1
 				Am[ai] = [sym, ch, BB, SC, 'L', tri, 0]
@@ -1691,7 +1711,7 @@ class Pose():
 					if row is None:
 						ltg[li] = -1
 						continue
-					D['Atoms'][ai] = [am[0], am[1], am[2], row[7], row[8]]
+					D['Atoms'][ai] = [am[0],am[1],am[2],row[7],row[8],am[5]]
 					Co.append([row[4], row[5], row[6]])
 					ltg[li] = ai
 					(bsi if li >= n_bb else bbi).append(ai)
@@ -1699,7 +1719,8 @@ class Pose():
 				dbn = {a[0] for a in bbm} | {a[0] for a in bsm}
 				for an, row in nr.items():
 					if an in dbn: continue
-					D['Atoms'][ai] = [an, row[9] or an[0], 0.0, row[7], row[8]]
+					_h='s' if (row[9] or an[0]).upper()=='H' else 'sp3'
+					D['Atoms'][ai]=[an,row[9] or an[0],0.0,row[7],row[8],_h]
 					Co.append([row[4], row[5], row[6]])
 					(bbi if an in self.nucbbatoms else bsi).append(ai)
 					ai += 1
@@ -2512,44 +2533,40 @@ class Molecule():
 		--------
 			self.masses and self.elements populated; self.data
 			initialised as an empty Molecule (no atoms, bonds, or coordinates),
-			self._bond_orders and self._formal_charges initialised empty
+			self.data['BondOrders'] initialised empty (populated by Import),
+			self._formal_charges initialised empty
 		'''
 		self.masses = {
-			'H':1.008, 'He':4.003, 'Li':6.941, 'Be':9.012,
-			'B':10.811, 'C':12.011, 'N':14.007, 'O':15.999,
-			'F':18.998, 'Ne':20.180, 'Na':22.990, 'Mg':24.305,
-			'Al':26.982, 'Si':28.086, 'P':30.974, 'S':32.066,
-			'Cl':35.453, 'Ar':39.948, 'K':39.098, 'Ca':40.078,
-			'Sc':44.956, 'Ti':47.867, 'V':50.942, 'Cr':51.996,
-			'Mn':54.938, 'Fe':55.845, 'Co':58.933, 'Ni':58.693,
-			'Cu':63.546, 'Zn':65.38, 'Ga':69.723, 'Ge':72.631,
-			'As':74.922, 'Se':78.971, 'Br':79.904, 'Kr':84.798,
-			'Rb':84.468, 'Sr':87.62, 'Y':88.906, 'Zr':91.224,
-			'Nb':92.906, 'Mo':95.95, 'Tc':98.907, 'Ru':101.07,
-			'Rh':102.906, 'Pd':106.42, 'Ag':107.868,
-			'Cd':112.414, 'In':114.818, 'Sn':118.711,
-			'Sb':121.760, 'Te':126.7, 'I':126.904,
-			'Xe':131.294, 'Cs':132.905, 'Ba':137.328,
-			'La':138.905, 'Ce':140.116, 'Pr':140.908,
-			'Nd':144.243, 'Pm':144.913, 'Sm':150.36,
-			'Eu':151.964, 'Gd':157.25, 'Tb':158.925,
-			'Dy':162.500, 'Ho':164.930, 'Er':167.259,
-			'Tm':168.934, 'Yb':173.055, 'Lu':174.967,
-			'Hf':178.49, 'Ta':180.948, 'W':183.84,
-			'Re':186.207, 'Os':190.23, 'Ir':192.217,
-			'Pt':195.085, 'Au':196.967, 'Hg':200.592,
-			'Tl':204.383, 'Pb':207.2, 'Bi':208.980,
-			'Po':208.982, 'At':209.987, 'Rn':222.081,
-			'Fr':223.020, 'Ra':226.025, 'Ac':227.028,
-			'Th':232.038, 'Pa':231.036, 'U':238.029,
-			'Np':237, 'Pu':244}
+			'H' :1.008  , 'He':4.003  , 'Li':6.941  , 'Be':9.012  ,
+			'B' :10.811 , 'C' :12.011 , 'N' :14.007 ,  'O':15.999 ,
+			'F' :18.998 , 'Ne':20.180 , 'Na':22.990 , 'Mg':24.305 ,
+			'Al':26.982 , 'Si':28.086 , 'P' :30.974 ,  'S':32.066 ,
+			'Cl':35.453 , 'Ar':39.948 , 'K' :39.098 , 'Ca':40.078 ,
+			'Sc':44.956 , 'Ti':47.867 , 'V' :50.942 , 'Cr':51.996 ,
+			'Mn':54.938 , 'Fe':55.845 , 'Co':58.933 , 'Ni':58.693 ,
+			'Cu':63.546 , 'Zn':65.38  , 'Ga':69.723 , 'Ge':72.631 ,
+			'As':74.922 , 'Se':78.971 , 'Br':79.904 , 'Kr':84.798 ,
+			'Rb':84.468 , 'Sr':87.62  , 'Y' :88.906 , 'Zr':91.224 ,
+			'Nb':92.906 , 'Mo':95.95  , 'Tc':98.907 , 'Ru':101.07 ,
+			'Rh':102.906, 'Pd':106.42 , 'Ag':107.868, 'Cd':112.414,
+			'In':114.818, 'Sn':118.711, 'Sb':121.760, 'Te':126.7  ,
+			'I' :126.904, 'Xe':131.294, 'Cs':132.905, 'Ba':137.328,
+			'La':138.905, 'Ce':140.116, 'Pr':140.908, 'Nd':144.243,
+			'Pm':144.913, 'Sm':150.36 , 'Eu':151.964, 'Gd':157.25 ,
+			'Tb':158.925, 'Dy':162.500, 'Ho':164.930, 'Er':167.259,
+			'Tm':168.934, 'Yb':173.055, 'Lu':174.967, 'Hf':178.49 ,
+			'Ta':180.948, 'W' :183.84 , 'Re':186.207, 'Os':190.23 ,
+			'Ir':192.217, 'Pt':195.085, 'Au':196.967, 'Hg':200.592,
+			'Tl':204.383, 'Pb':207.2  , 'Bi':208.980, 'Po':208.982,
+			'At':209.987, 'Rn':222.081, 'Fr':223.020, 'Ra':226.025,
+			'Ac':227.028, 'Th':232.038, 'Pa':231.036, 'U' :238.029,
+			'Np':237    , 'Pu':244}
 		self.elements = {k for k in self.masses if len(k) == 2}
 		self.data = {
 			'Type':'Molecule', 'Energy':0, 'Rg':0, 'Mass':0,
-			'SMILES':None, 'SMARTS':None, 'Formula':None,
-			'Atoms':{}, 'Bonds':{},
+			'SMILES':None, 'SMARTS':None, 'SMIRKS':None, 'Formula':None,
+			'Atoms':{}, 'Bonds':{}, 'BondOrders':{},
 			'Coordinates':np.zeros((0, 3))}
-		self._bond_orders = {}
 		self._formal_charges = {}
 	def _invalidate(self):
 		'''
@@ -2619,6 +2636,22 @@ class Molecule():
 				if nb == idx1 or nb in visited: continue
 				visited.add(nb); queue.append(nb)
 		return visited
+	def _inferhybridisation(self, elem, bond_orders):
+		'''
+		Classify an atom's hybridisation from its element and bond orders list
+		Arguments:
+		----------
+			elem:        str, element symbol (case-insensitive)
+			bond_orders: iterable of numeric bond orders on this atom
+		Returns:
+		--------
+			str: one of 's', 'sp', 'sp2', 'sp3'
+		'''
+		if elem and elem.upper() == 'H': return 's'
+		bos = list(bond_orders)
+		if any(bo == 3 for bo in bos):   return 'sp'
+		if any(bo >= 1.5 for bo in bos): return 'sp2'
+		return 'sp3'
 	def Import(self, filename):
 		'''
 		Import a small molecule from PDB, mmCIF, SDF, MOL, or MOL2
@@ -2926,7 +2959,12 @@ class Molecule():
 		self.data['Bonds'] = bonds
 		self.data['Coordinates'] = (
 			np.array(coords) if coords else np.zeros((0, 3)))
-		self._bond_orders = bords
+		self.data['BondOrders'] = {
+			i: [bords.get((i, j), 1) for j in nbrs]
+			for i, nbrs in bonds.items()}
+		for i, v in self.data['Atoms'].items():
+			bos = self.data['BondOrders'].get(i, [])
+			v.append(self._inferhybridisation(v[1], bos))
 		self._formal_charges = {}
 		metals = {'Li', 'Na', 'K', 'Mg', 'Ca', 'Cu', 'Fe', 'Zn', 'Mn', 'Co',
 			'Ni', 'Al', 'Ag', 'Cd', 'Hg', 'Pb', 'Sn', 'Cr'}
@@ -2953,6 +2991,7 @@ class Molecule():
 		self.data['Formula'] = ''.join(parts)
 		self.CalcSMILES()
 		self.CalcSMARTS()
+		self.CalcSMIRKS()
 	def Export(self, filename):
 		'''
 		Write the molecule to PDB, mmCIF, SDF/MOL, or MOL2
@@ -3008,7 +3047,7 @@ class Molecule():
 						'_chem_comp_bond.value_order'):
 						f.write(h + '\n')
 					for i, j in sorted(bp):
-						bo = self._bond_orders.get((i, j), 1)
+						bo = self._bond_order(i, j)
 						f.write(f'{A[i][0]} {A[j][0]} {bm.get(bo, "SING")}\n')
 			elif ext in ('.sdf', '.mol'):
 				na, nb = len(A), len(bp)
@@ -3026,16 +3065,15 @@ class Molecule():
 						f' {a[1]:<3} 0  0  0  0  0  0  0  0  0  0  0  0\n')
 				bm = {1:1, 2:2, 3:3, 1.5:4}
 				for i, j in sorted(bp):
-					bo = self._bond_orders.get((i, j), 1)
+					bo = self._bond_order(i, j)
 					f.write(f'{i+1:>3}{j+1:>3}{bm.get(bo, 1):>3}'
 						'  0  0  0  0\n')
 				f.write('M  END\n$$$$\n')
 			elif ext == '.mol2':
 				na, nb = len(A), len(bp)
-				mbo = {i: 0 for i in A}
-				for (a1, a2), bo in self._bond_orders.items():
-					if a1 in mbo and bo > mbo[a1]: mbo[a1] = bo
-					if a2 in mbo and bo > mbo[a2]: mbo[a2] = bo
+				mbo = {i: max(
+					self.data['BondOrders'].get(i, []), default=0)
+					for i in A}
 				f.write('@<TRIPOS>MOLECULE\n')
 				nm = self.data['SMILES'] or 'MOL'
 				f.write(f'{nm}\n{na} {nb}\nSMALL\n\n@<TRIPOS>ATOM\n')
@@ -3053,11 +3091,24 @@ class Molecule():
 				f.write('@<TRIPOS>BOND\n')
 				bm = {1:'1', 2:'2', 3:'3', 1.5:'ar'}
 				for bi, (i, j) in enumerate(sorted(bp), 1):
-					bo = self._bond_orders.get((i, j), 1)
+					bo = self._bond_order(i, j)
 					f.write(f'{bi:>4} {i+1:>4} {j+1:>4}'
 						f' {bm.get(bo, "1")}\n')
 			else:
 				raise Exception(f'Unsupported format: {ext}')
+	def _bond_order(self, a, b):
+		'''
+		Look up the bond order for the undirected bond a-b from
+		self.data['BondOrders'] (dict-of-lists parallel to Bonds).
+		Falls back to 1 if the bond isn't present.
+		'''
+		bonds = self.data.get('Bonds', {})
+		bo = self.data.get('BondOrders', {})
+		for nb, o in zip(bonds.get(a, []), bo.get(a, [])):
+			if nb == b: return o
+		for nb, o in zip(bonds.get(b, []), bo.get(b, [])):
+			if nb == a: return o
+		return 1
 	def CalcSMILES(self):
 		'''
 		Derive the SMILES string from the molecule's bond graph
@@ -3093,8 +3144,7 @@ class Molecule():
 			if i < j and frozenset((i, j)) not in te]
 		ring_at = {}
 		for d, (a, b) in enumerate(back, 1):
-			bo = self._bond_orders.get((a, b),
-				self._bond_orders.get((b, a), 1))
+			bo = self._bond_order(a, b)
 			ring_at.setdefault(a, []).append((d, bo))
 			ring_at.setdefault(b, []).append((d, bo))
 		seen_d = set()
@@ -3126,8 +3176,7 @@ class Molecule():
 				ch_list = children[node]
 				for i in range(len(ch_list) - 1, -1, -1):
 					c = ch_list[i]
-					bo = self._bond_orders.get((node, c),
-						self._bond_orders.get((c, node), 1))
+					bo = self._bond_order(node, c)
 					bsym = ''
 					if bo == 2: bsym = '='
 					elif bo == 3: bsym = '#'
@@ -3177,8 +3226,7 @@ class Molecule():
 			if i < j and frozenset((i, j)) not in te]
 		ring_at = {}
 		for d, (a, b) in enumerate(back, 1):
-			bo = self._bond_orders.get((a, b),
-				self._bond_orders.get((b, a), 1))
+			bo = self._bond_order(a, b)
 			ring_at.setdefault(a, []).append((d, bo))
 			ring_at.setdefault(b, []).append((d, bo))
 		seen_d = set()
@@ -3206,8 +3254,7 @@ class Molecule():
 				ch_list = children[node]
 				for i in range(len(ch_list) - 1, -1, -1):
 					c = ch_list[i]
-					bo = self._bond_orders.get((node, c),
-						self._bond_orders.get((c, node), 1))
+					bo = self._bond_order(node, c)
 					bsym = '-'
 					if bo == 2: bsym = '='
 					elif bo == 3: bsym = '#'
@@ -3223,6 +3270,100 @@ class Molecule():
 			parts.append(''.join(out))
 		result = '.'.join(parts)
 		self.data['SMARTS'] = result; return result
+	def CalcSMIRKS(self):
+		'''
+		Derive an atom-mapped SMIRKS-style string
+		Arguments:
+		----------
+			No arguments taken
+		Returns:
+		--------
+			str: SMIRKS representation (also written to self.data['SMIRKS'])
+		'''
+		ANUM = {k: i+1 for i, k in enumerate(self.masses)}
+		HYB_SYM = {'sp': '^1', 'sp2': '^2', 'sp3': '^3'}
+		A = self.data['Atoms']; B = self.data['Bonds']
+		heavy = sorted(i for i, v in A.items() if v[1] != 'H')
+		if not heavy: self.data['SMIRKS'] = ''; return ''
+		hs = set(heavy)
+		adj = {i: [j for j in B.get(i, []) if j in hs]
+			for i in heavy}
+		visited = set(); parent = {}
+		children = {i: [] for i in heavy}; roots = []
+		for s in heavy:
+			if s in visited: continue
+			roots.append(s); visited.add(s); stk = [s]
+			while stk:
+				node = stk[-1]; pushed = False
+				for nb in adj[node]:
+					if nb not in visited:
+						visited.add(nb); parent[nb] = node
+						children[node].append(nb)
+						stk.append(nb); pushed = True; break
+				if not pushed: stk.pop()
+		te = {frozenset((n, p)) for n, p in parent.items()}
+		back = [(i, j) for i in heavy for j in adj[i]
+			if i < j and frozenset((i, j)) not in te]
+		ring_at = {}
+		for d, (a, b) in enumerate(back, 1):
+			bo = self._bond_order(a, b)
+			ring_at.setdefault(a, []).append((d, bo))
+			ring_at.setdefault(b, []).append((d, bo))
+		seen_d = set()
+		parts = []
+		for root in roots:
+			out = []
+			stack = [('V', root)]
+			while stack:
+				op, arg = stack.pop()
+				if op == 'S':
+					out.append(arg)
+					continue
+				node = arg
+				v = A[node]
+				el = v[1]; an = ANUM.get(el, 0)
+				hyb = v[3] if len(v) > 3 else 'sp3'
+				xn = len(B.get(node, []))
+				hn = sum(1 for nb in B.get(node, [])
+					if A[nb][1] == 'H')
+				q = self._formal_charges.get(node, 0)
+				tok = f'[#{an}' if an else f'[{el}'
+				sym = HYB_SYM.get(hyb, '')
+				if sym: tok += sym
+				tok += f'X{xn}'
+				if hn: tok += f'H{hn}'
+				if q > 0:   tok += '+' + (str(q) if q > 1 else '')
+				elif q < 0: tok += '-' + (str(-q) if -q > 1 else '')
+				else:       tok += '+0'
+				tok += f':{node + 1}]'
+				for d, bo in ring_at.get(node, []):
+					if d not in seen_d:
+						if bo == 1:     tok += '-'
+						elif bo == 2:   tok += '='
+						elif bo == 3:   tok += '#'
+						elif bo == 1.5: tok += ':'
+					seen_d.add(d)
+					tok += str(d) if d < 10 else f'%{d:02d}'
+				out.append(tok)
+				ch_list = children[node]
+				for i in range(len(ch_list) - 1, -1, -1):
+					c = ch_list[i]
+					bo = self._bond_order(node, c)
+					bsym = '-'
+					if bo == 2:     bsym = '='
+					elif bo == 3:   bsym = '#'
+					elif bo == 1.5: bsym = ':'
+					if i < len(ch_list) - 1:
+						stack.append(('S', ')'))
+						stack.append(('V', c))
+						stack.append(('S', bsym))
+						stack.append(('S', '('))
+					else:
+						stack.append(('V', c))
+						stack.append(('S', bsym))
+			parts.append(''.join(out))
+		result = '.'.join(parts)
+		self.data['SMIRKS'] = result; return result
 	def CalcRg(self):
 		'''
 		Compute the mass-weighted radius of gyration of the molecule
@@ -3270,10 +3411,9 @@ class Molecule():
 		A = self.data['Atoms']; B = self.data['Bonds']
 		ids = sorted(A.keys())
 		if not ids: return
-		mbo = {i: 0 for i in ids}
-		for (a, b), bo in self._bond_orders.items():
-			if a in mbo and bo > mbo[a]: mbo[a] = bo
-			if b in mbo and bo > mbo[b]: mbo[b] = bo
+		mbo = {i: max(
+			self.data['BondOrders'].get(i, []), default=0)
+			for i in ids}
 		atype = {}
 		for i in ids:
 			el = A[i][1].upper()
@@ -3403,6 +3543,19 @@ class Molecule():
 			list: element symbols in global atom index order
 		'''
 		return [v[1] for v in self.data['Atoms'].values()]
+	def GetAtomHybridisation(self):
+		'''
+		List every atom's hybridisation across the molecule
+		Arguments:
+		----------
+			No arguments taken
+		Returns:
+		--------
+			list: atom hybridisation
+		'''
+		idx = 3
+		ids = sorted(self.data['Atoms'].keys())
+		return [self.data['Atoms'][i][idx] for i in ids]
 	def GetAtomBonds(self, idx):
 		'''
 		List the PDB names of every atom bonded to a given atom
@@ -3575,8 +3728,7 @@ class Molecule():
 				if j not in hs or j <= i or (i, j) in drawn: continue
 				drawn.add((i, j))
 				x0, y0 = spx[i], spy[i]; x1, y1 = spx[j], spy[j]
-				bo = self._bond_orders.get((i, j),
-					self._bond_orders.get((j, i), 1))
+				bo = self._bond_order(i, j)
 				bx, by = x1 - x0, y1 - y0
 				mg = math.sqrt(bx * bx + by * by)
 				if mg > 0: pdx, pdy = -by / mg, bx / mg

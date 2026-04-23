@@ -185,12 +185,15 @@ Each class have similar methods and data structure, but with slight differences 
 | `m.GetAtomCoord(3)`                          | Get the XYZ coordinates of an atom given its index. Example: atom at index `3` |
 | `p.GetAtomList(PDB=False)`                   | Get a list of all atom element names for the entire structure. Use `PDB=True` for PDB-formatted names |
 | `m.GetAtomList()`                            | Get a list of all atom element names for the entire structure |
+| `p.GetAtomHybridisation()`                   | Get a list of all atom hybridisations for the entire structure |
+| `m.GetAtomHybridisation()`                   | Get a list of all atom hybridisations for the entire structure |
 | `p.GetAtomIdx(3, 'N')`                       | Get the atom index in `p.data['Coordinates']` from its name within a monomer. This is the opposite of `p.GetAtomCoord(3, 'N')` |
 | `p.GetIdentity(0, 'Atom')`                   | Identify the PDB name of an atom, or an amino acid, or a nucleotide by its index. Example `p.GetIdentity(5, 'Atom')` or `p.GetIdentity(5, 'amino acid')` or `p.GetIdentity(5, 'nucleotide')`. Also, specifically just for atoms, you are return its partial charge using `p.GetIdentity(3, 'Atom', charge=True)` |
 | `p.GetInfo()`                                | Print a formatted summary of the structure's information |
 | `m.GetInfo()`                                | Print a formatted summary of the structure's information and a graphical representation of the molecule |
 | `m.CalcSMILES()`                             | Calculate the SMILES representation of a molecule and add it to `m.data['SMILES']` |
 | `m.CalcSMARTS()`                             | Calculate the SMARTS representation of a molecule and add it to `m.data['SMARTS']` |
+| `m.CalcSMIRKS()`                             | Calculate an atom-mapped SMIRKS-style string with hybridisation, connectivity, H-count, and formal-charge tags on each heavy atom. Atoms carry a 1-based atom-map index ':N' where N is the atom's index+1. Hybridization symbol follows SMARTS convention (^1, ^2, ^3 for sp/sp2/sp3; omitted for 's') |
 | `p.CalcMass()`                               | Calculates the entire molecular mass of a molecule (all chains) in Da (Daltons), updates the value of p.data['Mass'] |
 | `m.CalcMass()`                               | Calculates the entire molecular mass of a molecule |
 | `p.CalcSize()`                               | Calculates the length of each chain in a structure, updates the value of p.data['Size']. You can get the length of each chain using `p.data['Size'][CHAIN]` |
@@ -220,7 +223,7 @@ These are standalone tools (not Pose() class methods) and thus are called on the
 
 | Function                                                           | Description |
 |--------------------------------------------------------------------|-------------|
-| `Parameterise('MSE.cif', 'J', 'MSE')`                              | To add a new amino acid to the `database.json` library. Takes `filename`, single letter unicode, three letter tricode |
+| `Parameterise('MSE.cif', 'J', 'MSE')`                              | Add add a new amino acid to the `database.json` library. Takes `filename`, single letter unicode, three letter tricode. Hybridisation for every atom is inferred automatically from the bond graph |
 | `RMSD(pose1, pose2, alg='align', export='aligned.pdb')`            | Computes the Root Mean Squared Deviation between two protein or nucleic acids `Pose` structures using Cα (alpha-carbon) atoms for proteins, or C1 atoms for nulceic acids. Returns the RMSD in (Å). Supported algorithms: `'align'` (sequence alignment + iterative Kabsch), `'kabsch'` (SVD-based optimal rotation), `'quaternion'` (eigenvalue-based optimal rotation), or `'simple'` (translation only, no rotation). Can export the aligned structures to `aligned_1.pdb, aligned_2.pdb` |
 | `BLAST(sequence1, sequence2)`                                      | Perform pairwise protein or nucleic acid sequence alignment using the Smith-Waterman local alignment algorithm with BLOSUM62 substitution scores, matching the statistical model used by NCBI BLASTP. Returns: `(alignment_string, percent_identity, e_value)` |
 | `MSA([sequence1, sequence2, sequence3....])`                       | Aligns three or more protein or nucleic acid sequences using a ClustalW-like progressive alignment strategy, pairwise distances are computed with `BLAST()`. Returns: `(alignment_string, aligned_list, conservation_list, entropy_list, pssm_array, dca_array)` where `conservation_list` is a per-column score in [0, 1] (1 = fully conserved), `entropy_list` is per-column Shannon entropy in bits, `pssm_array` is a `(L, 20)` log-odds matrix in BLOSUM62 column order (`ARNDCQEGHILKMFPSTWYV`), and `dca_array` is an `(L, L)` APC-corrected mean-field DCA direct-information matrix |
@@ -270,7 +273,7 @@ p.Build('MSLESNRGI', chain='B', fmt='protein') # Add a second chain
 p.data['FASTA']              # Sequence string
 p.data['Size']               # Number of residues (int)
 p.data['Amino Acids'][0]     # [letter, chain, bb_indices, sc_indices, secondary structure, tricode, SASA]
-p.data['Atoms'][0]           # [pdb_name, element, charge, occupancy, temp_factor]
+p.data['Atoms'][0]           # [pdb_name, element, charge, occupancy, temp_factor, hybridisation]
 p.data['Coordinates']        # Numpy array, shape (N, 3)
 p.data['Bonds']              # Adjacency list: {atom_index: [bonded_atom_indices]}
 ```
@@ -282,7 +285,7 @@ for idx, aa in p.data['Amino Acids'].items():
     print(f'Residue {idx}: {tricode} ({symbol}), SS={ss}')
 
 for idx, atom in p.data['Atoms'].items():
-    name, element, charge, occupancy, temp = atom
+    name, element, charge, occupancy, temp, hybrid = atom
     xyz = p.data['Coordinates'][idx]
     print(f'Atom {idx}: {name} ({element}) at {xyz}')
 ```
@@ -337,8 +340,9 @@ This `p.data` structure from the `Pose()` class represents proteins, DNA and RNA
 | `SS`          | Dict        | One-letter amino acid secondary structure asignments for each chain |
 | `Nucleotides` | Dict        | `{index: [symbol, chain, bb_atom_indices, sc_atom_indices, tricode]}`, **zero-based indexing** |
 | `Amino Acids` | Dict        | `{index: [symbol, chain, bb_atom_indices, sc_atom_indices, secondary_struct, tricode, SASA]}`, **zero-based indexing** |
-| `Atoms`       | Dict        | `{atom_index: [pdb_name, element, partial charge, occupancy, temp_factor]}`, **zero-based indexing** |
+| `Atoms`       | Dict        | `{atom_index: [pdb_name, element, partial charge, occupancy, temp_factor, hybridisation]}`, **zero-based indexing** |
 | `Bonds`       | Dict        | Bond graph as adjacency list: `{atom_index: [bonded_atom_indices]}` |
+| `BondOrders`  | Dict        | Bond order as an adjacency list, 1 = single bonds, 1.5 = aromatic resonance partial-double bond, 2 = double bonds, 3 = triple bonds |
 | `Coordinates` | NumPy array | Shape `(N, 3)`, Cartesian XYZ for each atom |
 
 This `m.data` structure from the `Molecule()` class represents small organic molecules:
@@ -351,10 +355,16 @@ This `m.data` structure from the `Molecule()` class represents small organic mol
 | `Mass`        | Float       | Molecule's molecular mass |
 | `SMILES`      | Str         | The SMILES representation of the molecule as a string |
 | `SMARTS`      | Str         | The SMARTS representation of the molecile as a string |
+| `SMIRKS`      | Str         | An atom-mapped SMIRKS-style string that contain hybridisation, formal-charge, and other info about the molecule |
 | 'Formula'     | Str         | The molecular formula of the molecule |
-| `Atoms`       | Dict        | `{atom_index: [pdb_name, element, partial charge]}`, **zero-based indexing** |
+| `Atoms`       | Dict        | `{atom_index: [pdb_name, element, partial charge, hybridisation]}`, **zero-based indexing** |
 | `Bonds`       | Dict        | Bond graph as adjacency list: `{atom_index: [bonded_atom_indices]}` |
+| `BondOrders`  | Dict        | Bond order as an adjacency list, 1 = single bonds, 1.5 = aromatic resonance partial-double bond, 2 = double bonds, 3 = triple bonds |
 | `Coordinates` | NumPy array | Shape `(N, 3)`, Cartesian XYZ for each atom |
+
+> The `hybridisation` field is one of `'s'` (hydrogens), `'sp'`, `'sp2'`, or `'sp3'`.
+
+> Each atom's hybridisation is stored as the last element of its atom record: `p.data['Atoms'][i][5]` for `Pose()`, `m.data['Atoms'][i][3]` for `Molecule()`.
 
 ---
 
@@ -367,11 +377,11 @@ This information resides in `database['Amino Acids'][AMINO_ACID_UNICODE or BACKB
 | `Vectors`                             | List of lists  | The position of each atom relative to the N of the backbone. If the N coorinate is X, Y, Z = 0, 0, 0 you will get these vectors. To find the correct vectors position the N at coordinate X, Y, Z = 0, 0, 0, and use the corresponding coordinates of each atom |
 | `Tricode`                             | String         | The three letter code for each amino acid |
 | `Fused`                               | Boolian        | True = the sidechain is fused to the backbone |
-| `Backbone Atoms` or `Sidechain Atoms` | List of lists  | The atom identity of each coordinate point, for example: first coordinate point is the nitrogen with symbol N and PDB entry N, next atom is the hydrogen that is bonded to the nitrogen with symbol H and PDB entry 1H etc... Unlike the PDB where all hydrogens are collected after the amino acid, here each atom's hydrogens come right after it. This makes for easier matrix operations. Order is index [0] = PDB atom's name, index [1] = element, index [2] = partial charge, index [3] = occupancy, index [4] = temperature factor |
+| `Backbone Atoms` or `Sidechain Atoms` | List of lists  | The atom identity of each coordinate point, for example: first coordinate point is the nitrogen with symbol N and PDB entry N, next atom is the hydrogen that is bonded to the nitrogen with symbol H and PDB entry 1H etc... Unlike the PDB where all hydrogens are collected after the amino acid, here each atom's hydrogens come right after it. This makes for easier matrix operations. Order is index [0] = PDB atom's name, index [1] = element, index [2] = partial charge, index [3] = occupancy, index [4] = temperature factor, index [5] = hybridisation |
 | `Chi Angle Atoms`                     | List of lists  | The atoms in the sidechain that are contributing to a chi angle |
 | `Bonds`                               | Dictionary     | The bond graph as an adjacency list |
-| `BondOrderss`                         | Dictionary     | The bond order graph as an adjacency list, 1 = single bonds, 1.5 = aromatic resonance partial-double bond, 2 = double bonds, 3 = triple bonds |
-| `BBDEP`                               | Dictionary     | The sin/cos×10000 grids derived from the Dunbrack BBDEP2010 library (CC-BY-4.0), at each 10° (φ, ψ) bin the highest-probability rotamer's χ dihedrals were encoded as (sin χ, cos χ) pairs on a 36×36 grid. At runtime, tools.Rotamers() uses residue name, its φ dihedral, and its ψ dihedral and bilinearly interpolates the four neighbouring grid cells and recovers each χ via atan2(sin_interp, cos_interp). The non-canonical BBDEP (LYX, MSE, PYL, SEC, TRF, TSO) that have no Dunbrack entries were borrowed verbatim from the closest canonical analog whose χ definitions match (MSE↔MET, SEC↔CYS, TRF↔TRP, first χ of LYX/PYL from LYS, first chis of TSO from TYR). Any extra chi angles beyond what the analog provides are filled with a "trans pad" (chi = 180° everywhere, encoded as sin=0, cos=−10000), a deliberate and explicit placeholder that downstream MD minimization will relax into the correct local minimum |
+| `BondOrders`                          | Dictionary     | The bond order graph as an adjacency list, 1 = single bonds, 1.5 = aromatic resonance partial-double bond, 2 = double bonds, 3 = triple bonds |
+| `BBDEP`                               | Dictionary     | The sin/cos×10000 grids, canonical amino acids were derived from the Dunbrack BBDEP2010 library (CC-BY-4.0), non-canonical amino acids were calculated, at each 10° (φ, ψ) bin the highest-probability rotamer's χ dihedrals were encoded as (sin χ, cos χ) pairs on a 36×36 grid. At runtime, tools.Rotamers() uses residue name, its φ dihedral, and its ψ dihedral and bilinearly interpolates the four neighbouring grid cells and recovers each χ via atan2(sin_interp, cos_interp). The non-canonical BBDEP (LYX, MSE, PYL, SEC, TRF, TSO) that have no Dunbrack entries were borrowed verbatim from the closest canonical analog whose χ definitions match (MSE↔MET, SEC↔CYS, TRF↔TRP, first χ of LYX/PYL from LYS, first chis of TSO from TYR). Any extra chi angles beyond what the analog provides are filled with a "trans pad" (chi = 180° everywhere, encoded as sin=0, cos=−10000), a deliberate and explicit placeholder that downstream MD minimization will relax into the correct local minimum |
 
 ## Description of nucleotides in database.json:
 
@@ -382,11 +392,11 @@ This information resides in `database['Nucleotides'][NUCEOTIDE_TRICODE]`
 | `Vectors`         | List of lists  | The position of each atom relative to the N of the backbone. If the N coorinate is X, Y, Z = 0, 0, 0 you will get these vectors. To find the correct vectors position the N at coordinate X, Y, Z = 0, 0, 0, and use the corresponding coordinates of each atom |
 | `Tricode`         | String         | The three letter code for each nucleotide |
 | `Type`            | String         | Identify as `DNA` or `RNA` |
-| `Backbone Atoms`  | List of lists  | The atom identity of each backbone coordinate point, first coordinate point is the phosphorus with symbol P and PDB entry P, next atom is the oxygen atom that is bonded to the phosphorus with symbol O and PDB entry OP1 etc... |
-| `Base Atoms`      | List of lists  | The atom identity of each nistrogen base coordinate point |
+| `Backbone Atoms`  | List of lists  | The atom identity of each backbone coordinate point, first coordinate point is the phosphorus with symbol P and PDB entry P, next atom is the oxygen atom that is bonded to the phosphorus with symbol O and PDB entry OP1 etc... Order is index [0] = PDB atom's name, index [1] = element, index [2] = partial charge, index [3] = occupancy, index [4] = temperature factor, index [5] = hybridisation |
+| `Base Atoms`      | List of lists  | The atom identity of each nitrogen base coordinate point. Order is index [0] = PDB atom's name, index [1] = element, index [2] = partial charge, index [3] = occupancy, index [4] = temperature factor, index [5] = hybridisation |
 | `Chi Angle Atoms` | List of lists  | The atoms in the sidechain that are contributing to a chi angle |
 | `Bonds`           | Dictionary     | The bond graph as an adjacency list |
-| `BondOrderss`     | Dictionary     | The bond order graph as an adjacency list, 1 = single bonds, 1.5 = aromatic resonance partial-double bond, 2 = double bonds, 3 = triple bonds |
+| `BondOrders`      | Dictionary     | The bond order graph as an adjacency list, 1 = single bonds, 1.5 = aromatic resonance partial-double bond, 2 = double bonds, 3 = triple bonds |
 
 ---
 
