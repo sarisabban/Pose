@@ -1007,31 +1007,51 @@ class Pose():
 		ids    = sorted(atoms.keys())
 		id_map = {ai: ii for ii, ai in enumerate(ids)}
 		n      = len(ids)
-		c      = coords[np.array(ids)]
+		c      = coords[np.array(ids)].astype(np.float32)
 		radii  = np.array([
-		VDW.get(atoms[i][1].upper(),DEFAULT_VDW)+probe_radius for i in ids])
+		VDW.get(atoms[i][1].upper(),DEFAULT_VDW)+probe_radius for i in ids],
+			dtype=np.float32)
 		golden = (1 + np.sqrt(5)) / 2
 		pts    = np.arange(n_points)
 		theta  = np.arccos(1 - 2 * (pts + 0.5) / n_points)
 		phi    = 2 * np.pi * pts / golden
 		st     = np.sin(theta)
-		sph    = np.column_stack([st*np.cos(phi),st*np.sin(phi),np.cos(theta)])
-		dm     = np.sqrt(((c[:, None, :] - c[None, :, :])**2).sum(2))
-		atom_sasa = np.zeros(n)
-		for ii in range(n):
-			ri       = radii[ii]
-			test_pts = c[ii] + ri * sph
-			nbr_mask = (dm[ii] < ri + radii) & (dm[ii] > 0)
-			nbrs     = np.where(nbr_mask)[0]
-			if len(nbrs) == 0:
-				atom_sasa[ii] = 4 * np.pi * ri**2
-				continue
-			diff_pts = (test_pts[:, None, :] - c[nbrs][None, :, :])
-			dist_sq  = (diff_pts**2).sum(2)
-			r_sq     = radii[nbrs]**2
-			buried   = (dist_sq < r_sq[None, :]).any(axis=1)
-			n_exp    = int((~buried).sum())
-			atom_sasa[ii] = (n_exp / n_points * 4 * np.pi * ri**2)
+		sph    = np.column_stack(
+			[st*np.cos(phi),st*np.sin(phi),np.cos(theta)]).astype(np.float32)
+		dx = c[:, None, 0] - c[None, :, 0]
+		dy = c[:, None, 1] - c[None, :, 1]
+		dz = c[:, None, 2] - c[None, :, 2]
+		dm_sq = dx*dx + dy*dy + dz*dz
+		reach_sq = (radii[:, None] + radii[None, :]) ** 2
+		nbr_mask = (dm_sq < reach_sq) & (dm_sq > 0)
+		i_idx, j_idx = np.where(nbr_mask)
+		M = i_idx.size
+		buried = np.zeros((n, n_points), dtype=bool)
+		if M > 0:
+			order    = np.argsort(i_idx, kind='stable')
+			i_sorted = i_idx[order]
+			j_sorted = j_idx[order]
+			buried_flat = np.empty((M, n_points), dtype=bool)
+			CHUNK = max(1, (128 * 1024 * 1024) // (n_points * 3 * 4))
+			txp = c[:, 0:1] + radii[:, None] * sph[None, :, 0]
+			typ = c[:, 1:2] + radii[:, None] * sph[None, :, 1]
+			tzp = c[:, 2:3] + radii[:, None] * sph[None, :, 2]
+			for s in range(0, M, CHUNK):
+				e  = min(s + CHUNK, M)
+				ic = i_sorted[s:e]
+				jc = j_sorted[s:e]
+				ddx = txp[ic] - c[jc, 0:1]
+				ddy = typ[ic] - c[jc, 1:2]
+				ddz = tzp[ic] - c[jc, 2:3]
+				dist_sq = ddx*ddx + ddy*ddy + ddz*ddz
+				buried_flat[s:e] = dist_sq < (radii[jc] ** 2)[:, None]
+			seg_starts = np.concatenate((
+				[0], np.where(np.diff(i_sorted) != 0)[0] + 1))
+			per_atom = np.maximum.reduceat(
+				buried_flat.view(np.uint8), seg_starts, axis=0)
+			buried[i_sorted[seg_starts]] = per_atom.astype(bool)
+		atom_sasa = ((n_points - np.count_nonzero(buried, axis=1))
+			/ n_points) * 4 * np.pi * radii ** 2
 		for aa_idx, aa_info in self.data['Amino Acids'].items():
 			all_atoms = aa_info[2] + aa_info[3]
 			sasa = sum(atom_sasa[id_map[a]] for a in all_atoms if a in id_map)
