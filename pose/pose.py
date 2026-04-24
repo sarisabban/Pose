@@ -1497,12 +1497,12 @@ class Pose():
 		for row in rows: residues[(row[2], row[3], row[10])].append(row)
 		resnames = {a[0][1] for a in residues.values()}
 		aa = {v['Tricode'] for v in self.aminoacids.values() if 'Tricode' in v}
-		if resnames & aa: mol = 'Protein'
+		aa_D = {'D' + t[1:] for t in aa}
+		if resnames & (aa | aa_D): mol = 'Protein'
 		elif 'U' in resnames: mol = 'RNA'
 		elif resnames & {'DT', 'DA', 'DG', 'DC', 'T'}: mol = 'DNA'
 		elif resnames & {'A', 'G', 'C'}: mol = 'RNA'
-		aa_tri = \
-			{v['Tricode'] for v in self.aminoacids.values() if 'Tricode' in v}
+		aa_tri = aa | aa_D
 		has_aa = bool(resnames & aa_tri)
 		nuc_names = {r for r in resnames
 			if r in self.nucleotides
@@ -1536,6 +1536,20 @@ class Pose():
 				sym = next((k for k, v in
 					self.aminoacids.items()
 					if v['Tricode'] == tri), None)
+				is_D = False
+				if sym is None:
+					cand = [k for k, v in self.aminoacids.items()
+						if 'Tricode' in v
+						and 'D' + v['Tricode'][1:] == tri]
+					if cand:
+						is_D = True
+						if len(cand) > 1:
+							obs = {r[0] for r in uniq}
+							sym = max(cand, key=lambda c: len(obs & {
+								a[0] for a in
+								self.aminoacids[c].get('Sidechain Atoms', [])}))
+						else:
+							sym = cand[0]
 				if sym is None: continue
 				hm = {v[0]: v[5] for v in (
 					self.aminoacids[sym].get('Sidechain Atoms',[]) +
@@ -1550,7 +1564,7 @@ class Pose():
 					At[count] = [r[0],r[9],0.0,r[7],r[8],hy]
 					(BB if r[0] in self.probbatoms else SC).append(count)
 					count += 1
-				Am[ai] = [sym, ch, BB, SC, 'L', tri, 0]
+				Am[ai] = [sym.lower() if is_D else sym, ch, BB, SC, 'L', tri, 0]
 				ai += 1
 			Co = np.array(Co)
 			if not Am: raise Exception(f'No recognized residues in {filename}')
@@ -1605,7 +1619,7 @@ class Pose():
 				if pos == 0: bb = 'Backbone start'
 				elif pos == len(cr)-1: bb = 'Backbone end'
 				else: bb = 'Backbone middle'
-				sym = Am[i][0]
+				sym = Am[i][0].upper()
 				aa_db_entry = self.aminoacids[sym]
 				bb_entry = self.aminoacids[bb]
 				res_atoms = Am[i][2] + Am[i][3]
