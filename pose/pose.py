@@ -839,11 +839,7 @@ class Pose():
 		for i in range(N):
 			if tricodes[i] == 'PRO': continue
 			if i == 0 or chains[i] != chains[i-1]: continue
-			if 'H' in has_atom[i]:
-				H_pos[i] = H_atom_xyz[i]
-			elif '1H' in has_atom[i]:
-				H_pos[i] = one_H_xyz[i]
-			elif ('N' in has_atom[i]
+			if ('N' in has_atom[i]
 			and 'C' in has_atom[i-1]
 			and 'O' in has_atom[i-1]):
 				Ni = N_xyz[i]
@@ -960,14 +956,20 @@ class Pose():
 			cos_k = max(-1.0, min(1.0, cos_k))
 			kappa = math.acos(cos_k) * 180.0 / math.pi
 			if kappa >= 70.0: ss[i] = 'S'
-		PHI_LO, PHI_HI = -104.0, -46.0
-		PSI_LO, PSI_HI =  116.0, 174.0
+		PHI_LO_L, PHI_HI_L = -104.0, -46.0
+		PSI_LO_L, PSI_HI_L =  116.0, 174.0
 		ppii = [False] * N
 		for i in range(N):
 			if ss[i] != 'L': continue
 			phi = self.GetDihedral(i, 'PHI')
 			psi = self.GetDihedral(i, 'PSI')
-			ppii[i] = PHI_LO <= phi <= PHI_HI and PSI_LO <= psi <= PSI_HI
+			if AAs[i][0].islower():
+				lo_phi, hi_phi = -PHI_HI_L, -PHI_LO_L
+				lo_psi, hi_psi = -PSI_HI_L, -PSI_LO_L
+			else:
+				lo_phi, hi_phi = PHI_LO_L, PHI_HI_L
+				lo_psi, hi_psi = PSI_LO_L, PSI_HI_L
+			ppii[i] = lo_phi <= phi <= hi_phi and lo_psi <= psi <= hi_psi
 		for i in range(N - 2):
 			if ppii[i] and ppii[i + 1] and ppii[i + 2]:
 				for k in range(i, i + 3):
@@ -2171,10 +2173,6 @@ class Pose():
 					else:
 						local = F_new @ (coords[ai] - ori_new)
 						coords[ai] = on + F_orig_inv @ local
-			self.data['Coordinates'] = coords
-			self.CalcCharge()
-			self.CalcDSSP()
-			self.CalcSASA()
 			if mirror:
 				self.data['Coordinates'] *= [1, 1, -1]
 				N2 = len(self.data['Amino Acids'])
@@ -2188,6 +2186,10 @@ class Pose():
 					else:
 						aa[0] = sym.upper()
 						aa[5] = self.aminoacids[sym.upper()]['Tricode']
+			self.data['Coordinates'] = coords
+			self.CalcCharge()
+			self.CalcSASA()
+			self.CalcDSSP()
 		elif mol in ('DNA', 'RNA'):
 			fmt = self.data['Type']
 			nts = self.data['Nucleotides']
