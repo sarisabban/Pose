@@ -104,6 +104,35 @@ p.Build('ATGCGTACGTTCCGGCAGACGT', chain='A', fmt='DNA')
 p.GetInfo()
 ```
 
+**OpenMM plugin:**
+```python
+from openmm import *
+from openmm.app import *
+from openmm.unit import *
+from sys import stdout
+
+p = Pose()
+p.Import('1YN3.pdb', chain='A')
+
+pdb = PDBFile(io.StringIO(p.Export(fmt='PDB')))        # <--- The plugin
+forcefield = ForceField('amber99sb.xml', 'tip3p.xml')
+modeller = Modeller(pdb.topology, pdb.positions)
+modeller.addHydrogens(forcefield)
+modeller.addSolvent(forcefield, padding=1*nanometer)
+pos = np.array(modeller.positions.value_in_unit(nanometer))
+box = np.array(modeller.topology.getPeriodicBoxVectors().value_in_unit(nanometer))
+shift = 0.5*(box[0]+box[1]+box[2]) - 0.5*(pos.min(axis=0)+pos.max(axis=0))
+modeller.positions = [Vec3(*(p+shift)) for p in pos]*nanometer
+system = forcefield.createSystem(modeller.topology, nonbondedMethod=PME, nonbondedCutoff=1*nanometer, constraints=HBonds)
+integrator = LangevinIntegrator(300*kelvin, 1/picosecond, 0.002*picoseconds)
+simulation = Simulation(modeller.topology, system, integrator)
+simulation.context.setPositions(modeller.positions)
+simulation.minimizeEnergy()
+simulation.reporters.append(PDBReporter('output.pdb', 1000))
+simulation.reporters.append(StateDataReporter(stdout, 1000, step=True, potentialEnergy=True, temperature=True))
+simulation.step(10000)
+```
+
 **D-amino acids** — use lowercase letters:
 Uppercase sequence letters build L-amino acids (natural form). Lowercase builds D-amino acids (mirror images). Mixed sequences are fully supported.
 ```python
@@ -164,8 +193,8 @@ Each class have similar methods and data structure, but with slight differences 
 |------------------------------------------------------------|-------------|
 | `p.Import(filename='1YN3.pdb', chain=['A', 'B'], model=1)` | Imports a structure from a PDB or mmCIF file and constructs the `p.data` object. Can import a protein, DNA, or RNA structure. `chain` accepts a single chain ID (`'A'`), a list of chains (`['A', 'B']`), or `None` to import all chains. `model` selects which model to import from multi-model files (e.g. NMR ensembles); defaults to `1`. For atoms with multiple conformers, the highest-occupancy conformer is kept. Cannot import a structure that is a mixture of proteins and nucleic acids in separate chains, import each macromolecule type as a separate pose |
 | `m.Import(filename='caffiene.sdf')`                        | Imports a structure from a PDB, SDF, mmCIF, MOL, or MOL2 files, or an RDKit block string and constructs the `m.data` object |
-| `p.Export('out.pdb')`                                      | Write the full structure, and all chains, to a PDB or mmCIF file |
-| `m.Export('out.sdf')`                                      | Write the full structure to a PDB, SDF, mmCIF, MOL, or MOL2 file |
+| `p.Export('out.pdb', fmt=None)`                            | Write the full structure, and all chains, to a PDB or mmCIF file. `fmt='PDB'` or `fmt='CIF'` will export the structure as a string and not a file (ideal to plug the structure to other libraries such as OpenMM) |
+| `m.Export('out.sdf', fmt=None)`                            | Write the full structure to a PDB, SDF, mmCIF, MOL, or MOL2 file. `fmt='PDB'` or `fmt='CIF'` or `'SDF'`/`'MOL'`/`'MOL2'` will export the structure as a string and not a file (ideal to plug the structure to other libraries such as OpenMM) |
 | `p.Build('MSLESNRGI', chain='A', fmt='protein')`           | Build a macromolecule from a one-letter sequence. For a polypeptide add the sequence and choose the format `fmt='Protein'`, uppercase = L-amino acids, lowercase = D-amino acids. For a nucleic acid add the sequence and choose the format `fmt='DNA'` or `fmt='RNA'`. You can add more chains by repeating the command with different chain `chain='A'` values. A structure can either be a protein, or a nucleic acid (DNA/RNA), it cannot be a mixture of the two |
 | `p.ReBuild(sequence=None, mirror=False, _mutate=None)`     | Rebuild the polypeptide or nucleic acid. Use `sequence='AGLMTSWVLVA'` to rebuild the structure with multiple bulk mutations on chain A. Use `sequence={'A':'MSLKLSTVVA', 'B':'ASLKSWFWVA'}` to perform mutations at multiple chains at the same time. Use `mirror=True` to rebuild a protein and convert L-amino acids → D-amino acids and D-amino acids → L-amino acids. Will add missing hydrogens. For DNA and RNA, the `sequence=''` length must match exactly the original sequence length, otherwise an error will be raised |
 | `p.Mutate(1, 'V'. fast=True)`                              | Mutate a single monomer. For proteins: `p.Mutate(1, 'V')` = residue 1 → L-Valine, `p.Mutate(1, 'v')` = residue 1 → D-Valine. For DNA: `p.Mutate(0, 'T')` = nucleotide 0 → Thymine. For RNA: `p.Mutate(0, 'U')` = nucleotide 0 → Uracil. For double-stranded nucleic acids, the complementary base is also updated automatically. The `fast=True` argument means the mutation is performed by vector addition without ensuring the stability of the backbone (also the `CalcDSSP(), CalcSASA, and CalcRg()` etc.. are not re-computed) so these needs to be called after the mutation, in return the mutation is very fast, ideal for large mutation simulations. If `fast=False` the mutated residue is added to the structure and the entire structure rebuilt using ReBuild(), this is more accurate but very slow for large simulations |
