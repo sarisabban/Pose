@@ -637,6 +637,354 @@ class Pose():
 		self.data['Coordinates'] = (
 			np.array(Co) if Co else np.zeros((0, 3)))
 		self._phosphobonds(nt_ch)
+	def _mutatefastprotein(self, index, residue):
+		'''
+		In-place single-residue sidechain swap, ~90x faster than Mutate()
+		Arguments:
+		----------
+			index:   Residue index to mutate
+			residue: One-letter amino acid code (uppercase=L, lowercase=D)
+		Returns:
+		--------
+			self.data updated in place with the new sidechain;
+			FASTA updated; backbone coordinates preserved exactly
+		'''
+		if self.data['Type'] != 'Protein':
+			raise Exception('MutateFast requires a protein pose')
+		is_dform = residue.islower()
+		new_sym = residue.upper()
+		aa_db = self.aminoacids
+		if (new_sym not in aa_db
+			or not isinstance(aa_db[new_sym], dict)
+			or 'Tricode' not in aa_db[new_sym]):
+			raise Exception(f"Unknown amino acid '{residue}'")
+		new_entry = aa_db[new_sym]
+		AAs = self.data['Amino Acids']
+		if index not in AAs:
+			raise Exception(f'Residue {index} not found')
+		info = AAs[index]
+		atoms_dict = self.data['Atoms']
+		coords = self.data['Coordinates']
+		bb_idx = info[2]
+		n_ai = next((a for a in bb_idx if atoms_dict[a][0] == 'N'), None)
+		ca_ai = next((a for a in bb_idx if atoms_dict[a][0] == 'CA'), None)
+		c_ai = next((a for a in bb_idx if atoms_dict[a][0] == 'C'), None)
+		h1_ai = next((a for a in bb_idx if atoms_dict[a][0] == '1H'), None)
+		if n_ai is None or ca_ai is None or c_ai is None:
+			raise Exception(
+				f'Residue {index} missing N/CA/C atom')
+		n_xyz = coords[n_ai].copy().astype(np.float64)
+		ca_xyz = coords[ca_ai].copy().astype(np.float64)
+		c_xyz = coords[c_ai].copy().astype(np.float64)
+		e1 = ca_xyz - n_xyz
+		e1 = e1 / np.linalg.norm(e1)
+		v = c_xyz - n_xyz
+		e2 = v - np.dot(v, e1) * e1
+		nm = np.linalg.norm(e2)
+		if nm < 1e-10:
+			raise Exception(
+				f'Degenerate N-CA-C at residue {index}')
+		e2 = e2 / nm
+		F_target = np.array([e1, e2, np.cross(e1, e2)])
+		sc_vectors = np.array(new_entry['Vectors'], dtype=np.float64)
+		if is_dform:
+			sc_vectors = sc_vectors.copy()
+			sc_vectors[:, 2] *= -1.0
+		new_sc_world = n_xyz + sc_vectors @ F_target
+		new_sc_records = new_entry['Sidechain Atoms']
+		new_is_fused = new_entry['Fused']
+		old_sym = info[0]
+		old_entry = aa_db[old_sym.upper()]
+		old_is_fused = old_entry['Fused']
+		need_add_1h = (not new_is_fused) and (h1_ai is None)
+		remove_1h = new_is_fused and (h1_ai is not None)
+		to_remove = list(info[3])
+		if remove_1h: to_remove.append(h1_ai)
+		to_remove_set = set(to_remove)
+		h1_world = None
+		h1_record = None
+		if need_add_1h:
+			bb_mid = aa_db['Backbone middle']
+			bb_atom_names = [a[0] for a in bb_mid['Backbone Atoms']]
+			h1_local = bb_atom_names.index('1H')
+			h1_vec = np.array(bb_mid['Vectors'][h1_local], dtype=np.float64)
+			h1_world = n_xyz + h1_vec @ F_target
+			h1_record = list(bb_mid['Backbone Atoms'][h1_local])
+		current_ids = sorted(atoms_dict.keys())
+		index_map = {}
+		cursor = 0
+		for oi in current_ids:
+			if oi in to_remove_set:
+				index_map[oi] = None
+			else:
+				index_map[oi] = cursor
+				cursor += 1
+		self._renumber_atoms(index_map)
+		Atoms_out = self.data['Atoms']
+		Bonds_out = self.data['Bonds']
+		BO_out = self.data['BondOrders']
+		new_n_ai = index_map[n_ai]
+		new_ca_ai = index_map[ca_ai]
+		next_idx = cursor
+		new_sc_global_idx = []
+		for k in range(len(new_sc_records)):
+			rec = list(new_sc_records[k])
+			Atoms_out[next_idx] = rec
+			new_sc_global_idx.append(next_idx)
+			next_idx += 1
+		extra_coords = [new_sc_world]
+		h1_gi = None
+		if need_add_1h:
+			h1_gi = next_idx
+			Atoms_out[h1_gi] = h1_record
+			extra_coords.append(h1_world[None, :])
+			next_idx += 1
+		add = np.vstack(extra_coords).astype(
+			self.data['Coordinates'].dtype)
+		self.data['Coordinates'] = np.vstack(
+			[self.data['Coordinates'], add])
+		db_bonds = new_entry['Bonds']
+		db_bos = new_entry['BondOrders']
+		def _resolve(idx):
+			if idx == -1: return new_ca_ai
+			if idx == -5: return new_n_ai
+			return new_sc_global_idx[idx]
+		for k_str, nbrs in db_bonds.items():
+			k = int(k_str)
+			src_gi = _resolve(k)
+			orders = db_bos.get(k_str, [1] * len(nbrs))
+			dst_list = Bonds_out.setdefault(src_gi, [])
+			ord_list = BO_out.setdefault(src_gi, [])
+			for nb_i, nb in enumerate(nbrs):
+				dst_list.append(_resolve(nb))
+				ord_list.append(
+					orders[nb_i] if nb_i < len(orders) else 1)
+		sc0_nbrs = db_bonds.get('0', [])
+		if new_sc_global_idx:
+			sc0_gi = new_sc_global_idx[0]
+			if -1 in sc0_nbrs:
+				Bonds_out.setdefault(new_ca_ai, []).append(sc0_gi)
+				BO_out.setdefault(new_ca_ai, []).append(1)
+			else:
+				Bonds_out.setdefault(sc0_gi, []).append(new_ca_ai)
+				BO_out.setdefault(sc0_gi, []).append(1)
+				Bonds_out.setdefault(new_ca_ai, []).append(sc0_gi)
+				BO_out.setdefault(new_ca_ai, []).append(1)
+		if need_add_1h:
+			Bonds_out[h1_gi] = [new_n_ai]
+			BO_out[h1_gi] = [1]
+			Bonds_out.setdefault(new_n_ai, []).append(h1_gi)
+			BO_out.setdefault(new_n_ai, []).append(1)
+		info = AAs[index]
+		info[0] = residue
+		info[3] = list(new_sc_global_idx)
+		tri = new_entry['Tricode']
+		info[5] = ('D' + tri[1:]) if is_dform else tri
+		if need_add_1h:
+			n_pos = info[2].index(new_n_ai)
+			info[2] = info[2][:n_pos+1] + [h1_gi] + info[2][n_pos+1:]
+		self.CalcFASTA()
+		self.CalcSize()
+	def _mutatefastnucleotides(self, index, base):
+		'''
+		In-place single-nucleotide base swap for DNA/RNA poses
+		Arguments:
+		----------
+			index: Nucleotide index to mutate
+			base:  Single-letter base (A/T/G/C for DNA, A/U/G/C
+				for RNA)
+		Returns:
+		--------
+			self.data updated in place with the new base atoms;
+			FASTA updated; sugar-phosphate backbone preserved exactly
+		'''
+		mol = self.data['Type']
+		if mol not in ('DNA', 'RNA'):
+			raise Exception(
+				'_mutatefastnucleotides requires a DNA or RNA pose')
+		new_sym = base.upper()
+		valid = ({'A', 'T', 'G', 'C'} if mol == 'DNA'
+			else {'A', 'U', 'G', 'C'})
+		if new_sym not in valid:
+			raise Exception(
+				f"Unknown {mol} base '{base}'. "
+				f"Supported: {sorted(valid)}")
+		nts = self.data['Nucleotides']
+		if index not in nts:
+			raise Exception(f'Nucleotide {index} not found')
+		chains = sorted(set(v[1] for v in nts.values()))
+		targets = [(index, new_sym)]
+		if len(chains) > 1:
+			N_per_chain = len(nts) // 2
+			if mol == 'DNA':
+				comp = {'A':'T', 'T':'A', 'G':'C', 'C':'G'}
+			else:
+				comp = {'A':'U', 'U':'A', 'G':'C', 'C':'G'}
+			bp_index = 2 * N_per_chain - 1 - index
+			if bp_index in nts and bp_index != index:
+				targets.append(
+					(bp_index, comp.get(new_sym, new_sym)))
+		for idx, sym in targets:
+			self._swap_one_base(idx, sym)
+		self.CalcFASTA()
+		self.CalcSize()
+	def _swap_one_base(self, index, new_sym):
+		'''
+		Swap a single nucleotide's base atoms in place using the
+		sugar O4'-C1'-C2' rigid-body frame as anchor.
+		'''
+		mol = self.data['Type']
+		db_key = ('D' + new_sym) if mol == 'DNA' else new_sym
+		new_entry = self.nucleotides[db_key]
+		info = self.data['Nucleotides'][index]
+		bb_idx = info[2]
+		base_idx = info[3]
+		atoms = self.data['Atoms']
+		coords = self.data['Coordinates']
+		name_to_global = {atoms[a][0]: a for a in bb_idx}
+		try:
+			o4p = name_to_global["O4'"]
+			c1p = name_to_global["C1'"]
+			c2p = name_to_global["C2'"]
+		except KeyError as e:
+			raise Exception(
+				f'Nucleotide {index} missing sugar anchor atom: {e}')
+		target_anchors = np.array([
+			coords[o4p].astype(np.float64),
+			coords[c1p].astype(np.float64),
+			coords[c2p].astype(np.float64)])
+		bb_atoms_new = new_entry['Backbone Atoms']
+		n_bb_new = len(bb_atoms_new)
+		bb_vecs_new = new_entry['Vectors'][:n_bb_new]
+		name_to_canon_idx = {a[0]: i for i, a in enumerate(bb_atoms_new)}
+		canon_anchors = np.array([
+			bb_vecs_new[name_to_canon_idx["O4'"]],
+			bb_vecs_new[name_to_canon_idx["C1'"]],
+			bb_vecs_new[name_to_canon_idx["C2'"]]],
+			dtype=np.float64)
+		def _frame(P):
+			a, b, c = P[0], P[1], P[2]
+			e1 = b - a
+			e1 = e1 / np.linalg.norm(e1)
+			v = c - a
+			e2 = v - np.dot(v, e1) * e1
+			nm = np.linalg.norm(e2)
+			if nm < 1e-10:
+				raise Exception(
+					f'Degenerate sugar frame at nucleotide {index}')
+			e2 = e2 / nm
+			return np.array([e1, e2, np.cross(e1, e2)])
+		F_canon = _frame(canon_anchors)
+		F_target = _frame(target_anchors)
+		canon_origin = canon_anchors[0]
+		target_origin = target_anchors[0]
+		base_atoms_new = new_entry['Base Atoms']
+		n_base_new = len(base_atoms_new)
+		base_vecs_new = np.array(
+			new_entry['Vectors'][n_bb_new:], dtype=np.float64)
+		local = (base_vecs_new - canon_origin) @ F_canon.T
+		new_base_world = target_origin + local @ F_target
+		to_remove = set(base_idx)
+		current_ids = sorted(atoms.keys())
+		index_map = {}
+		cursor = 0
+		for oi in current_ids:
+			if oi in to_remove:
+				index_map[oi] = None
+			else:
+				index_map[oi] = cursor
+				cursor += 1
+		self._renumber_atoms(index_map)
+		Atoms_out = self.data['Atoms']
+		Bonds_out = self.data['Bonds']
+		BO_out = self.data['BondOrders']
+		next_idx = cursor
+		new_base_global = []
+		for k in range(n_base_new):
+			rec = list(base_atoms_new[k])
+			Atoms_out[next_idx] = rec
+			new_base_global.append(next_idx)
+			next_idx += 1
+		self.data['Coordinates'] = np.vstack([
+			self.data['Coordinates'],
+			new_base_world.astype(self.data['Coordinates'].dtype)])
+		name_to_new_pose = {}
+		for db_i in range(n_bb_new):
+			nm = bb_atoms_new[db_i][0]
+			if nm in name_to_global:
+				name_to_new_pose[db_i] = index_map[name_to_global[nm]]
+		def _db_to_global(di):
+			if di < n_bb_new: return name_to_new_pose.get(di)
+			return new_base_global[di - n_bb_new]
+		db_bonds = new_entry['Bonds']
+		db_bos = new_entry['BondOrders']
+		for k_str, nbrs in db_bonds.items():
+			k = int(k_str)
+			if k < n_bb_new: continue
+			src_g = _db_to_global(k)
+			if src_g is None: continue
+			Bonds_out.setdefault(src_g, [])
+			BO_out.setdefault(src_g, [])
+			orders = db_bos.get(k_str, [1] * len(nbrs))
+			for nb_i, nb in enumerate(nbrs):
+				dst_g = _db_to_global(nb)
+				if dst_g is None: continue
+				Bonds_out[src_g].append(dst_g)
+				BO_out[src_g].append(orders[nb_i])
+				if nb < n_bb_new:
+					Bonds_out.setdefault(dst_g, []).append(src_g)
+					BO_out.setdefault(dst_g, []).append(orders[nb_i])
+		info = self.data['Nucleotides'][index]
+		info[0] = new_sym
+		info[3] = list(new_base_global)
+		info[4] = db_key
+	def _renumber_atoms(self, index_map):
+		'''
+		Remap every atom-index reference in self.data
+		Arguments:
+		----------
+			index_map: dict mapping each current atom index to its
+				new index, or None for deletion
+		Returns:
+		--------
+			self.data rewritten in place with the new atom numbering
+		'''
+		kept = {o: n for o, n in index_map.items() if n is not None}
+		new_n = max(kept.values()) + 1 if kept else 0
+		new_atoms = {}
+		for old_i, new_i in kept.items():
+			new_atoms[new_i] = self.data['Atoms'][old_i]
+		new_coords = np.zeros((new_n, 3), dtype=self.data['Coordinates'].dtype)
+		for old_i, new_i in kept.items():
+			new_coords[new_i] = self.data['Coordinates'][old_i]
+		new_bonds = {}
+		new_bo = {}
+		for old_i, nbrs in self.data['Bonds'].items():
+			new_i = index_map.get(old_i)
+			if new_i is None: continue
+			mapped_nbrs = []
+			mapped_orders = []
+			orders = self.data['BondOrders'].get(old_i, [])
+			for k, nb in enumerate(nbrs):
+				mnb = index_map.get(nb)
+				if mnb is None: continue
+				mapped_nbrs.append(mnb)
+				if k < len(orders): mapped_orders.append(orders[k])
+				else: mapped_orders.append(1)
+			new_bonds[new_i] = mapped_nbrs
+			new_bo[new_i] = mapped_orders
+		self.data['Atoms'] = new_atoms
+		self.data['Coordinates'] = new_coords
+		self.data['Bonds'] = new_bonds
+		self.data['BondOrders'] = new_bo
+		for section in ('Amino Acids', 'Nucleotides'):
+			entries = self.data.get(section)
+			if not entries: continue
+			for ri, info in entries.items():
+				info[2] = [index_map[a] for a in info[2]
+					if index_map.get(a) is not None]
+				info[3] = [index_map[a] for a in info[3]
+					if index_map.get(a) is not None]
 	def _update(self):
 		'''
 		Refresh cached pose properties after a structural change
@@ -2145,8 +2493,10 @@ class Pose():
 						f'match original '
 						f'{len(fasta[ch0])}')
 			orig_coords = {}
+			orig_letters = {}
 			for i in range(N):
 				info = AAs[i]
+				orig_letters[i] = info[0].upper()
 				for ai in info[2] + info[3]:
 					aname = self.data['Atoms'][ai][0]
 					orig_coords[(i,aname)] = self.data['Coordinates'][ai].copy()
@@ -2200,9 +2550,13 @@ class Pose():
 				e2 = e2 / nm
 				F_orig = np.array([e1, e2, np.cross(e1, e2)])
 				F_orig_inv = F_orig.T
+				is_mutated = (orig_letters.get(i) != AAs2[i][0].upper())
 				for ai in AAs2[i][2] + AAs2[i][3]:
 					aname = self.data['Atoms'][ai][0]
-					if (i, aname) in orig_coords:
+					can_preserve = (i, aname) in orig_coords
+					if is_mutated and aname not in self.probbatoms:
+						can_preserve = False
+					if can_preserve:
 						coords[ai] = orig_coords[(i, aname)]
 					else:
 						local = F_new @ (coords[ai] - ori_new)
@@ -2489,7 +2843,7 @@ class Pose():
 			raise Exception(
 				'No structure loaded. Call Import() first')
 		self._update()
-	def Mutate(self, index, residue):
+	def Mutate(self, index, residue, fast=True):
 		'''
 		Mutate a single residue or nucleotide to a new identity
 		Arguments:
@@ -2497,66 +2851,75 @@ class Pose():
 			index:   Residue or nucleotide index to mutate
 			residue: One-letter amino acid (uppercase=L, lowercase=D)
 				or one-letter nucleotide (A/T/G/C for DNA, A/U/G/C for RNA)
+			fast:    Called the _mutatefast() method instead (not use ReBuild())
 		Returns:
 		--------
 			self.data rebuilt with the mutated residue in place;
 			for duplex DNA/RNA the complementary base on the paired
 			chain is also updated
 		'''
-		mol = self.data['Type']
-		if mol == 'Protein':
-			ru = residue.upper()
-			valid_aa = {k for k in self.aminoacids
-				if 'Tricode' in self.aminoacids[k]
-				and not k.startswith('Backbone')}
-			if ru not in valid_aa:
-				raise Exception(
-					f"Unknown amino acid '{residue}'. "
-					f"Supported: {''.join(sorted(valid_aa))}")
-			AAs = self.data['Amino Acids']
-			if index not in AAs:
-				raise Exception(f'Residue {index} not found')
-			ch = AAs[index][1]
-			fasta = self.data['FASTA']
-			chain_idxs = [i for i in sorted(AAs) if AAs[i][1] == ch]
-			pos = chain_idxs.index(index)
-			seq = list(fasta[ch])
-			seq[pos] = residue
-			new_fasta = dict(fasta)
-			new_fasta[ch] = ''.join(seq)
-			self.ReBuild(sequence=new_fasta)
-		elif mol in ('DNA', 'RNA'):
-			valid = ({'A', 'T', 'G', 'C'} if mol == 'DNA'
-				else {'A', 'U', 'G', 'C'})
-			if residue.upper() not in valid:
-				raise Exception(
-					f"Unknown {mol} base '{residue}'. "
-					f"Supported: {sorted(valid)}")
-			nts = self.data['Nucleotides']
-			if index not in nts:
-				raise Exception(f'Nucleotide {index} not found')
-			ch = nts[index][1]
-			fasta = self.data['FASTA']
-			chain_idxs = [i for i in sorted(nts) if nts[i][1] == ch]
-			pos = chain_idxs.index(index)
-			first_ch = sorted(fasta.keys())[0]
-			seq = list(fasta[first_ch])
-			N = len(seq)
-			if ch == first_ch: seq[pos] = residue.upper()
-			else:
-				if self.data['Type'] == 'DNA':
-					comp = {'A':'T', 'T':'A', 'G':'C', 'C':'G'}
+		mol = self.data.get('Type')
+		if fast:
+			if mol == 'Protein':
+				self._mutatefastprotein(index, residue)
+				return
+			if mol in ('DNA', 'RNA'):
+				self._mutatefastnucleotides(index, residue)
+				return
+		if True:
+			if mol == 'Protein':
+				ru = residue.upper()
+				valid_aa = {k for k in self.aminoacids
+					if 'Tricode' in self.aminoacids[k]
+					and not k.startswith('Backbone')}
+				if ru not in valid_aa:
+					raise Exception(
+						f"Unknown amino acid '{residue}'. "
+						f"Supported: {''.join(sorted(valid_aa))}")
+				AAs = self.data['Amino Acids']
+				if index not in AAs:
+					raise Exception(f'Residue {index} not found')
+				ch = AAs[index][1]
+				fasta = self.data['FASTA']
+				chain_idxs = [i for i in sorted(AAs) if AAs[i][1] == ch]
+				pos = chain_idxs.index(index)
+				seq = list(fasta[ch])
+				seq[pos] = residue
+				new_fasta = dict(fasta)
+				new_fasta[ch] = ''.join(seq)
+				self.ReBuild(sequence=new_fasta)
+			elif mol in ('DNA', 'RNA'):
+				valid = ({'A', 'T', 'G', 'C'} if mol == 'DNA'
+					else {'A', 'U', 'G', 'C'})
+				if residue.upper() not in valid:
+					raise Exception(
+						f"Unknown {mol} base '{residue}'. "
+						f"Supported: {sorted(valid)}")
+				nts = self.data['Nucleotides']
+				if index not in nts:
+					raise Exception(f'Nucleotide {index} not found')
+				ch = nts[index][1]
+				fasta = self.data['FASTA']
+				chain_idxs = [i for i in sorted(nts) if nts[i][1] == ch]
+				pos = chain_idxs.index(index)
+				first_ch = sorted(fasta.keys())[0]
+				seq = list(fasta[first_ch])
+				N = len(seq)
+				if ch == first_ch: seq[pos] = residue.upper()
 				else:
-					comp = {'A':'U', 'U':'A', 'G':'C', 'C':'G'}
-				bp = N - 1 - pos
-				seq[bp] = comp.get(residue.upper(), residue.upper())
-			chains = sorted(set(v[1] for v in nts.values()))
-			mutated = {index}
-			if len(chains) > 1: mutated.add(2 * N - 1 - index)
-			self.ReBuild(sequence=''.join(seq), _mutated=mutated)
-		else:
-			raise Exception(
-				'No structure loaded. Call Import() first')
+					if self.data['Type'] == 'DNA':
+						comp = {'A':'T', 'T':'A', 'G':'C', 'C':'G'}
+					else:
+						comp = {'A':'U', 'U':'A', 'G':'C', 'C':'G'}
+					bp = N - 1 - pos
+					seq[bp] = comp.get(residue.upper(), residue.upper())
+				chains = sorted(set(v[1] for v in nts.values()))
+				mutated = {index}
+				if len(chains) > 1: mutated.add(2 * N - 1 - index)
+				self.ReBuild(sequence=''.join(seq), _mutated=mutated)
+			else:
+				raise Exception(
+					'No structure loaded. Call Import() first')
 
 class Molecule():
 	def __init__(self):
