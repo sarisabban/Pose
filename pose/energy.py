@@ -79,7 +79,7 @@ def _atomtype(atom_index):
 
 def bond_potential(pose, alg='harmonic'):
 	'''
-	Calculates the Harmonic Bond Stretching potential energy between two atoms
+	Calculate the Harmonic Bond potential energy between all atom pairs
 	Arguments:
 	----------
 		pose: Pose - molecule source protein, DNA, RNA, or Molecule pose
@@ -109,7 +109,63 @@ def bond_potential(pose, alg='harmonic'):
 	if   alg.upper() == 'HARMONIC': return harmonic
 	elif alg.upper() == 'MORSE':    return morse
 	else: raise Exception('Algorithm not supported, choose (harmonic or morse)')
-'''
+
+def angle_potential(pose):
+	'''
+	Calculate the Harmonic Angle potential between all three atoms
+	Arguments:
+	----------
+		pose: Pose - molecule source protein, DNA, RNA, or Molecule pose
+	Returns:
+	--------
+		float: potential energy in kcal/mol
+	'''
+	atoms = pose.data['Atoms']
+	coords = np.asarray(pose.data['Coordinates'], dtype=np.float64)
+	idx = np.array(
+		[(int(k), int(j)) for k, vs in pose.data['Bonds'].items()
+		for j in vs], dtype=np.int64).reshape(-1, 2)
+	idx.sort(axis=1)
+	pairs = np.unique(idx[idx[:, 0] != idx[:, 1]], axis=0)
+	flat = np.concatenate([pairs, pairs[:, ::-1]])
+	nbrs = {int(a): np.sort(flat[flat[:, 0] == a, 1])
+		for a in np.unique(flat[:, 0])}
+	triplets = np.array(
+		[(int(i), j, int(k)) for j, ns in nbrs.items()
+		for p, i in enumerate(ns) for k in ns[p+1:]],
+		dtype=np.int64).reshape(-1, 3)
+	i_idx, j_idx, k_idx = triplets[:, 0], triplets[:, 1], triplets[:, 2]
+	v1 = coords[i_idx] - coords[j_idx]
+	v2 = coords[k_idx] - coords[j_idx]
+	cos = np.einsum('ij,ij->i', v1, v2) / (
+		np.linalg.norm(v1, axis=1) * np.linalg.norm(v2, axis=1))
+	theta = np.arccos(np.clip(cos, -1.0, 1.0))
+	P  = Parameters['angles']
+	df = P['default']
+	params = np.array([P.get((
+		min(_atomtype(atoms[int(i)]), _atomtype(atoms[int(k)])),
+		_atomtype(atoms[int(j)]),
+		max(_atomtype(atoms[int(i)]), _atomtype(atoms[int(k)]))),
+		df) for i, j, k in triplets], dtype=np.float64).reshape(-1, 2)
+	K_theta, theta0 = params[:, 0], np.deg2rad(params[:, 1])
+	return float(np.sum(K_theta * (theta - theta0)**2))
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
