@@ -48,18 +48,18 @@ Parameters = {
 		('C',  'CB', 'H' ): (50.0, 109.5),
 		'default': (50.0, 109.5)},
 	'lennard_jones': {
-		# i    Sigma  eps
+		#i     sigma  epsilon
 		'H' : (2.886, 0.044),
-		'N' : (3.660, 0.069),
-		'F' : (3.364, 0.050),
-		'S' : (4.035, 0.274),
-		'Br': (4.189, 0.251),
-		'Se': (4.205, 0.291),
 		'C' : (3.851, 0.105),
+		'N' : (3.660, 0.069),
 		'O' : (3.500, 0.060),
+		'F' : (3.364, 0.050),
 		'P' : (4.147, 0.305),
+		'S' : (4.035, 0.274),
 		'Cl': (3.947, 0.227),
+		'Br': (4.189, 0.251),
 		'I' : (4.500, 0.339),
+		'Se': (4.205, 0.291),
 		'default': (3.851, 0.105)},
 }
 
@@ -150,6 +150,58 @@ def angle_potential(pose):
 	K_theta, theta0 = params[:, 0], np.deg2rad(params[:, 1])
 	return float(np.sum(K_theta * (theta - theta0)**2))
 
+def lennard_jones_potential(pose, alg='12-6'):
+	'''
+	Calculates the total Lennard-Jones non-bonded potential for all atom pairs
+	Arguments:
+	----------
+		pose: Pose - molecule source protein, DNA, RNA, or Molecule pose
+		alg:  Str algorithm type either '12-6' or '9-6'
+	Returns:
+	--------
+		float: potential energy in kcal/mol
+	'''
+	atoms = pose.data['Atoms']
+	n = len(atoms)
+	coords = np.asarray(pose.data['Coordinates'], dtype=np.float64)
+	idx = np.array(
+		[(int(k), int(j)) for k, vs in pose.data['Bonds'].items()
+		for j in vs], dtype=np.int64).reshape(-1, 2)
+	idx.sort(axis=1)
+	pairs = np.unique(idx[idx[:, 0] != idx[:, 1]], axis=0)
+	flat = np.concatenate([pairs, pairs[:, ::-1]])
+	nbrs = {int(a): np.sort(flat[flat[:, 0] == a, 1])
+		for a in np.unique(flat[:, 0])}
+	excl_13 = np.array(
+		[(int(i), int(k)) for j, ns in nbrs.items()
+		for p, i in enumerate(ns) for k in ns[p+1:]],
+		dtype=np.int64).reshape(-1, 2)
+	P  = Parameters['lennard_jones']
+	df = P['default']
+	sig = np.array([P.get(_atomtype(atoms[i]), P.get(atoms[i][1], df))[0]
+		for i in range(n)], dtype=np.float64)
+	sigma   = 0.5 * (sig[:, None] + sig[None, :])
+	eps = np.array([P.get(_atomtype(atoms[i]), P.get(atoms[i][1], df))[1]
+		for i in range(n)], dtype=np.float64)
+	epsilon = np.sqrt(eps[:, None] * eps[None, :])
+	r = np.linalg.norm(coords[:, None, :] - coords[None, :, :], axis=-1)
+	np.fill_diagonal(r, 1.0)
+	excl = np.eye(n, dtype=bool)
+	excl[pairs[:, 0], pairs[:, 1]] = True
+	excl[pairs[:, 1], pairs[:, 0]] = True
+	excl[excl_13[:, 0], excl_13[:, 1]] = True
+	excl[excl_13[:, 1], excl_13[:, 0]] = True
+	mask = (~excl) & np.triu(np.ones_like(excl), k=1)
+	if   alg == '12-6':
+		ratio_6  = (sigma / r)**6
+		ratio_12 = ratio_6**2
+		lj = 4.0 * epsilon * (ratio_12 - ratio_6)
+	elif alg == '9-6':
+		ratio_6 = (sigma / r)**6
+		ratio_9 = (sigma / r)**9
+		lj = epsilon * (2 * ratio_9 - 3 * ratio_6)
+	else: raise Exception('Algorithm not supported, choose (12-6 or 9-6)')
+	return float(np.sum(lj[mask]))
 
 
 
