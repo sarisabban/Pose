@@ -61,6 +61,11 @@ Parameters = {
 		'I' : (4.500, 0.339),
 		'Se': (4.205, 0.291),
 		'default': (3.851, 0.105)},
+	'electrostatic': {
+		'epsilon_r': 1.0},
+	'scaling_14': {
+		'f_lj'  : 0.5,
+		'f_elec': 1.0 / 1.2},
 }
 
 def _atomtype(atom_index):
@@ -150,7 +155,7 @@ def angle_potential(pose):
 	K_theta, theta0 = params[:, 0], np.deg2rad(params[:, 1])
 	return float(np.sum(K_theta * (theta - theta0)**2))
 
-def lennard_jones_potential(pose, alg='12-6'):
+def LJ_potential(pose, alg='12-6'):
 	'''
 	Calculates the total Lennard-Jones non-bonded potential for all atom pairs
 	Arguments:
@@ -176,6 +181,13 @@ def lennard_jones_potential(pose, alg='12-6'):
 		[(int(i), int(k)) for j, ns in nbrs.items()
 		for p, i in enumerate(ns) for k in ns[p+1:]],
 		dtype=np.int64).reshape(-1, 2)
+	excl_14 = np.array(
+		[(int(i), int(l)) for j, k in pairs
+		for i in nbrs[int(j)] if i != k
+		for l in nbrs[int(k)] if l != j and l != i],
+		dtype=np.int64).reshape(-1, 2)
+	excl_14.sort(axis=1)
+	excl_14 = np.unique(excl_14[excl_14[:, 0] != excl_14[:, 1]], axis=0)
 	P  = Parameters['lennard_jones']
 	df = P['default']
 	sig = np.array([P.get(_atomtype(atoms[i]), P.get(atoms[i][1], df))[0]
@@ -191,7 +203,13 @@ def lennard_jones_potential(pose, alg='12-6'):
 	excl[pairs[:, 1], pairs[:, 0]] = True
 	excl[excl_13[:, 0], excl_13[:, 1]] = True
 	excl[excl_13[:, 1], excl_13[:, 0]] = True
-	mask = (~excl) & np.triu(np.ones_like(excl), k=1)
+	scal14 = np.zeros((n, n), dtype=bool)
+	scal14[excl_14[:, 0], excl_14[:, 1]] = True
+	scal14[excl_14[:, 1], excl_14[:, 0]] = True
+	scal14 &= ~excl
+	upper = np.triu(np.ones((n, n), dtype=bool), k=1)
+	mask14  = scal14 & upper
+	mask_far = (~excl) & (~scal14) & upper
 	if   alg == '12-6':
 		ratio_6  = (sigma / r)**6
 		ratio_12 = ratio_6**2
@@ -201,14 +219,8 @@ def lennard_jones_potential(pose, alg='12-6'):
 		ratio_9 = (sigma / r)**9
 		lj = epsilon * (2 * ratio_9 - 3 * ratio_6)
 	else: raise Exception('Algorithm not supported, choose (12-6 or 9-6)')
-	return float(np.sum(lj[mask]))
-
-
-
-
-
-
-
+	f_lj = Parameters['scaling_14']['f_lj']
+	return float(np.sum(lj[mask_far]) + f_lj * np.sum(lj[mask14]))
 
 
 
