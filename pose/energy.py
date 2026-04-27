@@ -353,6 +353,62 @@ def dihedral_potential(pose):
 	k_phi, n_mult, phi0 = flat_p[:, 0], flat_p[:, 1], np.deg2rad(flat_p[:, 2])
 	return float(np.sum(k_phi * (1 + np.cos(n_mult * phi_flat - phi0))))
 
+def improper_dihedral_potential(pose, alg='harmonic'):
+	'''
+	Calculates the total Improper Dihedral potential energy. Auto-derives
+	one improper per degree-3 atom (sp2 centers — carbonyl C, amide N).
+	Arguments:
+	----------
+		pose: Pose - molecule source protein, DNA, RNA, or Molecule pose
+		alg:  Str algorithm type either 'harmonic' (AMBER) or 'fourier' (CHARMM)
+	Returns:
+	--------
+		float: potential energy in kcal/mol
+	'''
+	atoms = pose.data['Atoms']
+	coords = np.asarray(pose.data['Coordinates'], dtype=np.float64)
+	idx = np.array(
+		[(int(k), int(j)) for k, vs in pose.data['Bonds'].items()
+		for j in vs], dtype=np.int64).reshape(-1, 2)
+	idx.sort(axis=1)
+	pairs = np.unique(idx[idx[:, 0] != idx[:, 1]], axis=0)
+	flat = np.concatenate([pairs, pairs[:, ::-1]])
+	nbrs = {int(a): np.sort(flat[flat[:, 0] == a, 1])
+		for a in np.unique(flat[:, 0])}
+	impropers = np.array(
+		[(int(ns[0]), int(j), int(ns[1]), int(ns[2]))
+		for j, ns in nbrs.items() if len(ns) == 3],
+		dtype=np.int64).reshape(-1, 4)
+	if len(impropers) == 0: return 0.0
+	i_idx, j_idx, k_idx, l_idx = impropers.T
+	b1 = coords[j_idx] - coords[i_idx]
+	b2 = coords[k_idx] - coords[j_idx]
+	b3 = coords[l_idx] - coords[k_idx]
+	n1 = np.cross(b1, b2)
+	n2 = np.cross(b2, b3)
+	b2n = b2 / np.linalg.norm(b2, axis=1, keepdims=True)
+	psi = np.arctan2(
+		np.einsum('ij,ij->i', np.cross(n1, b2n), n2),
+		np.einsum('ij,ij->i', n1, n2))
+	P  = Parameters['impropers']
+	df = P['default']
+	keys = []
+	for i, j, k, l in impropers:
+		nb = sorted([_atomtype(atoms[int(i)]),
+			_atomtype(atoms[int(k)]),
+			_atomtype(atoms[int(l)])])
+		keys.append((_atomtype(atoms[int(j)]), nb[0], nb[1], nb[2]))
+	params = np.array([P.get(key, df) for key in keys],
+		dtype=np.float64).reshape(-1, 3)
+	k_imp = params[:, 0]
+	n_mult = params[:, 1]
+	psi0  = np.deg2rad(params[:, 2])
+	if   alg == 'harmonic':
+		delta = ((psi - psi0 + np.pi) % (2 * np.pi)) - np.pi
+		return float(np.sum(k_imp * delta**2))
+	elif alg == 'fourier':
+		return float(np.sum(k_imp * (1 + np.cos(n_mult * psi - psi0))))
+	else: raise Exception('Algorithm not supported, choose (harmonic or fourier)')
 
 
 
