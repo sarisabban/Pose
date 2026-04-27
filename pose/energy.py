@@ -21,31 +21,31 @@ Parameters = {
 		'default': (300.0,90.0, 2.00,  1.500)},
 	'angles': {
 		#i     j     k      theta0 K theta K_ub   S0
-		('C',  'CA', 'N' ): (63.0, 110.1, 0.0, 1.500),
+		('C',  'CA', 'N' ): (63.0, 110.1, 0.0,  1.500),
 		('CA', 'C',  'N' ): (70.0, 116.6, 50.0, 2.450),
 		('CA', 'C',  'O' ): (80.0, 120.4, 50.0, 2.388),
 		('N',  'C',  'O' ): (80.0, 122.9, 50.0, 2.250),
 		('C',  'N',  'CA'): (50.0, 121.9, 50.0, 2.453),
-		('CA', 'N',  'H' ): (50.0, 118.0, 0.0, 1.500),
-		('C',  'N',  'H' ): (50.0, 119.8, 0.0, 1.500),
+		('CA', 'N',  'H' ): (50.0, 118.0, 0.0,  1.500),
+		('C',  'N',  'H' ): (50.0, 119.8, 0.0,  1.500),
 		('CB', 'CA', 'N' ): (80.0, 109.7, 50.0, 2.510),
 		('C',  'CA', 'CB'): (63.0, 111.1, 50.0, 2.561),
-		('CB', 'CA', 'HA'): (50.0, 109.5, 0.0, 1.500),
-		('C',  'CA', 'HA'): (50.0, 109.5, 0.0, 1.500),
-		('HA', 'CA', 'N' ): (50.0, 109.5, 0.0, 1.500),
-		('CA', 'CB', 'HB'): (50.0, 109.5, 0.0, 1.500),
-		('HB', 'CB', 'HB'): (35.0, 109.5, 0.0, 1.500),
+		('CB', 'CA', 'HA'): (50.0, 109.5, 0.0,  1.500),
+		('C',  'CA', 'HA'): (50.0, 109.5, 0.0,  1.500),
+		('HA', 'CA', 'N' ): (50.0, 109.5, 0.0,  1.500),
+		('CA', 'CB', 'HB'): (50.0, 109.5, 0.0,  1.500),
+		('HB', 'CB', 'HB'): (35.0, 109.5, 0.0,  1.500),
 		# Generic element-pair stand-ins so unknown types still resolve.
-		('C',  'C',  'C' ): (63.0, 111.0, 0.0, 1.500),
-		('C',  'C',  'H' ): (50.0, 109.5, 0.0, 1.500),
-		('H',  'C',  'H' ): (35.0, 109.5, 0.0, 1.500),
-		('C',  'C',  'N' ): (80.0, 110.0, 0.0, 1.500),
-		('C',  'C',  'O' ): (80.0, 120.0, 0.0, 1.500),
-		('H',  'N',  'H' ): (35.0, 109.5, 0.0, 1.500),
-		('C',  'O',  'H' ): (55.0, 108.5, 0.0, 1.500),
-		('CA', 'CB', 'H' ): (50.0, 109.5, 0.0, 1.500),
-		('H',  'CB', 'H' ): (35.0, 109.5, 0.0, 1.500),
-		('C',  'CB', 'H' ): (50.0, 109.5, 0.0, 1.500),
+		('C',  'C',  'C' ): (63.0, 111.0, 0.0,  1.500),
+		('C',  'C',  'H' ): (50.0, 109.5, 0.0,  1.500),
+		('H',  'C',  'H' ): (35.0, 109.5, 0.0,  1.500),
+		('C',  'C',  'N' ): (80.0, 110.0, 0.0,  1.500),
+		('C',  'C',  'O' ): (80.0, 120.0, 0.0,  1.500),
+		('H',  'N',  'H' ): (35.0, 109.5, 0.0,  1.500),
+		('C',  'O',  'H' ): (55.0, 108.5, 0.0,  1.500),
+		('CA', 'CB', 'H' ): (50.0, 109.5, 0.0,  1.500),
+		('H',  'CB', 'H' ): (35.0, 109.5, 0.0,  1.500),
+		('C',  'CB', 'H' ): (50.0, 109.5, 0.0,  1.500),
 		'default': (50.0, 109.5, 0.0, 1.500)},
 	'lennard_jones': {
 		#i     sigma  epsilon alpha
@@ -84,7 +84,35 @@ Parameters = {
 		('C', 'CA', 'N',  'O' ): (1.10, 2, 180.0),
 		('N', 'C',  'CA', 'H' ): (1.10, 2, 180.0),
 		'default': (1.10, 2, 180.0)},
+	'cmap': {
+		# Per-residue 1-letter code → 24×24 grid of CMAP energies in
+		# kcal/mol over (φ, ψ) ∈ [-π, π)². Replace 'default' with real
+		# per-residue tables when populating the FF.
+		# in the future should be instead of default 'G':[[PHI/PSI 24x24 matrix]]
+		'default': 0.1 * np.cos(
+			np.linspace(-np.pi, np.pi, 24, endpoint=False))[:, None] * np.cos(
+			np.linspace(-np.pi, np.pi, 24, endpoint=False))[None, :]},
 }
+
+def _wrap(dvec, box):
+	'''
+	Apply minimum-image convention to displacement vectors for PBC.
+	Arguments:
+	----------
+		dvec: ndarray with last axis = 3 (any other shape passes through)
+		box: None, shape (3,) orthorhombic, or shape (3, 3) triclinic.
+	Returns:
+	--------
+		dvec wrapped to its minimum-image representation.
+	'''
+	if box is None: return dvec
+	box = np.asarray(box, dtype=np.float64)
+	if box.ndim == 1:
+		return dvec - box * np.round(dvec / box)
+	inv_B = np.linalg.inv(box)
+	f = dvec @ inv_B
+	f -= np.round(f)
+	return f @ box
 
 def _atomtype(atom_index):
 	'''
@@ -100,7 +128,7 @@ def _atomtype(atom_index):
 	backbone = {'N', 'CA', 'C', 'O', 'H', 'HA', 'CB', 'HB'}
 	return name if name in backbone else element
 
-def bond_potential(pose, alg='harmonic', grad=True):
+def bond_potential(pose, alg='harmonic', grad=True, box=None):
 	'''
 	Calculates the Bond stretching potential energy for all bonded atom pairs
 	Arguments:
@@ -108,6 +136,7 @@ def bond_potential(pose, alg='harmonic', grad=True):
 		pose: Pose - molecule source protein, DNA, RNA, or Molecule pose
 		alg:  Str algorithm type either 'harmonic' or 'morse'
 		grad: bool - if True, also return per-atom forces (N, 3) array
+		box:  None for no PBC; (3,) array for orthorhombic; (3, 3) for triclinic
 	Returns:
 	--------
 		float: potential energy in kcal/mol  (when grad=False)
@@ -124,7 +153,7 @@ def bond_potential(pose, alg='harmonic', grad=True):
 	if len(pairs) == 0:
 		return (0.0, np.zeros((n, 3))) if grad else 0.0
 	i_idx, j_idx = pairs[:, 0], pairs[:, 1]
-	dvec = coords[i_idx] - coords[j_idx]
+	dvec = _wrap(coords[i_idx] - coords[j_idx], box)
 	r = np.linalg.norm(dvec, axis=1)
 	P  = Parameters['bonds']
 	df = P['default']
@@ -152,13 +181,14 @@ def bond_potential(pose, alg='harmonic', grad=True):
 	np.add.at(forces, j_idx, -fij)
 	return energy, forces
 
-def angle_potential(pose, grad=True):
+def angle_potential(pose, grad=True, box=None):
 	'''
 	Calculates the Harmonic Angle potential for every bonded triplet
 	Arguments:
 	----------
 		pose: Pose - molecule source protein, DNA, RNA, or Molecule pose
 		grad: bool - if True, also return per-atom forces (N, 3) array
+		box:  None for no PBC; (3,) array for orthorhombic; (3, 3) for triclinic
 	Returns:
 	--------
 		float: potential energy in kcal/mol  (when grad=False)
@@ -182,8 +212,8 @@ def angle_potential(pose, grad=True):
 	if len(triplets) == 0:
 		return (0.0, np.zeros((n, 3))) if grad else 0.0
 	i_idx, j_idx, k_idx = triplets[:, 0], triplets[:, 1], triplets[:, 2]
-	v1 = coords[i_idx] - coords[j_idx]
-	v2 = coords[k_idx] - coords[j_idx]
+	v1 = _wrap(coords[i_idx] - coords[j_idx], box)
+	v2 = _wrap(coords[k_idx] - coords[j_idx], box)
 	mag1 = np.linalg.norm(v1, axis=1)
 	mag2 = np.linalg.norm(v2, axis=1)
 	cos = np.einsum('ij,ij->i', v1, v2) / (mag1 * mag2)
@@ -214,7 +244,7 @@ def angle_potential(pose, grad=True):
 	np.add.at(forces, k_idx, Fk)
 	return energy, forces
 
-def lj_potential(pose, alg='12-6', grad=True):
+def lj_potential(pose, alg='12-6', grad=True, box=None):
 	'''
 	Calculates the total Lennard-Jones non-bonded potential for all atom pairs
 	Arguments:
@@ -222,6 +252,7 @@ def lj_potential(pose, alg='12-6', grad=True):
 		pose: Pose - molecule source protein, DNA, RNA, or Molecule pose
 		alg:  Str algorithm type either '12-6' or '9-6'
 		grad: bool - if True, also return per-atom forces (N, 3) array
+		box:  None for no PBC; (3,) array for orthorhombic; (3, 3) for triclinic
 	Returns:
 	--------
 		float: potential energy in kcal/mol  (when grad=False)
@@ -257,7 +288,8 @@ def lj_potential(pose, alg='12-6', grad=True):
 	eps = np.array([P.get(_atomtype(atoms[i]), P.get(atoms[i][1], df))[1]
 		for i in range(n)], dtype=np.float64)
 	epsilon = np.sqrt(eps[:, None] * eps[None, :])
-	r = np.linalg.norm(coords[:, None, :] - coords[None, :, :], axis=-1)
+	dvec = _wrap(coords[:, None, :] - coords[None, :, :], box)
+	r = np.linalg.norm(dvec, axis=-1)
 	np.fill_diagonal(r, 1.0)
 	excl = np.eye(n, dtype=bool)
 	excl[pairs[:, 0], pairs[:, 1]] = True
@@ -287,13 +319,12 @@ def lj_potential(pose, alg='12-6', grad=True):
 	energy = float(np.sum(lj[mask_far]) + f_lj * np.sum(lj[mask14]))
 	if not grad: return energy
 	weight = np.where(excl, 0.0, np.where(scal14, f_lj, 1.0))
-	dvec = coords[:, None, :] - coords[None, :, :]
 	coef = -dU_dr / r * weight
 	fij_per_pair = coef[:, :, None] * dvec
 	forces = np.sum(fij_per_pair, axis=1)
 	return energy, forces
 
-def electrostatic_potential(pose, alg='constant', grad=True):
+def electrostatic_potential(pose, alg='constant', grad=True, box=None):
 	'''
 	Calculates the total Electrostatic non-bonded potential for all atom pairs
 	Arguments:
@@ -302,6 +333,7 @@ def electrostatic_potential(pose, alg='constant', grad=True):
 		alg:  Str algorithm type either 'constant' (uniform εr) or 'ddd'
 			(distance-dependent dielectric, ε(r) = εr·r)
 		grad: bool - if True, also return per-atom forces (N, 3) array
+		box:  None for no PBC; (3,) array for orthorhombic; (3, 3) for triclinic
 	Returns:
 	--------
 		float: potential energy in kcal/mol  (when grad=False)
@@ -331,7 +363,8 @@ def electrostatic_potential(pose, alg='constant', grad=True):
 	excl_14 = np.unique(excl_14[excl_14[:, 0] != excl_14[:, 1]], axis=0)
 	q = np.array([atoms[i][2] for i in range(n)], dtype=np.float64)
 	qq = q[:, None] * q[None, :]
-	r = np.linalg.norm(coords[:, None, :] - coords[None, :, :], axis=-1)
+	dvec = _wrap(coords[:, None, :] - coords[None, :, :], box)
+	r = np.linalg.norm(dvec, axis=-1)
 	np.fill_diagonal(r, 1.0)
 	excl = np.eye(n, dtype=bool)
 	excl[pairs[:, 0], pairs[:, 1]] = True
@@ -358,19 +391,19 @@ def electrostatic_potential(pose, alg='constant', grad=True):
 	energy = float(np.sum(elec[mask_far]) + f_elec * np.sum(elec[mask_14]))
 	if not grad: return energy
 	weight = np.where(excl, 0.0, np.where(scal14, f_elec, 1.0))
-	dvec = coords[:, None, :] - coords[None, :, :]
 	coef = -dU_dr / r * weight
 	fij_per_pair = coef[:, :, None] * dvec
 	forces = np.sum(fij_per_pair, axis=1)
 	return energy, forces
 
-def dihedral_potential(pose, grad=True):
+def dihedral_potential(pose, grad=True, box=None):
 	'''
 	Calculates the total Proper Dihedral (torsion) potential for i-j-k-l atoms
 	Arguments:
 	----------
 		pose: Pose - molecule source protein, DNA, RNA, or Molecule pose
 		grad: bool - if True, also return per-atom forces (N, 3) array
+		box:  None for no PBC; (3,) array for orthorhombic; (3, 3) for triclinic
 	Returns:
 	--------
 		float: potential energy in kcal/mol  (when grad=False)
@@ -400,9 +433,9 @@ def dihedral_potential(pose, grad=True):
 	if len(quartets) == 0:
 		return (0.0, np.zeros((n, 3))) if grad else 0.0
 	i_idx, j_idx, k_idx, l_idx = quartets.T
-	b1 = coords[j_idx] - coords[i_idx]
-	b2 = coords[k_idx] - coords[j_idx]
-	b3 = coords[l_idx] - coords[k_idx]
+	b1 = _wrap(coords[j_idx] - coords[i_idx], box)
+	b2 = _wrap(coords[k_idx] - coords[j_idx], box)
+	b3 = _wrap(coords[l_idx] - coords[k_idx], box)
 	n1 = np.cross(b1, b2)
 	n2 = np.cross(b2, b3)
 	b2_mag = np.linalg.norm(b2, axis=1)
@@ -439,7 +472,7 @@ def dihedral_potential(pose, grad=True):
 	b1_dot_b2 = np.einsum('ij,ij->i', b1, b2)
 	b3_dot_b2 = np.einsum('ij,ij->i', b3, b2)
 	b2_sq = b2_mag**2
-	Fj = -((b1_dot_b2 / b2_sq + 1.0)[:, None] * Fi) + (b3_dot_b2 / b2_sq)[:, None] * Fl
+	Fj = -((b1_dot_b2/b2_sq+1.0)[:,None]*Fi) + (b3_dot_b2/b2_sq)[:,None]*Fl
 	Fk = -(Fi + Fj + Fl)
 	np.add.at(forces, i_idx, Fi)
 	np.add.at(forces, j_idx, Fj)
@@ -447,7 +480,7 @@ def dihedral_potential(pose, grad=True):
 	np.add.at(forces, l_idx, Fl)
 	return energy, forces
 
-def improper_dihedral_potential(pose, alg='harmonic', grad=True):
+def improper_dihedral_potential(pose, alg='harmonic', grad=True, box=None):
 	'''
 	Calculates the total Improper Dihedral potential energy
 	Arguments:
@@ -455,6 +488,7 @@ def improper_dihedral_potential(pose, alg='harmonic', grad=True):
 		pose: Pose - molecule source protein, DNA, RNA, or Molecule pose
 		alg:  Str algorithm type either 'harmonic' or 'fourier'
 		grad: bool - if True, also return per-atom forces (N, 3) array
+		box:  None for no PBC; (3,) array for orthorhombic; (3, 3) for triclinic
 	Returns:
 	--------
 		float: potential energy in kcal/mol  (when grad=False)
@@ -478,9 +512,9 @@ def improper_dihedral_potential(pose, alg='harmonic', grad=True):
 	if len(impropers) == 0:
 		return (0.0, np.zeros((n, 3))) if grad else 0.0
 	i_idx, j_idx, k_idx, l_idx = impropers.T
-	b1 = coords[j_idx] - coords[i_idx]
-	b2 = coords[k_idx] - coords[j_idx]
-	b3 = coords[l_idx] - coords[k_idx]
+	b1 = _wrap(coords[j_idx] - coords[i_idx], box)
+	b2 = _wrap(coords[k_idx] - coords[j_idx], box)
+	b3 = _wrap(coords[l_idx] - coords[k_idx], box)
 	n1 = np.cross(b1, b2)
 	n2 = np.cross(b2, b3)
 	b2_mag = np.linalg.norm(b2, axis=1)
@@ -525,7 +559,7 @@ def improper_dihedral_potential(pose, alg='harmonic', grad=True):
 	b2_sq = b2_mag**2
 	# Chain rule on x_j: ∂φ/∂x_j = (1 + b1·b2/b2²)·∂φ/∂b1 + (b3·b2/b2²)·∂φ/∂b3
 	# Reduces to: F_j = -(b1·b2/b2² + 1)·F_i + (b3·b2/b2²)·F_l
-	Fj = -((b1_dot_b2 / b2_sq + 1.0)[:, None] * Fi) + (b3_dot_b2 / b2_sq)[:, None] * Fl
+	Fj = -((b1_dot_b2/b2_sq+1.0)[:,None]*Fi) + (b3_dot_b2/b2_sq)[:,None]*Fl
 	Fk = -(Fi + Fj + Fl)
 	np.add.at(forces, i_idx, Fi)
 	np.add.at(forces, j_idx, Fj)
@@ -533,15 +567,18 @@ def improper_dihedral_potential(pose, alg='harmonic', grad=True):
 	np.add.at(forces, l_idx, Fl)
 	return energy, forces
 
-def ub_potential(pose, grad=True):
+def ub_potential(pose, grad=True, box=None):
 	'''
 	Calculates Urey-Bradley 1-3 stretching potential between all three atoms
 	Arguments:
 	----------
 		pose: Pose - molecule source protein, DNA, RNA, or Molecule pose
+		grad: bool - if True, also return per-atom forces (N, 3) array
+		box:  None for no PBC; (3,) array for orthorhombic; (3, 3) for triclinic
 	Returns:
 	--------
-		float: potential energy in kcal/mol
+		float: potential energy in kcal/mol  (when grad=False)
+		(float, ndarray): energy and (N, 3) forces  (when grad=True)
 	'''
 	atoms = pose.data['Atoms']
 	coords = np.asarray(pose.data['Coordinates'], dtype=np.float64)
@@ -561,7 +598,7 @@ def ub_potential(pose, grad=True):
 	if len(triplets) == 0:
 		return (0.0, np.zeros((n, 3))) if grad else 0.0
 	i_idx, j_idx, k_idx = triplets[:, 0], triplets[:, 1], triplets[:, 2]
-	dvec = coords[i_idx] - coords[k_idx]
+	dvec = _wrap(coords[i_idx] - coords[k_idx], box)
 	r = np.linalg.norm(dvec, axis=1)
 	P  = Parameters['angles']
 	df = P['default']
@@ -580,7 +617,7 @@ def ub_potential(pose, grad=True):
 	np.add.at(forces, k_idx, -fik)
 	return energy, forces
 
-def polarisation_potential(pose, alg='constant', grad=True):
+def polarisation_potential(pose, alg='constant', grad=True, box=None):
 	'''
 	Calculates total Polarisation potential energy ½·Σᵢ αᵢ·|Eᵢ|² where
 	Eᵢ is the local electric field at atom i from all other permanent
@@ -622,7 +659,7 @@ def polarisation_potential(pose, alg='constant', grad=True):
 	alpha = np.array(
 		[P.get(_atomtype(atoms[i]), P.get(atoms[i][1], df))[2]
 		for i in range(n)], dtype=np.float64)
-	dr = coords[:, None, :] - coords[None, :, :]
+	dr = _wrap(coords[:, None, :] - coords[None, :, :], box)
 	r = np.linalg.norm(dr, axis=-1)
 	np.fill_diagonal(r, 1.0)
 	excl = np.eye(n, dtype=bool)
@@ -666,6 +703,121 @@ def polarisation_potential(pose, alg='constant', grad=True):
 	# Diagonal cleanup — coeff is already 0 on diagonal via weight, so
 	# A and M are 0 on diagonal. No extra masking needed.
 	forces = -np.sum(M, axis=1) + np.sum(M, axis=0)
+	return energy, forces
+
+def cmap_potential(pose, grad=True, box=None):
+	'''
+	Calculates the total CMAP backbone (φ, ψ) correction energy for
+	every interior protein residue. Bicubic Catmull-Rom interpolation
+	of per-residue 24×24 tables stored in Parameters['cmap'].
+	Arguments:
+	----------
+		pose: Pose - molecule source protein, DNA, RNA, or Molecule pose
+		grad: bool - if True, also return per-atom forces (N, 3) array
+		box:  None for no PBC; (3,) orthorhombic; (3, 3) triclinic
+	Returns:
+	--------
+		float: potential energy in kcal/mol  (when grad=False)
+		(float, ndarray): energy and (N, 3) forces  (when grad=True)
+	'''
+	atoms = pose.data['Atoms']
+	n = len(atoms)
+	coords = np.asarray(pose.data['Coordinates'], dtype=np.float64)
+	aas = pose.data.get('Amino Acids')
+	if aas is None or len(aas) < 3:
+		return (0.0, np.zeros((n, 3))) if grad else 0.0
+	# Per-residue {atom-name → atom-index} for backbone atoms.
+	res_atoms = {ai: (info[0], info[1],
+		{atoms[k][0]: k for k in info[2]}) for ai, info in aas.items()}
+	# Enumerate (φ, ψ) quartets per interior residue with same-chain neighbours.
+	phi_q, psi_q, codes = [], [], []
+	for r in sorted(res_atoms.keys())[1:-1]:
+		aa_curr, ch_curr, names_curr = res_atoms[r]
+		_,       ch_prev, names_prev = res_atoms[r - 1]
+		_,       ch_next, names_next = res_atoms[r + 1]
+		if ch_curr != ch_prev or ch_curr != ch_next: continue
+		try:
+			C_prev  = names_prev['C']
+			N_curr  = names_curr['N']
+			CA_curr = names_curr['CA']
+			C_curr  = names_curr['C']
+			N_next  = names_next['N']
+		except KeyError: continue
+		phi_q.append((C_prev, N_curr, CA_curr, C_curr))
+		psi_q.append((N_curr, CA_curr, C_curr, N_next))
+		codes.append(aa_curr)
+	if len(phi_q) == 0:
+		return (0.0, np.zeros((n, 3))) if grad else 0.0
+	M = len(phi_q)
+	phi_q = np.asarray(phi_q, dtype=np.int64)
+	psi_q = np.asarray(psi_q, dtype=np.int64)
+	# Stack φ and ψ quartets — shared Bekker math via concatenation.
+	quartets = np.concatenate([phi_q, psi_q], axis=0)
+	i_idx, j_idx, k_idx, l_idx = quartets.T
+	b1 = _wrap(coords[j_idx] - coords[i_idx], box)
+	b2 = _wrap(coords[k_idx] - coords[j_idx], box)
+	b3 = _wrap(coords[l_idx] - coords[k_idx], box)
+	n1 = np.cross(b1, b2)
+	n2 = np.cross(b2, b3)
+	b2_mag = np.linalg.norm(b2, axis=1)
+	b2n = b2 / b2_mag[:, None]
+	ang = np.arctan2(
+		np.einsum('ij,ij->i', np.cross(n1, b2n), n2),
+		np.einsum('ij,ij->i', n1, n2))
+	phi, psi = ang[:M], ang[M:]
+	# Gather per-residue 24×24 CMAP tables.
+	P  = Parameters['cmap']
+	df = P['default']
+	tables = np.stack([np.asarray(P.get(c, df), dtype=np.float64)
+		for c in codes])                             # (M, N, N)
+	N_grid = tables.shape[1]
+	H = 2.0 * np.pi / N_grid
+	# Map angles [-π, π) → [0, N) grid coords; find cell (i, j) and (u, v).
+	x = (phi + np.pi) / H
+	y = (psi + np.pi) / H
+	gi = np.floor(x).astype(np.int64) % N_grid
+	gj = np.floor(y).astype(np.int64) % N_grid
+	u = x - np.floor(x)
+	v = y - np.floor(y)
+	# 4×4 stencil per residue: stencil[m, a, b]=tables[m,(gi+a-1)%N,(gj+b-1)%N].
+	off = np.array([-1, 0, 1, 2])
+	a_grid = (gi[:, None, None] + off[None, :, None]) % N_grid
+	b_grid = (gj[:, None, None] + off[None, None, :]) % N_grid
+	stencil = tables[np.arange(M)[:, None, None], a_grid, b_grid]    # (M, 4, 4)
+	# Catmull-Rom basis weights and their u/v derivatives.
+	uw  = 0.5 * np.stack([-u + 2*u**2 - u**3, 2 - 5*u**2 + 3*u**3,
+		u + 4*u**2 - 3*u**3, -u**2 + u**3], axis=-1)
+	vw  = 0.5 * np.stack([-v + 2*v**2 - v**3, 2 - 5*v**2 + 3*v**3,
+		v + 4*v**2 - 3*v**3, -v**2 + v**3], axis=-1)
+	duw = 0.5 * np.stack([-1 + 4*u - 3*u**2, -10*u + 9*u**2,
+		1 + 8*u - 9*u**2, -2*u + 3*u**2], axis=-1)
+	dvw = 0.5 * np.stack([-1 + 4*v - 3*v**2, -10*v + 9*v**2,
+		1 + 8*v - 9*v**2, -2*v + 3*v**2], axis=-1)
+	E_per = np.einsum('ma,mab,mb->m', uw, stencil, vw)
+	dE_du = np.einsum('ma,mab,mb->m', duw, stencil, vw)
+	dE_dv = np.einsum('ma,mab,mb->m', uw, stencil, dvw)
+	# Cell-fraction gradient → angular gradient (cell width = H rad).
+	dU_dphi = dE_du / H
+	dU_dpsi = dE_dv / H
+	energy = float(np.sum(E_per))
+	if not grad: return energy
+	# Bekker dihedral force scatter on stacked quartets — same math as
+	# dihedral_potential, applied once on (2M, 4) with stacked dU/dφ + dU/dψ.
+	dU_d = np.concatenate([dU_dphi, dU_dpsi])
+	n1_sq = np.einsum('ij,ij->i', n1, n1)
+	n2_sq = np.einsum('ij,ij->i', n2, n2)
+	Fi = -(dU_d * b2_mag / n1_sq)[:, None] * n1
+	Fl =  (dU_d * b2_mag / n2_sq)[:, None] * n2
+	b1_dot_b2 = np.einsum('ij,ij->i', b1, b2)
+	b3_dot_b2 = np.einsum('ij,ij->i', b3, b2)
+	b2_sq = b2_mag**2
+	Fj = -((b1_dot_b2/b2_sq+1.0)[:,None]*Fi) + (b3_dot_b2/b2_sq)[:,None]*Fl
+	Fk = -(Fi + Fj + Fl)
+	forces = np.zeros((n, 3), dtype=np.float64)
+	np.add.at(forces, i_idx, Fi)
+	np.add.at(forces, j_idx, Fj)
+	np.add.at(forces, k_idx, Fk)
+	np.add.at(forces, l_idx, Fl)
 	return energy, forces
 
 
