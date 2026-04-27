@@ -48,19 +48,19 @@ Parameters = {
 		('C',  'CB', 'H' ): (50.0, 109.5, 0.0, 1.500),
 		'default': (50.0, 109.5, 0.0, 1.500)},
 	'lennard_jones': {
-		#i     sigma  epsilon
-		'H' : (2.886, 0.044),
-		'C' : (3.851, 0.105),
-		'N' : (3.660, 0.069),
-		'O' : (3.500, 0.060),
-		'F' : (3.364, 0.050),
-		'P' : (4.147, 0.305),
-		'S' : (4.035, 0.274),
-		'Cl': (3.947, 0.227),
-		'Br': (4.189, 0.251),
-		'I' : (4.500, 0.339),
-		'Se': (4.205, 0.291),
-		'default': (3.851, 0.105)},
+		#i     sigma  epsilon alpha
+		'H' : (2.886, 0.044, 0.496),
+		'C' : (3.851, 0.105, 1.334),
+		'N' : (3.660, 0.069, 1.073),
+		'O' : (3.500, 0.060, 0.837),
+		'F' : (3.364, 0.050, 0.444),
+		'P' : (4.147, 0.305, 1.828),
+		'S' : (4.035, 0.274, 2.500),
+		'Cl': (3.947, 0.227, 2.315),
+		'Br': (4.189, 0.251, 3.013),
+		'I' : (4.500, 0.339, 4.692),
+		'Se': (4.205, 0.291, 2.700),
+		'default': (3.851, 0.105, 1.000)},
 	'electrostatic': {
 		'epsilon_r': 1.0},
 	'scaling_14': {
@@ -84,6 +84,20 @@ Parameters = {
 		('C', 'CA', 'N',  'O' ): (1.10, 2, 180.0),
 		('N', 'C',  'CA', 'H' ): (1.10, 2, 180.0),
 		'default': (1.10, 2, 180.0)},
+#	'polarisation': {
+#		# Per-atom polarisability α [Å³]. AMOEBA-derived defaults.
+#		'H' : 0.496,
+#		'C' : 1.334,
+#		'N' : 1.073,
+#		'O' : 0.837,
+#		'F' : 0.444,
+#		'P' : 1.828,
+#		'S' : 2.500,
+#		'Cl': 2.315,
+#		'Br': 3.013,
+#		'I' : 4.692,
+#		'Se': 2.700,
+#		'default': 1.000},
 }
 
 def _atomtype(atom_index):
@@ -446,6 +460,70 @@ def ub_potential(pose):
 	k_ub, s0 = params[:, 2], params[:, 3]
 	return float(np.sum(k_ub * (r - s0)**2))
 
+def polarisation_potential(pose, alg='constant'):
+	'''
+	Calculates total Polarisation potential energy ½·Σᵢ αᵢ·|Eᵢ|² where
+	Eᵢ is the local electric field at atom i from all other permanent
+	charges (excluding 1-2 and 1-3 pairs, scaling 1-4 pairs by f_elec).
+	Non-iterative — uses permanent charges only, no self-consistency.
+	Arguments:
+	----------
+		pose: Pose - molecule source protein, DNA, RNA, or Molecule pose
+		alg:  Str algorithm type either 'constant' or 'ddd'
+	Returns:
+	--------
+		float: potential energy in kcal/mol
+	'''
+	atoms = pose.data['Atoms']
+	n = len(atoms)
+	coords = np.asarray(pose.data['Coordinates'], dtype=np.float64)
+	idx = np.array(
+		[(int(k), int(j)) for k, vs in pose.data['Bonds'].items()
+		for j in vs], dtype=np.int64).reshape(-1, 2)
+	idx.sort(axis=1)
+	pairs = np.unique(idx[idx[:, 0] != idx[:, 1]], axis=0)
+	flat = np.concatenate([pairs, pairs[:, ::-1]])
+	nbrs = {int(a): np.sort(flat[flat[:, 0] == a, 1])
+		for a in np.unique(flat[:, 0])}
+	excl_13 = np.array(
+		[(int(i), int(k)) for j, ns in nbrs.items()
+		for p, i in enumerate(ns) for k in ns[p+1:]],
+		dtype=np.int64).reshape(-1, 2)
+	excl_14 = np.array(
+		[(int(i), int(l)) for j, k in pairs
+		for i in nbrs[int(j)] if i != k
+		for l in nbrs[int(k)] if l != j and l != i],
+		dtype=np.int64).reshape(-1, 2)
+	excl_14.sort(axis=1)
+	excl_14 = np.unique(excl_14[excl_14[:, 0] != excl_14[:, 1]], axis=0)
+	q = np.array([atoms[i][2] for i in range(n)], dtype=np.float64)
+	P  = Parameters['lennard_jones']
+	df = P['default']
+	alpha = np.array(
+		[P.get(_atomtype(atoms[i]), P.get(atoms[i][1], df))[2]
+		for i in range(n)], dtype=np.float64)
+	dr = coords[:, None, :] - coords[None, :, :]
+	r = np.linalg.norm(dr, axis=-1)
+	np.fill_diagonal(r, 1.0)
+	excl = np.eye(n, dtype=bool)
+	excl[pairs[:, 0], pairs[:, 1]] = True
+	excl[pairs[:, 1], pairs[:, 0]] = True
+	excl[excl_13[:, 0], excl_13[:, 1]] = True
+	excl[excl_13[:, 1], excl_13[:, 0]] = True
+	scal14 = np.zeros((n, n), dtype=bool)
+	scal14[excl_14[:, 0], excl_14[:, 1]] = True
+	scal14[excl_14[:, 1], excl_14[:, 0]] = True
+	scal14 &= ~excl
+	f_elec = Parameters['scaling_14']['f_elec']
+	weight = np.where(excl, 0.0, np.where(scal14, f_elec, 1.0))
+	epsilon_r = Parameters['electrostatic']['epsilon_r']
+	if   alg == 'constant': coeff = 332.06 * q[None, :] / (epsilon_r * r**3)
+	elif alg == 'ddd':      coeff = 332.06 * q[None, :] / (epsilon_r * r**4)
+	else: raise Exception('Algorithm not supported, choose (constant or ddd)')
+	coeff = coeff * weight
+	E = np.einsum('ij,ijk->ik', coeff, dr)
+	E_sq = np.sum(E**2, axis=1)
+	return float(0.5 * np.sum(alpha * E_sq))
 
 
 
