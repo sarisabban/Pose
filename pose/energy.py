@@ -66,6 +66,24 @@ Parameters = {
 	'scaling_14': {
 		'f_lj'  : 0.5,
 		'f_elec': 1.0 / 1.2},
+	'dihedrals': {
+		#i     j     k     l       k_phi  n  phi0_deg
+		('CA', 'C',  'N',  'CA'): [(2.50, 2, 180.0)],
+		('C',  'N',  'CA', 'C' ): [(0.20, 1, 180.0), (0.20, 2,   0.0)],
+		('N',  'CA', 'C',  'N' ): [(0.45, 2, 180.0)],
+		('N',  'CA', 'CB', 'HB'): [(0.16, 3,   0.0)],
+		('C',  'CA', 'CB', 'HB'): [(0.16, 3,   0.0)],
+		('HA', 'CA', 'CB', 'HB'): [(0.16, 3,   0.0)],
+		# Generic element-pair stand-ins.
+		('C',  'C',  'C',  'C' ): [(0.18, 3,   0.0)],
+		('C',  'C',  'C',  'H' ): [(0.16, 3,   0.0)],
+		('H',  'C',  'C',  'H' ): [(0.15, 3,   0.0)],
+		'default': [(0.0, 1, 0.0)]},
+	'impropers': {
+		#a     b     c     d      k_phi n  phi0_deg
+		('C', 'CA', 'N',  'O' ): (1.10, 2, 180.0),
+		('N', 'C',  'CA', 'H' ): (1.10, 2, 180.0),
+		'default': (1.10, 2, 180.0)},
 }
 
 def _atomtype(atom_index):
@@ -279,7 +297,61 @@ def electrostatic_potential(pose, alg='constant'):
 	f_elec = Parameters['scaling_14']['f_elec']
 	return float(np.sum(elec[mask_far]) + f_elec * np.sum(elec[mask_14]))
 
-
+def dihedral_potential(pose):
+	'''
+	Calculates the total Proper Dihedral (torsion) potential for i-j-k-l atoms
+	Arguments:
+	----------
+		pose: Pose - molecule source protein, DNA, RNA, or Molecule pose
+	Returns:
+	--------
+		float: potential energy in kcal/mol
+	'''
+	atoms = pose.data['Atoms']
+	coords = np.asarray(pose.data['Coordinates'], dtype=np.float64)
+	idx = np.array(
+		[(int(k), int(j)) for k, vs in pose.data['Bonds'].items()
+		for j in vs], dtype=np.int64).reshape(-1, 2)
+	idx.sort(axis=1)
+	pairs = np.unique(idx[idx[:, 0] != idx[:, 1]], axis=0)
+	flat = np.concatenate([pairs, pairs[:, ::-1]])
+	nbrs = {int(a): np.sort(flat[flat[:, 0] == a, 1])
+		for a in np.unique(flat[:, 0])}
+	quartets = np.array(
+		[(int(i), int(j), int(k), int(l)) for j, k in pairs
+		for i in nbrs[int(j)] if i != k
+		for l in nbrs[int(k)] if l != j and l != i],
+		dtype=np.int64).reshape(-1, 4)
+	rev = quartets[:, ::-1]
+	swap = (quartets[:, 0] > rev[:, 0]) | (
+		(quartets[:, 0] == rev[:, 0]) & (quartets[:, 1] > rev[:, 1]))
+	quartets = np.where(swap[:, None], rev, quartets)
+	quartets = np.unique(quartets, axis=0)
+	if len(quartets) == 0: return 0.0
+	i_idx, j_idx, k_idx, l_idx = quartets.T
+	b1 = coords[j_idx] - coords[i_idx]
+	b2 = coords[k_idx] - coords[j_idx]
+	b3 = coords[l_idx] - coords[k_idx]
+	n1 = np.cross(b1, b2)
+	n2 = np.cross(b2, b3)
+	b2n = b2 / np.linalg.norm(b2, axis=1, keepdims=True)
+	phi = np.arctan2(
+		np.einsum('ij,ij->i', np.cross(n1, b2n), n2),
+		np.einsum('ij,ij->i', n1, n2))
+	P  = Parameters['dihedrals']
+	df = P['default']
+	component_lists = []
+	for i, j, k, l in quartets:
+		t = (_atomtype(atoms[int(i)]), _atomtype(atoms[int(j)]),
+			_atomtype(atoms[int(k)]), _atomtype(atoms[int(l)]))
+		if t > t[::-1]: t = t[::-1]
+		component_lists.append(P.get(t, df))
+	counts = np.array([len(c) for c in component_lists], dtype=np.int64)
+	phi_flat = np.repeat(phi, counts)
+	flat_p = np.array([row for cl in component_lists for row in cl],
+		dtype=np.float64).reshape(-1, 3)
+	k_phi, n_mult, phi0 = flat_p[:, 0], flat_p[:, 1], np.deg2rad(flat_p[:, 2])
+	return float(np.sum(k_phi * (1 + np.cos(n_mult * phi_flat - phi0))))
 
 
 
