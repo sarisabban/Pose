@@ -155,7 +155,7 @@ def angle_potential(pose):
 	K_theta, theta0 = params[:, 0], np.deg2rad(params[:, 1])
 	return float(np.sum(K_theta * (theta - theta0)**2))
 
-def LJ_potential(pose, alg='12-6'):
+def lj_potential(pose, alg='12-6'):
 	'''
 	Calculates the total Lennard-Jones non-bonded potential for all atom pairs
 	Arguments:
@@ -222,6 +222,62 @@ def LJ_potential(pose, alg='12-6'):
 	f_lj = Parameters['scaling_14']['f_lj']
 	return float(np.sum(lj[mask_far]) + f_lj * np.sum(lj[mask14]))
 
+def electrostatic_potential(pose, alg='constant'):
+	'''
+	Calculates the total Electrostatic non-bonded potential for all atom pairs
+	Arguments:
+	----------
+		pose: Pose - molecule source protein, DNA, RNA, or Molecule pose
+		alg:  Str algorithm type either 'constant' (uniform εr) or 'ddd'
+			(distance-dependent dielectric, ε(r) = εr·r)
+	Returns:
+	--------
+		float: potential energy in kcal/mol
+	'''
+	atoms = pose.data['Atoms']
+	n = len(atoms)
+	coords = np.asarray(pose.data['Coordinates'], dtype=np.float64)
+	idx = np.array(
+		[(int(k), int(j)) for k, vs in pose.data['Bonds'].items()
+		for j in vs], dtype=np.int64).reshape(-1, 2)
+	idx.sort(axis=1)
+	pairs = np.unique(idx[idx[:, 0] != idx[:, 1]], axis=0)
+	flat = np.concatenate([pairs, pairs[:, ::-1]])
+	nbrs = {int(a): np.sort(flat[flat[:, 0] == a, 1])
+		for a in np.unique(flat[:, 0])}
+	excl_13 = np.array(
+		[(int(i), int(k)) for j, ns in nbrs.items()
+		for p, i in enumerate(ns) for k in ns[p+1:]],
+		dtype=np.int64).reshape(-1, 2)
+	excl_14 = np.array(
+		[(int(i), int(l)) for j, k in pairs
+		for i in nbrs[int(j)] if i != k
+		for l in nbrs[int(k)] if l != j and l != i],
+		dtype=np.int64).reshape(-1, 2)
+	excl_14.sort(axis=1)
+	excl_14 = np.unique(excl_14[excl_14[:, 0] != excl_14[:, 1]], axis=0)
+	q = np.array([atoms[i][2] for i in range(n)], dtype=np.float64)
+	qq = q[:, None] * q[None, :]
+	r = np.linalg.norm(coords[:, None, :] - coords[None, :, :], axis=-1)
+	np.fill_diagonal(r, 1.0)
+	excl = np.eye(n, dtype=bool)
+	excl[pairs[:, 0], pairs[:, 1]] = True
+	excl[pairs[:, 1], pairs[:, 0]] = True
+	excl[excl_13[:, 0], excl_13[:, 1]] = True
+	excl[excl_13[:, 1], excl_13[:, 0]] = True
+	scal14 = np.zeros((n, n), dtype=bool)
+	scal14[excl_14[:, 0], excl_14[:, 1]] = True
+	scal14[excl_14[:, 1], excl_14[:, 0]] = True
+	scal14 &= ~excl
+	upper = np.triu(np.ones((n, n), dtype=bool), k=1)
+	mask_far = (~excl) & (~scal14) & upper
+	mask_14  = scal14 & upper
+	epsilon_r = Parameters['electrostatic']['epsilon_r']
+	if   alg == 'constant': elec = (332.06 * qq) / (epsilon_r * r)
+	elif alg == 'ddd':      elec = (332.06 * qq) / (epsilon_r * r * r)
+	else: raise Exception('Algorithm not supported, choose (constant or ddd)')
+	f_elec = Parameters['scaling_14']['f_elec']
+	return float(np.sum(elec[mask_far]) + f_elec * np.sum(elec[mask_14]))
 
 
 
