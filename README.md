@@ -1,13 +1,3 @@
-<div align="center">
-<pre>
-██████╗  ██████╗ ███████╗███████╗
-██╔══██╗██╔═══██╗██╔════╝██╔════╝
-██████╔╝██║   ██║███████╗█████╗  
-██╔═══╝ ██║   ██║╚════██║██╔══╝  
-██║     ╚██████╔╝███████║███████╗
-╚═╝      ╚═════╝ ╚══════╝╚══════╝
-</pre></div>
-
 # Pose
 A bare-metal Python library for building and manipulating protein and nucleic acid molecular structures
 
@@ -44,6 +34,7 @@ Using this data structure, Pose can build and manipulate polypeptides and nuclei
 - PDB and mmCIF file import and export
 - Pythonic zero-based indexing throughout (unlike PDB's one-based convention)
 - Bundled bare-metal force field with analytic gradients, periodic-boundary support, and a hash-cached topology
+- Hybrid physics + statistical `Score()` for protein design — chirality-aware end to end across L-AA, D-AA, mixed L/D, and non-canonical residues
 - Four production protocols: minimisation, simulated annealing, rotamer sidechain packing, and molecular dynamics simulation
 
 ---
@@ -71,76 +62,58 @@ pip3 install git+https://github.com/sarisabban/Pose
 ```python
 from pose import *
 
-# Build a peptide
+# === Build a peptide (no external files needed) ===
 p = Pose()
-p.Build('MSLESNRGI', chain='A', fmt='protein') # Uppercase = L-amino acids, lowercase = D-amino acids
-p.Build('MSLESNRGI', chain='B', fmt='protein') # Add a second chain
-p.GetInfo()                                    # Print structured summary
+p.Build('MSLESNRGI', chain='A', fmt='Protein')   # Uppercase=L, lowercase=D
+p.Build('MSLESNRGI', chain='B', fmt='Protein')   # Add a second chain
+p.GetInfo()                                      # Print structured summary
 
-# Inspect properties
+# === Inspect ===
 print('Sequence:', p.data['FASTA'])
-print('Mass:', p.data['Mass'], 'Da')
-print('Rg:', p.data['Rg'], 'Å')
+print('Mass:',     p.data['Mass'], 'Da')
+print('Rg:',       p.data['Rg'], 'Å')
 
-# Rotate backbone angles (indices are zero-based)
+# === Manipulate backbone (zero-based indexing) ===
 p.RotateDihedral(1, -60, 'PHI')
 p.RotateDihedral(1, -45, 'PSI')
-
-# Mutate and export
-p.Mutate(2, 'V')        # Change residue at index 2 (Leu) → Val
+p.Mutate(2, 'V')                                 # residue 2 (Leu) → Val
 p.Export('peptide.pdb')
 
-# Import a protein
-p = Pose()
-p.Import('1YN3.pdb')
-p.GetInfo()
+# === Same APIs work for D-amino acids and mixed L/D sequences ===
+p_d = Pose()
+p_d.Build('MsLeSnRgI', chain='A', fmt='Protein') # mixed L/D — chirality-aware
 
-# Import a nucleic acid
-p = Pose()
-p.Import('1BNA.pdb')
-p.GetInfo()
-
-# Build a nucleic acid
-p = Pose()
-p.Build('ATGCGTACGTTCCGGCAGACGT', chain='A', fmt='DNA')
-p.GetInfo()
-```
-
-**Energy and simulation:**
-```python
-from pose import *
-from tools import *
-from energy import *
-
-p = Pose()
-p.Import('1YN3.pdb', chain='A')
-p.ReBuild()                                                # add hydrogens
-
+# === Energy, design score, and protocols ===
 ff = ForceField()
-E, F = ff(p)                                               # potential energy + forces
+sc = Score(ff=ff)
 
-E_min, log = Minimise(p, ff)                               # FIRE2 relaxation
-E_md,  log = MolecularDynamics(p, ff, n_steps=1000,        # 2 ps NVT
-             dt_fs=2.0, T=300.0, thermostat='langevin')
+E, F        = ff(p)                              # potential energy + forces
+total       = sc(p)                              # design score (kcal/mol)
+total, term = sc(p, decompose=True)              # 8-term breakdown
+
+E_min, log  = Minimise(p, ff)                    # FIRE2 relaxation
+E_md,  log  = MolecularDynamics(p, ff, n_steps=1000,
+              dt_fs=2.0, T=300.0, thermostat='langevin')
+E_pk,  log  = Pack(p, score=sc)                  # rotamer packing ranked by Score
 ```
 
-**D-amino acids** — use lowercase letters:
-Uppercase sequence letters build L-amino acids (natural form). Lowercase builds D-amino acids (mirror images). Mixed sequences are fully supported.
-```python
-p.Build('ACEG')   # All L-amino acids
-p.Build('aceg')   # All D-amino acids
-p.Build('GAg')    # G=L-Gly, A=L-Ala, g=D-Gly
-p.Build('AcEg')   # Mixed L/D sequence
-```
+> Uppercase sequence letters build L-amino acids (natural form), lowercase builds D-amino acids (mirror images), and mixed sequences (e.g. `'MsLeSnRgI'` above) are fully supported. `Score()` produces correct, chirality-aware values for them automatically — see the **Score** subsection in the API Reference for the per-term breakdown.
 
 **Importing a PDB file:**
 ```python
 p = Pose()
-p.Import('1TQG.pdb', chain='A')
-p.ReBuild()     # Adds missing hydrogens
+p.Import('1TQG.pdb', chain='A')   # Or '1BNA.pdb' for a DNA/RNA structure
+p.ReBuild()                       # Adds missing hydrogens
 ```
 
-You can run p.ReBuild() after Import() to add hydrogens to the structure. But understand that a new synthetic structure will be built, therefore you will lose the original occupancy and temperature-factor for each atom (replaces with 1.0 and 0.0).
+You can run `p.ReBuild()` after `Import()` to add hydrogens to the structure. But understand that a new synthetic structure will be built, therefore you will lose the original occupancy and temperature-factor for each atom (replaces with 1.0 and 0.0).
+
+**Building DNA/RNA:**
+```python
+p = Pose()
+p.Build('ATGCGTACGTTCCGGCAGACGT', chain='A', fmt='DNA')
+p.GetInfo()
+```
 
 **Importing a molecule:**
 ```python
@@ -151,10 +124,13 @@ m.GetInfo()
 
 **OpenMM plugin:**
 ```python
+import io
+import numpy as np
+from sys import stdout
+from pose import Pose
 from openmm import *
 from openmm.app import *
 from openmm.unit import *
-from sys import stdout
 
 p = Pose()
 p.Import('1YN3.pdb', chain='A')
@@ -177,6 +153,8 @@ simulation.reporters.append(PDBReporter('output.pdb', 1000))
 simulation.reporters.append(StateDataReporter(stdout, 1000, step=True, potentialEnergy=True, temperature=True))
 simulation.step(10000)
 ```
+
+> Note: `from openmm.app import *` rebinds `ForceField` to OpenMM's class. If you mix this snippet with the other Quick Start examples (which start with `from pose import *`), make sure the OpenMM star imports come *after* `from pose import *` — the last star import wins, and this example needs OpenMM's `ForceField('amber99sb.xml', ...)`. If you want both classes accessible in the same session, use explicit imports instead of `*` (e.g. `from openmm.app import ForceField as OpenMMForceField`).
 
 **RDKit plugin:**
 ```python
@@ -216,12 +194,11 @@ Each class have similar methods and data structure, but with slight differences 
 | `p.Export('out.pdb', fmt=None)`                            | Write the full structure, and all chains, to a PDB or mmCIF file. `fmt='PDB'` or `fmt='CIF'` will export the structure as a string and not a file (ideal to plug the structure to other libraries such as OpenMM) |
 | `m.Export('out.sdf', fmt=None)`                            | Write the full structure to a PDB, SDF, mmCIF, MOL, or MOL2 file. `fmt='PDB'` or `fmt='CIF'` or `'SDF'`/`'MOL'`/`'MOL2'` will export the structure as a string and not a file (ideal to plug the structure to other libraries such as OpenMM) |
 | `p.Build('MSLESNRGI', chain='A', fmt='protein')`           | Build a macromolecule from a one-letter sequence. For a polypeptide add the sequence and choose the format `fmt='Protein'`, uppercase = L-amino acids, lowercase = D-amino acids. For a nucleic acid add the sequence and choose the format `fmt='DNA'` or `fmt='RNA'`. You can add more chains by repeating the command with different chain `chain='A'` values. A structure can either be a protein, or a nucleic acid (DNA/RNA), it cannot be a mixture of the two |
-| `p.ReBuild(sequence=None, mirror=False, _mutate=None)`     | Rebuild the polypeptide or nucleic acid. Use `sequence='AGLMTSWVLVA'` to rebuild the structure with multiple bulk mutations on chain A. Use `sequence={'A':'MSLKLSTVVA', 'B':'ASLKSWFWVA'}` to perform mutations at multiple chains at the same time. Use `mirror=True` to rebuild a protein and convert L-amino acids → D-amino acids and D-amino acids → L-amino acids. Will add missing hydrogens. For DNA and RNA, the `sequence=''` length must match exactly the original sequence length, otherwise an error will be raised |
-| `p.Mutate(1, 'V'. fast=True)`                              | Mutate a single monomer. For proteins: `p.Mutate(1, 'V')` = residue 1 → L-Valine, `p.Mutate(1, 'v')` = residue 1 → D-Valine. For DNA: `p.Mutate(0, 'T')` = nucleotide 0 → Thymine. For RNA: `p.Mutate(0, 'U')` = nucleotide 0 → Uracil. For double-stranded nucleic acids, the complementary base is also updated automatically. The `fast=True` argument means the mutation is performed by vector addition without ensuring the stability of the backbone (also the `CalcDSSP(), CalcSASA, and CalcRg()` etc.. are not re-computed) so these needs to be called after the mutation, in return the mutation is very fast, ideal for large mutation simulations. If `fast=False` the mutated residue is added to the structure and the entire structure rebuilt using ReBuild(), this is more accurate but very slow for large simulations |
-
-
+| `p.ReBuild(sequence=None, mirror=False, _mutated=None)`    | Rebuild the polypeptide or nucleic acid. Use `sequence='AGLMTSWVLVA'` to rebuild the structure with multiple bulk mutations on chain A. Use `sequence={'A':'MSLKLSTVVA', 'B':'ASLKSWFWVA'}` to perform mutations at multiple chains at the same time. Use `mirror=True` to rebuild a protein and convert L-amino acids → D-amino acids and D-amino acids → L-amino acids. Will add missing hydrogens. For DNA and RNA, the `sequence=''` length must match exactly the original sequence length, otherwise an error will be raised |
+| `p.Mutate(1, 'V', fast=True)`                              | Mutate a single monomer. For proteins: `p.Mutate(1, 'V')` = residue 1 → L-Valine, `p.Mutate(1, 'v')` = residue 1 → D-Valine. For DNA: `p.Mutate(0, 'T')` = nucleotide 0 → Thymine. For RNA: `p.Mutate(0, 'U')` = nucleotide 0 → Uracil. For double-stranded nucleic acids, the complementary base is also updated automatically. The `fast=True` argument means the mutation is performed by vector addition without ensuring the stability of the backbone (also the `CalcDSSP(), CalcSASA, and CalcRg()` etc.. are not re-computed) so these needs to be called after the mutation, in return the mutation is very fast, ideal for large mutation simulations. If `fast=False` the mutated residue is added to the structure and the entire structure rebuilt using ReBuild(), this is more accurate but very slow for large simulations |
 
 ### Measurements
+
 | Method                                       | Description |
 |----------------------------------------------|-------------|
 | `p.GetDistance(0, 'N', 5, 'CA')`             | Get the distance in Å between any two atoms. Example: residue 0 nitrogen atom to residue 5 CA atom |
@@ -254,9 +231,10 @@ Each class have similar methods and data structure, but with slight differences 
 | `p.CalcCharge(iterations=6)`                 | Calculate the Gasteiger-Marsili partial charges to all atoms using iterative equalization (default 6 iterations), updates the value of `p.data['Atoms'][index][2]` |
 | `m.CalcCharge(iterations=6)`                 | Calculate the Gasteiger-Marsili partial charges to all atoms using iterative equalization (default 6 iterations), updates the value of `m.data['Atoms'][index][2]` |
 | `p.CalcDSSP()`                               | Calculates each amino acid's secondary structure assignments, only for proteins, and stores them in `p.data['Amino Acids'][i][4]` and updates `p.data['SS'][CHAIN]`, therefore this is where you can get the SS sequence of each chain. Codes: H=α-helix, G=3₁₀-helix, I=π-helix, E=β-sheet, B=β-bridge, T=turn, S=bend, L=loop, P=PPII-helix |
-| `p.CalcSASA(n_points=100, probe_radius=1.4)` | Calculates the Solvent Accessible Surface Area (SASA) for each amino acid, only for proteins, using golden sphere sampling. `n_points` controls sampling density, `probe_radius` is the solvent probe radius in Å (default 1.4 for water). Adds the value to `p.data['Amino Acids'][i][6]` |
+| `p.CalcSASA(n_points=960, probe_radius=1.4)` | Calculates the Solvent Accessible Surface Area (SASA) for each amino acid, only for proteins, using golden sphere sampling. `n_points` controls sampling density, `probe_radius` is the solvent probe radius in Å (default 1.4 for water). Adds the value to `p.data['Amino Acids'][i][6]` |
 
 ### Manipulation
+
 | Method                                                   | Description |
 |----------------------------------------------------------|-------------|
 | `p.AdjustDistance(0, 'N', 4, 'C', 17)`                   | Set the distance between any two atoms in (Å). Example: set the distance between N in residue 0 and C in residue 4 to 17 Å. Order matters: the second atom (and all atoms downstream of it on the same chain) moves, while the first atom stays fixed. `(0, 'N', 0, 'CA', d)` ≠ `(0, 'CA', 0, 'N', d)` |
@@ -268,7 +246,7 @@ Each class have similar methods and data structure, but with slight differences 
 | `p.MovePose(theta=5, u=[18, 10, 5], l=6, ori=[0, 0, 0])` | Rotate and/or translate the whole structure. `theta` = rotation angle in degrees, `u` = rotation axis vector (will be normalised), `l` = translation distance in Å, `ori` = target point to translate towards. All parameters are optional (default `None`); you can rotate only, translate only, or both |
 | `m.MovePose(theta=5, u=[18, 10, 5], l=6, ori=[0, 0, 0])` | Rotate and/or translate the whole structure. `theta` = rotation angle in degrees, `u` = rotation axis vector (will be normalised), `l` = translation distance in Å, `ori` = target point to translate towards. All parameters are optional (default `None`); you can rotate only, translate only, or both |
 
-### Force Field
+### Force Field &  Energy Score
 
 The `ForceField()` class evaluates the total potential energy and analytical per-atom forces of a `Pose`, summing nine bonded and non-bonded terms with a hash-cached topology so that repeated calls during minimisation, annealing, or MD only recompute the coordinate-dependent quantities.
 
@@ -286,6 +264,31 @@ The `ForceField()` class evaluates the total potential energy and analytical per
 | `ff.ElectrostaticPotential(pose, cache, alg='constant', grad=True, box=None)`   | Electrostatic non-bonded term. `alg='constant'` uses uniform εᵣ; `alg='ddd'` uses a distance-dependent dielectric `ε(r) = εᵣ·r` |
 | `ff.PolarisationPotential(pose, cache, alg='constant', grad=True, box=None)`    | Induced-dipole polarisation term, `−½·Σ α_i·\|E_i\|²` with the per-atom field built from neighbour charges |
 | `ff.CMAPPotential(pose, cache, grad=True, box=None)`                            | CMAP backbone (φ, ψ) cross-term correction over every interior protein residue, evaluated by bicubic Catmull-Rom interpolation on the per-residue 24×24 energy grids in `parameters.json` |
+
+The `Score()` class is a hybrid physics + statistical energy function for protein design. It sums eight terms (four reused from `ForceField`, four added) and returns a single design score in kcal/mol-equivalent units. All term weights, reference-state values, atom-type tables, and grids are loaded once from `parameters.json` at construction. **Score is chirality-aware from line zero** — L-amino acids, D-amino acids, mixed L/D sequences, and non-canonical residues all score correctly with no extra arguments or special-cased call sites. **Missing parameters raise `KeyError` with the missing key named** — the score function never silently substitutes defaults for unknown amino acids or atom types.
+
+| Method                                    | Description |
+|-------------------------------------------|-------------|
+| `sc = Score(ff=None, box=None)`           | Build a design scorer. `ff` is a reusable `ForceField` instance used for the four physics terms (LJ, Electrostatic, CMAP) and the topology cache; created internally if `None`. `box` is the optional PBC box: `None` disables PBC, `(3,)` orthorhombic, `(3, 3)` triclinic, in Å. The 8 term weights, LK Lazaridis-Karplus parameters, H-bond geometry parameters, KBP table, per-aa reference-state values, and rotamer Gaussian σ are all read once from `parameters.json` |
+| `total = sc(pose, decompose=False)`       | Evaluate the weighted total score in kcal/mol. Topology and atom-type caches are built on the first call and reused on subsequent calls until the pose's `Atoms` / `Bonds` / `Amino Acids` records change |
+| `total, terms = sc(pose, decompose=True)` | Same as above but also return a per-term dict with keys `'LJ'`, `'Electrostatic'`, `'LK'`, `'Hbond'`, `'CMAP'`, `'Rotamer'`, `'Reference'`, `'KBP'`. Useful for term-weight fitting and for diagnosing why a design scores poorly |
+
+The eight terms (three reused from `ForceField`, five added):
+
+| Term            | Source                       | Form |
+|-----------------|------------------------------|------|
+| `LJ`            | `ff.LJPotential`             | Lennard-Jones with 1-4 scaling |
+| `Electrostatic` | `ff.ElectrostaticPotential`  | Coulomb with `ε_r` or distance-dependent dielectric |
+| `CMAP`          | `ff.CMAPPotential`           | Per-residue (φ, ψ) backbone correction grid; D-AA grids are mirrored from L-AA grids in `_compile` automatically |
+| `LK`            | Added                        | Lazaridis-Karplus EEF1 implicit solvation. Per-atom (ΔG_free, λ, V) parameters from `parameters.json['lk_solvation']` |
+| `Hbond`         | Added                        | Kortemme-Baker geometric H-bond term, `E_r(r_HA) · F(θ_DHA) · F(θ_HAB)` over every donor-H/acceptor-base quartet detected from the bond graph (donor = N or O bonded to ≥1 H; acceptor = N or O with ≥1 heavy neighbour) |
+| `Rotamer`       | Added                        | Gaussian rotamer prior `½(Δχ/σ)²` centred on the BBDEP-predicted mean χ at the residue's current (φ, ψ). For D-AA the BBDEP grid is queried at (−φ, −ψ) and the predicted χ is negated, recovering the mirror-symmetric rotamer well |
+| `Reference`     | Added                        | Per-aa unfolded-state baseline `E_ref[aa]` summed over the sequence. Required for fair sequence-to-sequence comparison |
+| `KBP`           | Added                        | Knowledge-based pair potential, DFIRE-style. Sums `KBP[type_i, type_j, distance_bin]` over every long-range atom pair (`mask_far` in the cache) |
+
+> `Score()` is the single API surface in this library that is chirality-aware end to end — it produces correct, comparable design scores for D-amino acids, mixed L/D sequences, mirror-image proteins, and non-canonical residues without any extra arguments. ML-based ranking proxies (AlphaFold pLDDT, ProteinMPNN log-likelihoods) do not work in this regime because they were trained on canonical-L PDB data only.
+
+> All numerical values currently in `parameters.json` for the four added terms (`lk_solvation`, `hbond`, `kbp`, `ref_state`) and the term `weights` are placeholders. The math, vectorisation, and chirality logic are production-quality; replacing the placeholders with values fitted from your own PDB-derived dataset is the only remaining step before the score function is production-ready.
 
 ### Tools
 
@@ -313,7 +316,7 @@ These are standalone tools (not Pose() class methods) and thus are called on the
 | `Rotamers(10, pose)`                                               | Update χ dihedrals (rotamers) with the most-probable χ dihedrals for a residue given backbone phi, psi. Derived from the Dunbrack rotamer library |
 | `Minimise(pose, ff=None, max_steps=500, ftol=1.0, dt_fs=0.1, dt_max_fs=2.0, step_max=0.2, etol=1e-6, stall_k=10, box=None)`                                                                           | Relax pose coordinates using the FIRE2 algorithm (Guénolé et al. 2020) with a trust-region step limiter that bounds per-atom displacement to `step_max` Å. Mutates `pose.data['Coordinates']` in place. `ftol` is the convergence threshold on max\|force\| in kcal/mol/Å; `dt_fs` is the initial integration step in fs and `dt_max_fs` the adaptive ceiling; `etol` and `stall_k` trigger early stop after K consecutive stalled energy steps. Returns `(final_E, log)` where `log` carries `'energies'`, `'fmax'`, `'max_step'`, `'converged'`, `'n_steps'` |
 | `Anneal(pose, ff=None, n_steps=10000, T_start=2000.0, T_end=10.0, sigma_small=5.0, sigma_large=30.0, p_large=0.2, p_shear=0.5, target_acc=0.30, adapt_window=100, seed=None, box=None)`               | Simulated annealing over backbone φ/ψ with two Metropolis move types — single-angle (random φ or ψ) and shear (compensating ψᵢ +Δ / φᵢ₊₁ −Δ that leaves residues 0..i−1 unmoved). Each step picks a small (adaptive `sigma_small`) or large (fixed `sigma_large`) Gaussian perturbation; `sigma_small` is updated by Robbins-Monro every `adapt_window` small moves to track `target_acc` ~ 0.30. Geometric cooling from `T_start` to `T_end`. Returns `(E_best, log)` with `'energies'`, `'temperatures'`, `'accepted'`, `'move_types'` (0=single, 1=shear, 2=invalid), `'sigma_history'`, `'best_step'`. The pose is left at the lowest-energy frame |
-| `Pack(pose, ff=None, max_iter=10, include_bbdep=True, box=None)`                                                                                                                                      | Pack sidechains by ICM greedy iteration over discrete rotamers. The candidate set per residue is the cartesian product of the three canonical χ wells `{−60°, 60°, 180°}` for each χ angle, optionally augmented with the Dunbrack BBDEP-suggested χ vector (`include_bbdep=True`) read from `pose.aminoacids[aa]['BBDEP']` at the residue's current φ/ψ. Iterates over residues with sidechains, accepts the lowest-energy rotamer per residue, repeats until convergence or `max_iter`. Returns `(final_E, log)` with `'energies_per_iter'`, `'changes_per_iter'`, `'converged'` |
+| `Pack(pose, score=None, ff=None, max_iter=10, include_bbdep=True, box=None)`                                                                                                                          | Pack sidechains by ICM greedy iteration over discrete rotamers, ranked by `Score()`. The candidate set per residue is the cartesian product of the three canonical χ wells `{−60°, 60°, 180°}` for each χ angle, optionally augmented with the Dunbrack BBDEP-suggested χ vector (`include_bbdep=True`) read from `pose.aminoacids[aa]['BBDEP']` at the residue's current φ/ψ. Iterates over residues with sidechains, accepts the lowest-score rotamer per residue, repeats until convergence or `max_iter`. `score` is a reusable `Score` instance; if `None`, one is constructed from `ff` (or from a fresh `ForceField` if `ff` is also `None`). Using `Score` rather than the bare force field matters because the statistical terms (rotamer prior, KBP, reference state) discriminate native-like rotamer choices in a way pure-physics forces cannot. Returns `(final_E, log)` with `'energies_per_iter'`, `'changes_per_iter'`, `'converged'` |
 | `MolecularDynamics(pose, ff=None, n_steps=1000, dt_fs=2.0, T=300.0, thermostat='nve', friction_ps=1.0, constraints='hbonds', shake_tol=1e-8, shake_max=100, seed=None, trajectory_every=0, box=None)` | Velocity-Verlet NVE or BAOAB Langevin NVT integration. Initial velocities are sampled from Maxwell-Boltzmann at `T` with the centre-of-mass momentum zeroed and projected onto the constraint manifold. `thermostat='nve'` runs energy-conserving dynamics; `thermostat='langevin'` runs the BAOAB stochastic splitting at temperature `T` with friction `friction_ps` ps⁻¹. `constraints='hbonds'` enables vectorised SHAKE/RATTLE on every X–H bond (target lengths read from `parameters.json`), making `dt_fs=2.0` stable; `constraints='none'` disables them. `trajectory_every=k` saves a coordinate snapshot every k steps. Returns `(final_E, log)` with `'energies'`, `'kinetic'`, `'temperatures'`, `'frames'`, `'n_constraints'`, `'dof'` |
 
 > BLAST handles sequences beyond the 20 canonical L-amino acids automatically: **D-amino acids**: stored as lowercase letters in `pose.data['FASTA']`. BLAST uppercases both sequences before alignment, treating each D-amino acid as its L-counterpart for scoring purposes. This correctly reflects the chemical reality that D- and L-forms of the same residue have identical side-chain chemistry. **Non-canonical amino acids**: any letter not in the 20-letter BLOSUM62 alphabet falls back to: `+4` for a self-match (equal to the minimum BLOSUM62 diagonal), `−1` for a mismatch. This keeps non-canonical residues visible to the aligner without inflating scores.
@@ -472,9 +475,9 @@ This information resides in `database['Nucleotides'][NUCEOTIDE_TRICODE]`
 | `Bonds`           | Dictionary     | The bond graph as an adjacency list |
 | `BondOrders`      | Dictionary     | The bond order graph as an adjacency list, 1 = single bonds, 1.5 = aromatic resonance partial-double bond, 2 = double bonds, 3 = triple bonds |
 
-## Description of force field parameters in parameters.json:
+## Description of parameters in parameters.json:
 
-The `parameters.json` file holds every force-field parameter consumed by `ForceField()`, loaded once at construction time. Tuple-style keys are stored as dash-joined strings (`"C-CA"`, `"CA-C-N"`, `"CA-C-N-CA"`) and converted back to tuples internally for parameter lookup.
+The `parameters.json` file holds every numerical parameter consumed by both `ForceField()` and `Score()`, loaded once at each class's construction. Tuple-style force-field keys (bonds, angles, dihedrals, impropers) are stored as dash-joined strings (`"C-CA"`, `"CA-C-N"`, `"CA-C-N-CA"`) and converted back to tuples internally for parameter lookup. The score-side keys (`weights`, `ref_state`, `lk_solvation`, `hbond`, `kbp`, `rotamer`) raise `KeyError` on missing entries — there is no silent default.
 
 | Top-level Key   | Value Type     | Description of Values |
 |-----------------|----------------|-----------------------|
@@ -485,9 +488,15 @@ The `parameters.json` file holds every force-field parameter consumed by `ForceF
 | `lennard_jones` | Dict           | Per atom-type Lennard-Jones and polarisation parameters. Key is a single atom type (element or backbone label); value is `[σ, ε, α]` — Lennard-Jones σ in Å, ε well depth in kcal/mol, atomic polarisability α in Å³ |
 | `electrostatic` | Dict           | Global electrostatic parameters. `epsilon_r` is the relative dielectric constant used by `ElectrostaticPotential` and `PolarisationPotential` |
 | `scaling_14`    | Dict           | 1-4 non-bonded scaling factors. `f_lj` scales Lennard-Jones interactions between atoms separated by exactly three bonds; `f_elec` does the same for electrostatics |
-| `cmap`          | Dict           | Per-residue CMAP backbone correction grids. Key is a one-letter amino-acid code; value is a 24×24 list-of-lists of energies in kcal/mol over `(φ, ψ) ∈ [−π, π)²`. The `default` grid is used for any residue without a specific entry |
+| `cmap`          | Dict           | Per-residue CMAP backbone correction grids. Key is a one-letter amino-acid code; value is a 24×24 list-of-lists of energies in kcal/mol over `(φ, ψ) ∈ [−π, π)²`. Every amino-acid code that appears in the pose must have a per-aa grid; missing keys raise `KeyError` (no silent default) |
+| `weights`       | Dict           | Per-term linear weights applied by `Score()`. Keys: the 8 term names `'LJ'`, `'Electrostatic'`, `'LK'`, `'Hbond'`, `'CMAP'`, `'Rotamer'`, `'Reference'`, `'KBP'`. Values are scalar floats. With every weight at 1.0 (the placeholder), the score is the unweighted sum of the 8 terms |
+| `ref_state`     | Dict           | Per-amino-acid unfolded-state baseline used by `Score()._reference_state`. Keys are one-letter aa codes; the file ships all 26 supported codes (20 canonical + B, J, O, U, X, Z). Missing keys raise `KeyError` |
+| `lk_solvation`  | Dict           | Lazaridis-Karplus EEF1 implicit-solvation parameters used by `Score()._lk_solvation`. Inner key `atom_types` maps a composite `"{PDB_name}-{element}"` or element-only key to `[ΔG_free, λ, V]` — solvation free energy in kcal/mol, correlation length in Å, atomic volume in Å³. Lookup falls back from composite to element; missing keys raise `KeyError` |
+| `hbond`         | Dict           | Kortemme-Baker geometric H-bond parameters used by `Score()._hbond_geom`. Scalars: `well_depth` in kcal/mol; `r_opt`, `r_sigma` (Å) define the radial Gaussian; `theta_DHA_opt_deg`, `theta_HAB_opt_deg` are the donor-H-acceptor and H-acceptor-base optimal angles |
+| `kbp`           | Dict           | Knowledge-based pair potential (DFIRE-style) used by `Score()._kbp_score`. `cutoff` is the maximum pair distance in Å; `bin_width` the histogram bin width; `atom_types` maps composite/element keys to integer type indices; `table` is a `(N_types, N_types, N_bins)` nested-list 3D array of pair energies in kcal/mol |
+| `rotamer`       | Dict           | Rotamer-prior parameters used by `Score()._rotamer_prior`. `sigma_chi_deg` is the Gaussian standard deviation in degrees applied to chi deviations from the BBDEP-predicted mean: `½(Δχ/σ)²` |
 
-> The numbers currently shipped in `parameters.json` are placeholders. Replace them with values fitted by your own parameter-fitting pipeline; `ForceField` re-reads the file on each instantiation, so no code changes are required.
+> The numbers currently shipped in `parameters.json` are just placeholders. Will be replaced later with real parameter values.
 
 ---
 
@@ -498,3 +507,17 @@ Contributions are welcome! Open an issue or pull request on GitHub, or just emai
 Chat with users and contributors in real time: **IRC:** `#pose` channel on the `irc.libera.chat` network, Or use the [Libera web chat](https://web.libera.chat/#pose), no install needed.
 
 Come ask questions, share what you've built with Pose, or discuss contributions.
+
+---
+
+## How to Cite
+
+If Pose is useful in your research, please cite it. The repository ships a `CITATION.cff` file at the project root with the canonical citation metadata; GitHub's "Cite this repository" button and most reference managers (Zotero, Mendeley) can import it directly. The current entry is:
+
+> Sabban, S. *Pose: A bare metal Python library for building and manipulating protein molecular structures.* 2023. https://github.com/sarisabban/Pose (ORCID: [0000-0002-9621-2395](https://orcid.org/0000-0002-9621-2395))
+
+---
+
+## License
+
+Pose is released under the **GNU General Public License v2.0 (GPL-2.0)**. The full licence text lives in the [`LICENSE`](LICENSE) file at the project root.

@@ -1,5 +1,6 @@
 import os
 import json
+import math
 import numpy as np
 
 class ForceField():
@@ -234,7 +235,7 @@ class ForceField():
 		cache['weight_elec'] = np.where(excl, 0.0, np.where(scal14, f_elec,1.0))
 		cache['scal14_bool'] = scal14
 		cache['excl_bool']   = excl
-		Pcmap = self.Parameters['cmap']; df_cm = Pcmap['default']
+		Pcmap = self.Parameters['cmap']
 		aas = pose.data.get('Amino Acids')
 		phi_q, psi_q, codes = [], [], []
 		if aas is not None and len(aas) >= 3:
@@ -254,10 +255,21 @@ class ForceField():
 					codes.append(aa_curr)
 				except KeyError: continue
 		if phi_q:
+			tables = []
+			for c in codes:
+				key = c.upper()
+				if key not in Pcmap:
+					raise KeyError(
+						f"ForceField/CMAP: amino acid '{key}' missing "
+						f"from parameters.json['cmap']. Add a 24x24 "
+						f"per-aa grid for this residue type.")
+				t = np.asarray(Pcmap[key], dtype=np.float64)
+				if c != key:
+					t = t[::-1, ::-1]
+				tables.append(t)
 			cache['cmap_phi_q']  = np.asarray(phi_q, dtype=np.int64)
 			cache['cmap_psi_q']  = np.asarray(psi_q, dtype=np.int64)
-			cache['cmap_tables'] = np.stack([np.asarray(Pcmap.get(c, df_cm),
-				dtype=np.float64) for c in codes])
+			cache['cmap_tables'] = np.stack(tables)
 		else:
 			cache['cmap_phi_q']  = np.empty((0, 4), dtype=np.int64)
 			cache['cmap_psi_q']  = np.empty((0, 4), dtype=np.int64)
@@ -739,3 +751,307 @@ class ForceField():
 		np.add.at(forces, k_idx, Fk)
 		np.add.at(forces, l_idx, Fl)
 		return energy, forces
+
+class Score():
+	'''
+	Hybrid physics+statistical score for protein design (L/D/non-canonical)
+	'''
+	def __init__(self, ff=None, box=None):
+		'''
+		Initialise an 8-term protein-design score function
+		Arguments:
+		----------
+			ff:  ForceField - reusable physics evaluator; created if None
+			box: None for no PBC; (3,) ortho; (3, 3) triclinic
+		Returns:
+		--------
+			None: instance is configured in place
+		'''
+		if ff is None: ff = ForceField()
+		self.ff = ff
+		self.box = box
+		path = os.path.join(os.path.dirname(__file__), 'parameters.json')
+		with open(path) as f: P = json.load(f)
+		self.weights     = P['weights']
+		self.ref_state   = P['ref_state']
+		self.lk          = P['lk_solvation']
+		self.hb          = P['hbond']
+		self.kbp         = P['kbp']
+		self.rot_sigma   = float(P['rotamer']['sigma_chi_deg'])
+		self._kbp_table  = np.asarray(self.kbp['table'], dtype=np.float64)
+		self._lk_types   = None
+		self._kbp_types  = None
+		self._lk_dG      = None
+		self._lk_lam     = None
+		self._lk_V       = None
+		self._cache_hash = None
+	def __call__(self, pose, decompose=False):
+		'''
+		Evaluate the design score; optionally return per-term breakdown
+		Arguments:
+		----------
+			pose:      Pose - molecule source pose
+			decompose: bool - if True, return (total, per_term_dict)
+		Returns:
+		--------
+			float OR (float, dict): total score (and per-term values)
+		'''
+		h = self.ff._topology_hash(pose)
+		if self.ff._cache is None or self.ff._cache_hash != h:
+			self.ff._prepare(pose)
+			self._cache_hash = None
+		cache = self.ff._cache
+		if self._cache_hash != h:
+			self._build_typing(pose)
+			self._cache_hash = h
+		E_lj   = self.ff.LJPotential(pose, cache=cache, grad=False,
+			box=self.box)
+		E_elec = self.ff.ElectrostaticPotential(pose, cache=cache,
+			grad=False, box=self.box)
+		E_cmap = self.ff.CMAPPotential(pose, cache=cache, grad=False,
+			box=self.box)
+		E_lk   = self._lk_solvation(pose, cache)
+		E_hb   = self._hbond_geom(pose, cache)
+		E_rot  = self._rotamer_prior(pose)
+		E_ref  = self._reference_state(pose)
+		E_kbp  = self._kbp_score(pose, cache)
+		w = self.weights
+		total = (w['LJ']*E_lj + w['Electrostatic']*E_elec
+			+ w['LK']*E_lk + w['Hbond']*E_hb
+			+ w['CMAP']*E_cmap + w['Rotamer']*E_rot
+			+ w['Reference']*E_ref + w['KBP']*E_kbp)
+		if decompose:
+			return float(total), {
+				'LJ': float(E_lj), 'Electrostatic': float(E_elec),
+				'LK': float(E_lk), 'Hbond': float(E_hb),
+				'CMAP': float(E_cmap), 'Rotamer': float(E_rot),
+				'Reference': float(E_ref), 'KBP': float(E_kbp)}
+		return float(total)
+	def _build_typing(self, pose):
+		'''
+		Build per-atom LK and KBP type arrays plus LK parameter vectors
+		Arguments:
+		----------
+			pose: Pose - molecule source pose
+		Returns:
+		--------
+			None: stores arrays on the instance
+		'''
+		atoms = pose.data['Atoms']
+		sorted_ids = sorted(atoms)
+		lk_map  = self.lk['atom_types']
+		kbp_map = self.kbp['atom_types']
+		lk_types_str = []
+		kbp_idx = []
+		dG_list, lam_list, V_list = [], [], []
+		for i in sorted_ids:
+			a = atoms[i]
+			composite = f"{a[0]}-{a[1]}"
+			if composite in lk_map: lk_key = composite
+			elif a[1] in lk_map:    lk_key = a[1]
+			else:
+				raise KeyError(
+					f"Score: atom type '{composite}' "
+					f"(atom #{i}, name='{a[0]}', element='{a[1]}') "
+					f"missing from "
+					f"parameters.json['lk_solvation']['atom_types']. "
+					f"Add an entry [dG_free, lambda, volume] for "
+					f"this type or its element fallback.")
+			vals = lk_map[lk_key]
+			dG_list.append(vals[0]); lam_list.append(vals[1])
+			V_list.append(vals[2])
+			lk_types_str.append(lk_key)
+			if composite in kbp_map: kbp_idx.append(kbp_map[composite])
+			elif a[1] in kbp_map:    kbp_idx.append(kbp_map[a[1]])
+			else:
+				raise KeyError(
+					f"Score: atom type '{composite}' "
+					f"(atom #{i}, name='{a[0]}', element='{a[1]}') "
+					f"missing from "
+					f"parameters.json['kbp']['atom_types']. "
+					f"Add an integer type index for this type or its "
+					f"element fallback.")
+		self._lk_dG  = np.asarray(dG_list,  dtype=np.float64)
+		self._lk_lam = np.asarray(lam_list, dtype=np.float64)
+		self._lk_V   = np.asarray(V_list,   dtype=np.float64)
+		self._lk_types  = np.asarray(lk_types_str, dtype=object)
+		self._kbp_types = np.asarray(kbp_idx, dtype=np.int64)
+	def _reference_state(self, pose):
+		'''
+		Per-residue reference (unfolded baseline) energy summed over pose
+		Arguments:
+		----------
+			pose: Pose - molecule source pose
+		Returns:
+		--------
+			float: sum of ref_state[aa] over every residue, in kcal/mol
+		'''
+		aas = pose.data.get('Amino Acids')
+		if aas is None: return 0.0
+		d = self.ref_state
+		total = 0.0
+		for r, info in aas.items():
+			key = info[0].upper()
+			if key not in d:
+				raise KeyError(
+					f"Score: amino acid '{key}' "
+					f"(residue #{r}) missing from "
+					f"parameters.json['ref_state']. "
+					f"Add a per-aa reference energy. Known canonical "
+					f"codes: ACDEFGHIKLMNPQRSTVWY; non-canonical: "
+					f"BJOUXZ.")
+			total += d[key]
+		return total
+	def _rotamer_prior(self, pose):
+		'''
+		Gaussian rotamer prior centered at BBDEP-predicted mean chi
+		Arguments:
+		----------
+			pose: Pose - molecule source pose
+		Returns:
+		--------
+			float: 0.5 * sum (Delta_chi / sigma)^2 over interior chis
+		'''
+		aas = pose.data.get('Amino Acids')
+		if aas is None: return 0.0
+		inv_sigma_sq = 0.5 / (self.rot_sigma ** 2)
+		total = 0.0
+		for r, info in aas.items():
+			c = info[0]
+			aa = c.upper()
+			db = pose.aminoacids.get(aa, {})
+			chi_atoms = db.get('Chi Angle Atoms') or []
+			if not chi_atoms: continue
+			grids = db.get('BBDEP')
+			if not grids:
+				raise KeyError(
+					f"Score: amino acid '{aa}' has "
+					f"{len(chi_atoms)} chi angle(s) but no BBDEP "
+					f"grids in pose.aminoacids. Database inconsistency.")
+			n_chi = min(len(chi_atoms), len(grids) // 2)
+			phi = pose.GetDihedral(r, 'PHI')
+			psi = pose.GetDihedral(r, 'PSI')
+			if math.isnan(phi) or math.isnan(psi): continue
+			flip = (c != aa)
+			phi_q = -phi if flip else phi
+			psi_q = -psi if flip else psi
+			fx = ((phi_q + 180.0) % 360.0) / 10.0
+			fy = ((psi_q + 180.0) % 360.0) / 10.0
+			i0 = int(math.floor(fx)) % 36
+			j0 = int(math.floor(fy)) % 36
+			i1 = (i0 + 1) % 36; j1 = (j0 + 1) % 36
+			u = fx - math.floor(fx); v = fy - math.floor(fy)
+			w = ((1-u)*(1-v), u*(1-v), (1-u)*v, u*v)
+			for ci in range(n_chi):
+				sg = grids[2*ci]; cg = grids[2*ci+1]
+				s = 1e-4 * (w[0]*sg[i0,j0] + w[1]*sg[i1,j0]
+					+ w[2]*sg[i0,j1] + w[3]*sg[i1,j1])
+				cv = 1e-4 * (w[0]*cg[i0,j0] + w[1]*cg[i1,j0]
+					+ w[2]*cg[i0,j1] + w[3]*cg[i1,j1])
+				chi_pred = math.degrees(math.atan2(s, cv))
+				if flip: chi_pred = -chi_pred
+				chi_now = pose.GetDihedral(r, 'CHI', chi_type=ci+1)
+				if math.isnan(chi_now): continue
+				d = ((chi_now - chi_pred + 180.0) % 360.0) - 180.0
+				total += inv_sigma_sq * d * d
+		return total
+	def _lk_solvation(self, pose, cache):
+		'''
+		Lazaridis-Karplus EEF1 implicit solvation summed over atom pairs
+		Arguments:
+		----------
+			pose:  Pose - molecule source pose
+			cache: dict - ff topology cache providing excl_bool, lj_sigma
+		Returns:
+		--------
+			float: solvation free energy in kcal/mol
+		'''
+		dG  = self._lk_dG
+		lam = self._lk_lam
+		V   = self._lk_V
+		coords = np.asarray(pose.data['Coordinates'], dtype=np.float64)
+		dvec = self.ff._wrap(
+			coords[:, None, :] - coords[None, :, :], self.box)
+		r = np.linalg.norm(dvec, axis=-1)
+		np.fill_diagonal(r, 1.0)
+		excl = cache['excl_bool']
+		mask = (~excl) & (r < 9.0)
+		R_min = 0.5 * cache['lj_sigma']
+		with np.errstate(divide='ignore', invalid='ignore'):
+			gauss = np.exp(-((r - R_min) / lam[:, None])**2)
+			pre = (2.0 * V[None, :]) / (np.pi**1.5 * lam[:, None])
+			E_ij = pre * (dG[:, None] / (r * r)) * gauss
+		E_self = float(dG.sum())
+		E_pair = float(np.sum(np.where(mask, E_ij, 0.0)))
+		return E_self - E_pair
+	def _hbond_geom(self, pose, cache):
+		'''
+		Geometric hydrogen-bond term over donor-H-acceptor-base quartets
+		Arguments:
+		----------
+			pose:  Pose - molecule source pose
+			cache: dict - ff topology cache providing nbrs adjacency
+		Returns:
+		--------
+			float: H-bond energy contribution in kcal/mol
+		'''
+		atoms = pose.data['Atoms']
+		nbrs = cache['nbrs']
+		donors, acceptors = [], []
+		for i, a in atoms.items():
+			elem = a[1]
+			ns = nbrs.get(i, [])
+			if elem in ('N', 'O'):
+				hs = [int(j) for j in ns if atoms[int(j)][1] == 'H']
+				heavy = [int(j) for j in ns if atoms[int(j)][1] != 'H']
+				for h in hs: donors.append((i, h))
+				if heavy: acceptors.append((i, heavy[0]))
+		if not donors or not acceptors: return 0.0
+		D = np.asarray(donors,    dtype=np.int64)
+		A = np.asarray(acceptors, dtype=np.int64)
+		coords = np.asarray(pose.data['Coordinates'], dtype=np.float64)
+		dvec_HA = self.ff._wrap(
+			coords[D[:, 1]][:, None, :] - coords[A[:, 0]][None, :, :],
+			self.box)
+		r_HA = np.linalg.norm(dvec_HA, axis=-1)
+		mask_r = (r_HA > 1.4) & (r_HA < 3.0)
+		dvec_HD = (coords[D[:, 0]] - coords[D[:, 1]])
+		nrm_HD = np.linalg.norm(dvec_HD, axis=-1, keepdims=True)
+		uHD = dvec_HD / np.maximum(nrm_HD, 1e-12)
+		uHA = dvec_HA / np.maximum(r_HA[:, :, None], 1e-12)
+		cos_DHA = np.einsum('ik,ijk->ij', uHD, -uHA)
+		dvec_AB = (coords[A[:, 1]] - coords[A[:, 0]])
+		nrm_AB = np.linalg.norm(dvec_AB, axis=-1, keepdims=True)
+		uAB = dvec_AB / np.maximum(nrm_AB, 1e-12)
+		cos_HAB = np.einsum('ijk,jk->ij', uHA, uAB)
+		E_r = self.hb['well_depth'] * np.exp(
+			-((r_HA - self.hb['r_opt'])**2) / (self.hb['r_sigma']**2))
+		F_DHA = np.maximum(0.0, -cos_DHA)**2
+		F_HAB = np.maximum(0.0,  cos_HAB)**2
+		E = -E_r * F_DHA * F_HAB
+		return float(np.sum(np.where(mask_r, E, 0.0)))
+	def _kbp_score(self, pose, cache):
+		'''
+		Knowledge-based pair potential summed over far-pair atom pairs
+		Arguments:
+		----------
+			pose:  Pose - molecule source pose
+			cache: dict - ff topology cache providing mask_far
+		Returns:
+		--------
+			float: KBP energy contribution in kcal/mol
+		'''
+		t = self._kbp_types
+		table = self._kbp_table
+		cutoff = float(self.kbp['cutoff'])
+		bin_w  = float(self.kbp['bin_width'])
+		N_bins = table.shape[2]
+		coords = np.asarray(pose.data['Coordinates'], dtype=np.float64)
+		dvec = self.ff._wrap(coords[:, None, :] - coords[None, :, :], self.box)
+		r = np.linalg.norm(dvec, axis=-1)
+		mask = cache['mask_far'] & (r > 0.0) & (r < cutoff)
+		I, J = np.where(mask)
+		if len(I) == 0: return 0.0
+		bins = np.minimum((r[I, J] / bin_w).astype(np.int64), N_bins - 1)
+		E = table[t[I], t[J], bins]
+		return float(E.sum())

@@ -2024,13 +2024,15 @@ def Anneal(pose, ff=None, n_steps=10000, T_start=2000.0, T_end=10.0,
 		'best_step':     int(best_step)}
 	return float(E_best), log
 
-def Pack(pose, ff=None, max_iter=10, include_bbdep=True, box=None):
+def Pack(pose, score=None, ff=None, max_iter=10, include_bbdep=True,
+		box=None):
 	'''
 	Pack sidechains via discrete rotamer ICM greedy iteration
 	Arguments:
 	----------
 		pose:          Pose - protein pose with Amino Acids dict
-		ff:            ForceField - reusable evaluator; created if None
+		score:         Score - reusable; built from `ff` if None
+		ff:            ForceField - used only when `score` is None
 		max_iter:      int - maximum ICM sweeps over the residue list
 		include_bbdep: bool - add the Dunbrack BBDEP chi as a candidate
 		box:           None for no PBC; (3,) orthorhombic; (3, 3) triclinic
@@ -2038,7 +2040,9 @@ def Pack(pose, ff=None, max_iter=10, include_bbdep=True, box=None):
 	--------
 		tuple: (float, dict) - final energy and per-iteration log
 	'''
-	if ff is None: ff = ForceField()
+	if score is None:
+		from .energy import Score
+		score = Score(ff=ff, box=box)
 	if pose.data.get('Amino Acids') is None:
 		raise ValueError('Pack requires a protein pose with Amino Acids')
 	WELLS = (-60.0, 60.0, 180.0)
@@ -2089,7 +2093,7 @@ def Pack(pose, ff=None, max_iter=10, include_bbdep=True, box=None):
 		aa = pose.data['Amino Acids'][res][0].upper()
 		n_chi = len(pose.aminoacids.get(aa, {}).get('Chi Angle Atoms', []))
 		if n_chi > 0: residues.append((res, n_chi))
-	E_curr = float(ff(pose, grad=False, box=box))
+	E_curr = float(score(pose))
 	energies_per_iter, changes_per_iter = [], []
 	converged = False
 	for it in range(int(max_iter)):
@@ -2103,7 +2107,7 @@ def Pack(pose, ff=None, max_iter=10, include_bbdep=True, box=None):
 			for k, chi_set in enumerate(cands):
 				pose.data['Coordinates'] = saved.copy()
 				apply_chi(res, chi_set)
-				E_k = float(ff(pose, grad=False, box=box))
+				E_k = float(score(pose))
 				if E_k < best_E:
 					best_E, best_idx = E_k, k
 			pose.data['Coordinates'] = saved
