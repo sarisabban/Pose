@@ -2,8 +2,9 @@ import re
 import os
 import json
 import math
+import itertools
 import numpy as np
-from .energy import Energy
+from .energy import ForceField
 from collections import defaultdict, deque
 
 def Parameterise(filename, unicode, tricode):
@@ -1830,3 +1831,317 @@ def Rotamers(index, pose):
 		c = _bilinear(d[2 * ci + 1], phi, psi)
 		result = math.degrees(math.atan2(s, c))
 		pose.RotateDihedral(index, result, 'CHI', ci+1)
+
+
+def Minimise(pose, ff=None, max_steps=500, ftol=1.0, dt_fs=0.1,
+		dt_max_fs=2.0, fmax_cap=200.0, box=None):
+	'''
+	Relax pose coordinates with the FIRE algorithm (Bitzek et al. 2006)
+	Arguments:
+	----------
+		pose:      Pose - molecule source protein, DNA, RNA, or Molecule
+		ff:        ForceField - reusable evaluator; created if None
+		max_steps: int - maximum number of FIRE iterations
+		ftol:      float - convergence threshold on max|force| kcal/mol/A
+		dt_fs:     float - initial integrator step in femtoseconds
+		dt_max_fs: float - upper bound on the adaptive step in fs
+		fmax_cap:  float - per-atom force cap in kcal/mol/A; 0 disables
+		box:       None for no PBC; (3,) orthorhombic; (3, 3) triclinic
+	Returns:
+	--------
+		tuple: (float, dict) - final energy in kcal/mol and per-step log
+	'''
+	if ff is None: ff = ForceField()
+	N_MIN, F_INC, F_DEC, A_START, F_ALPHA = 5, 1.1, 0.5, 0.1, 0.99
+	AKMA_FS = 48.88821291
+	atoms = pose.data['Atoms']
+	m = np.array([pose.masses[atoms[i][1]] for i in sorted(atoms)],
+		dtype=np.float64)[:, None]
+	v = np.zeros_like(pose.data['Coordinates'], dtype=np.float64)
+	dt = float(dt_fs) / AKMA_FS
+	dt_max = float(dt_max_fs) / AKMA_FS
+	alpha, n_pos = float(A_START), 0
+	energies, fmaxes = [], []
+	E, F = ff(pose, grad=True, box=box)
+	converged, steps_done = False, 0
+	for step in range(int(max_steps)):
+		fmax = float(np.max(np.abs(F)))
+		energies.append(float(E)); fmaxes.append(fmax)
+		steps_done = step + 1
+		if fmax < ftol:
+			converged = True
+			break
+		nrm = np.linalg.norm(F, axis=1, keepdims=True)
+		F_use = F * np.where(
+			(fmax_cap > 0.0) & (nrm > fmax_cap),
+			fmax_cap / np.maximum(nrm, 1e-12), 1.0)
+		v += 0.5 * dt * F_use / m
+		pose.data['Coordinates'] = pose.data['Coordinates'] + dt * v
+		E, F = ff(pose, grad=True, box=box)
+		nrm = np.linalg.norm(F, axis=1, keepdims=True)
+		F_use = F * np.where(
+			(fmax_cap > 0.0) & (nrm > fmax_cap),
+			fmax_cap / np.maximum(nrm, 1e-12), 1.0)
+		v += 0.5 * dt * F_use / m
+		P = float(np.sum(F_use * v))
+		f_norm = float(np.linalg.norm(F_use))
+		v_norm = float(np.linalg.norm(v))
+		if P > 0.0:
+			scale = (alpha * v_norm / f_norm) if f_norm > 1e-12 else 0.0
+			v = (1.0 - alpha) * v + scale * F_use
+			n_pos += 1
+			if n_pos > N_MIN:
+				dt = min(dt * F_INC, dt_max)
+				alpha *= F_ALPHA
+		else:
+			v.fill(0.0)
+			dt *= F_DEC
+			alpha = A_START
+			n_pos = 0
+	log = {
+		'energies': np.asarray(energies, dtype=np.float64),
+		'fmax':     np.asarray(fmaxes,   dtype=np.float64),
+		'converged': bool(converged),
+		'n_steps':   int(steps_done)}
+	return float(E), log
+
+def Anneal(pose, ff=None, n_steps=10000, T_start=2000.0, T_end=10.0,
+		sigma_deg=20.0, seed=None, box=None):
+	'''
+	Backbone phi/psi simulated annealing with geometric cooling
+	Arguments:
+	----------
+		pose:      Pose - molecule source protein with Amino Acids dict
+		ff:        ForceField - reusable evaluator; created if None
+		n_steps:   int - total Metropolis steps in the cooling schedule
+		T_start:   float - starting temperature in Kelvin
+		T_end:     float - final temperature in Kelvin
+		sigma_deg: float - Gaussian std-dev of the dihedral perturbation
+		seed:      int or None - RNG seed for reproducibility
+		box:       None for no PBC; (3,) orthorhombic; (3, 3) triclinic
+	Returns:
+	--------
+		tuple: (float, dict) - best energy seen and per-step log
+	'''
+	if ff is None: ff = ForceField()
+	if pose.data.get('Amino Acids') is None:
+		raise ValueError('Anneal requires a protein pose with Amino Acids')
+	rng = np.random.default_rng(seed)
+	res_ids = np.array(sorted(pose.data['Amino Acids']), dtype=np.int64)
+	n_res = len(res_ids)
+	kB = 1.987204259e-3
+	T_arr = T_start * (T_end / T_start) ** (
+		np.arange(n_steps) / max(n_steps - 1, 1))
+	res_arr = res_ids[rng.integers(0, n_res, size=n_steps)]
+	kind_arr = np.where(rng.integers(0, 2, size=n_steps) == 0,
+		'PHI', 'PSI')
+	delta_arr = rng.normal(0.0, sigma_deg, size=n_steps)
+	uniform_arr = rng.random(size=n_steps)
+	E_curr = float(ff(pose, grad=False, box=box))
+	E_best = E_curr
+	coords_best = pose.data['Coordinates'].copy()
+	energies = np.empty(n_steps, dtype=np.float64)
+	accepted = np.zeros(n_steps, dtype=bool)
+	best_step = 0
+	for s in range(int(n_steps)):
+		res = int(res_arr[s]); kind = str(kind_arr[s])
+		theta_old = pose.GetDihedral(res, kind)
+		if math.isnan(theta_old):
+			energies[s] = E_curr
+			continue
+		coords_old = pose.data['Coordinates'].copy()
+		pose.RotateDihedral(res, theta_old + float(delta_arr[s]), kind)
+		E_new = float(ff(pose, grad=False, box=box))
+		dE = E_new - E_curr
+		RT = kB * float(T_arr[s])
+		boltz = math.exp(-dE / RT) if (dE > 0.0 and RT > 0.0) else 1.0
+		accept = (dE <= 0.0) or (uniform_arr[s] < boltz)
+		if accept:
+			E_curr = E_new
+			accepted[s] = True
+			if E_curr < E_best:
+				E_best = E_curr
+				coords_best = pose.data['Coordinates'].copy()
+				best_step = s
+		else:
+			pose.data['Coordinates'] = coords_old
+		energies[s] = E_curr
+	pose.data['Coordinates'] = coords_best
+	log = {
+		'energies':     energies,
+		'temperatures': T_arr,
+		'accepted':     accepted,
+		'best_step':    int(best_step)}
+	return float(E_best), log
+
+def Pack(pose, ff=None, max_iter=10, include_bbdep=True, box=None):
+	'''
+	Pack sidechains via discrete rotamer ICM greedy iteration
+	Arguments:
+	----------
+		pose:          Pose - protein pose with Amino Acids dict
+		ff:            ForceField - reusable evaluator; created if None
+		max_iter:      int - maximum ICM sweeps over the residue list
+		include_bbdep: bool - add the Dunbrack BBDEP chi as a candidate
+		box:           None for no PBC; (3,) orthorhombic; (3, 3) triclinic
+	Returns:
+	--------
+		tuple: (float, dict) - final energy and per-iteration log
+	'''
+	if ff is None: ff = ForceField()
+	if pose.data.get('Amino Acids') is None:
+		raise ValueError('Pack requires a protein pose with Amino Acids')
+	WELLS = (-60.0, 60.0, 180.0)
+	SCALE = 1.0 / 10000.0
+	GRID = 36
+	STEP = 10.0
+	def bbdep_chi(res):
+		aa = pose.data['Amino Acids'][res][0].upper()
+		grids = pose.aminoacids.get(aa, {}).get('BBDEP')
+		if not grids: return None
+		phi = pose.GetDihedral(res, 'PHI')
+		psi = pose.GetDihedral(res, 'PSI')
+		if math.isnan(phi) or math.isnan(psi): return None
+		fx = ((phi + 180.0) % 360.0) / STEP
+		fy = ((psi + 180.0) % 360.0) / STEP
+		i0 = int(math.floor(fx)) % GRID
+		j0 = int(math.floor(fy)) % GRID
+		i1 = (i0 + 1) % GRID; j1 = (j0 + 1) % GRID
+		u = fx - math.floor(fx); v = fy - math.floor(fy)
+		w = np.array([(1-u)*(1-v), u*(1-v), (1-u)*v, u*v])
+		out = []
+		n_chi = len(grids) // 2
+		for c in range(n_chi):
+			s = grids[2*c]; cg = grids[2*c+1]
+			s_blend = SCALE * (w[0]*s[i0,j0] + w[1]*s[i1,j0]
+				+ w[2]*s[i0,j1] + w[3]*s[i1,j1])
+			c_blend = SCALE * (w[0]*cg[i0,j0] + w[1]*cg[i1,j0]
+				+ w[2]*cg[i0,j1] + w[3]*cg[i1,j1])
+			out.append(math.degrees(math.atan2(s_blend, c_blend)))
+		return tuple(out)
+	def candidates(res):
+		aa = pose.data['Amino Acids'][res][0].upper()
+		n_chi = len(pose.aminoacids.get(aa, {}).get('Chi Angle Atoms', []))
+		if n_chi == 0: return []
+		cand = list(itertools.product(WELLS, repeat=n_chi))
+		if include_bbdep:
+			bb = bbdep_chi(res)
+			if bb is not None: cand.append(bb)
+		return cand
+	def apply_chi(res, chi_set):
+		for c, theta in enumerate(chi_set):
+			pose.RotateDihedral(res, float(theta), 'CHI', chi_type=c+1)
+	def current_chi(res, n_chi):
+		return tuple(pose.GetDihedral(res, 'CHI', chi_type=c+1)
+			for c in range(n_chi))
+	residues = []
+	for res in sorted(pose.data['Amino Acids']):
+		aa = pose.data['Amino Acids'][res][0].upper()
+		n_chi = len(pose.aminoacids.get(aa, {}).get('Chi Angle Atoms', []))
+		if n_chi > 0: residues.append((res, n_chi))
+	E_curr = float(ff(pose, grad=False, box=box))
+	energies_per_iter, changes_per_iter = [], []
+	converged = False
+	for it in range(int(max_iter)):
+		changes = 0
+		for res, n_chi in residues:
+			cands = candidates(res)
+			if not cands: continue
+			chi_old = current_chi(res, n_chi)
+			saved = pose.data['Coordinates'].copy()
+			best_E = E_curr; best_idx = -1
+			for k, chi_set in enumerate(cands):
+				pose.data['Coordinates'] = saved.copy()
+				apply_chi(res, chi_set)
+				E_k = float(ff(pose, grad=False, box=box))
+				if E_k < best_E:
+					best_E, best_idx = E_k, k
+			pose.data['Coordinates'] = saved
+			if best_idx >= 0:
+				apply_chi(res, cands[best_idx])
+				E_curr = best_E
+				new_chi = current_chi(res, n_chi)
+				if any(abs(((a - b + 180) % 360) - 180) > 1e-3
+					for a, b in zip(new_chi, chi_old)):
+					changes += 1
+		energies_per_iter.append(E_curr)
+		changes_per_iter.append(changes)
+		if changes == 0:
+			converged = True
+			break
+	log = {
+		'energies_per_iter': np.asarray(energies_per_iter, dtype=np.float64),
+		'changes_per_iter': np.asarray(changes_per_iter, dtype=np.int64),
+		'converged': bool(converged)}
+	return float(E_curr), log
+
+def MolecularDynamics(pose, ff=None, n_steps=1000, dt_fs=1.0, T=300.0,
+		thermostat='nve', friction_ps=1.0, seed=None,
+		trajectory_every=0, box=None):
+	'''
+	Velocity-Verlet NVE or BAOAB Langevin NVT molecular dynamics
+	Arguments:
+	----------
+		pose:             Pose - molecule source pose
+		ff:               ForceField - reusable evaluator; created if None
+		n_steps:          int - number of integration steps
+		dt_fs:            float - integration step in femtoseconds
+		T:                float - temperature in Kelvin (initial + bath)
+		thermostat:       str - 'nve' or 'langevin'
+		friction_ps:      float - Langevin friction in ps^-1
+		seed:             int or None - RNG seed for reproducibility
+		trajectory_every: int - snapshot stride; 0 disables snapshots
+		box:              None for no PBC; (3,) ortho; (3, 3) triclinic
+	Returns:
+	--------
+		tuple: (float, dict) - final potential energy and trajectory log
+	'''
+	if ff is None: ff = ForceField()
+	if thermostat not in ('nve', 'langevin'):
+		raise ValueError("thermostat must be 'nve' or 'langevin'")
+	rng = np.random.default_rng(seed)
+	atoms = pose.data['Atoms']
+	m = np.array([pose.masses[atoms[i][1]] for i in sorted(atoms)],
+		dtype=np.float64)
+	n = len(m)
+	m_col = m[:, None]
+	AKMA_FS = 48.88821291
+	kB = 1.987204259e-3
+	dt = float(dt_fs) / AKMA_FS
+	gamma = float(friction_ps) * AKMA_FS / 1000.0
+	c1 = math.exp(-gamma * dt)
+	c2 = np.sqrt((1.0 - c1 * c1) * kB * float(T) / m)[:, None]
+	sigma_v = np.sqrt(kB * float(T) / m)[:, None]
+	v = rng.normal(0.0, 1.0, size=(n, 3)) * sigma_v
+	v -= ((m_col * v).sum(axis=0) / m.sum())[None, :]
+	E, F = ff(pose, grad=True, box=box)
+	energies = np.empty(int(n_steps), dtype=np.float64)
+	kinetics = np.empty(int(n_steps), dtype=np.float64)
+	temps    = np.empty(int(n_steps), dtype=np.float64)
+	frames = []
+	use_langevin = (thermostat == 'langevin')
+	for step in range(int(n_steps)):
+		if use_langevin:
+			v += 0.5 * dt * F / m_col
+			pose.data['Coordinates'] = pose.data['Coordinates'] + 0.5*dt*v
+			v = c1 * v + c2 * rng.normal(0.0, 1.0, size=(n, 3))
+			pose.data['Coordinates'] = pose.data['Coordinates'] + 0.5*dt*v
+			E, F = ff(pose, grad=True, box=box)
+			v += 0.5 * dt * F / m_col
+		else:
+			v += 0.5 * dt * F / m_col
+			pose.data['Coordinates'] = pose.data['Coordinates'] + dt * v
+			E, F = ff(pose, grad=True, box=box)
+			v += 0.5 * dt * F / m_col
+		KE = 0.5 * float(np.sum(m_col * v * v))
+		energies[step] = float(E)
+		kinetics[step] = KE
+		temps[step] = 2.0 * KE / (3.0 * n * kB) if n > 0 else 0.0
+		if trajectory_every > 0 and (step + 1) % trajectory_every == 0:
+			frames.append(pose.data['Coordinates'].copy())
+	log = {
+		'energies':     energies,
+		'kinetic':      kinetics,
+		'temperatures': temps,
+		'frames':       frames}
+	return float(E), log
