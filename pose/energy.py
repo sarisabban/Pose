@@ -98,62 +98,262 @@ Parameters = {
 
 class ForceField():
 	'''
-	Configurable molecular mechanics force field built from individual
-	energy-term methods. Choose which terms and which algorithm variants
-	to combine via the constructor
+	Configurable molecular mechanics force field assembled from energy terms
 	'''
-
-
 
 	def __init__(self, terms=None):
 		'''
-		Constructor
+		Initialise the force field with a chosen set of energy terms
 		Arguments:
 		----------
-			terms: optional list of (method_name, kwargs) tuples specifying
-				which energy terms to sum. Defaults to DEFAULT_TERMS (all 9)
+			terms: list of (method_name, kwargs) tuples; None uses the default
 		Returns:
 		--------
-			list: DEFAULT_TERMS
+			None: instance is configured in-place
 		'''
 		self.DEFAULT_TERMS = [
-			('bond_potential',              {'alg': 'harmonic'}),
-			('angle_potential',             {}),
-			('ub_potential',                {}),
-			('dihedral_potential',          {}),
-			('improper_dihedral_potential', {'alg': 'harmonic'}),
-			('lj_potential',                {'alg': '12-6'}),
-			('electrostatic_potential',     {'alg': 'constant'}),
-			('polarisation_potential',      {'alg': 'constant'}),
-			('cmap_potential',              {})]
+			('BondPotential',          {'alg': 'harmonic'}),
+			('AnglePotential',         {}),
+			('UBPotential',            {}),
+			('DihedralPotential',      {}),
+			('ImproperPotential',      {'alg': 'harmonic'}),
+			('LJPotential',            {'alg': '12-6'}),
+			('ElectrostaticPotential', {'alg': 'constant'}),
+			('PolarisationPotential',  {'alg': 'constant'}),
+			('CMAPPotential',          {})]
 		self.terms = terms if terms is not None else self.DEFAULT_TERMS
+		self._cache = None
+		self._cache_hash = None
 
 	def __call__(self, pose, grad=True, box=None):
 		'''
-		Calculates total potential energy
+		Calculates the total potential energy summed over configured terms
 		Arguments:
 		----------
 			pose: Pose - molecule source protein, DNA, RNA, or Molecule pose
 			grad: bool - if True, also return per-atom forces (N, 3) array
-			box:  None for no PBC; (3,) array for orthorhombic; (3, 3) for triclinic
+			box:  None for no PBC; (3,) for orthorhombic; (3, 3) for triclinic
 		Returns:
 		--------
-			foalt - if grad = False
-			tuple: (float, ndarray) - if grad = True
+			float: potential energy in kcal/mol  (when grad=False)
+			(float, ndarray): energy and (N, 3) forces  (when grad=True)
 		'''
-		n = len(pose.data['Atoms'])
+		h = self._topology_hash(pose)
+		if self._cache is None or self._cache_hash != h:
+			self._cache = self._compile(pose)
+			self._cache_hash = h
+		n = self._cache['n']
 		E, F = 0.0, np.zeros((n, 3))
 		for method_name, kwargs in self.terms:
 			fn = getattr(self, method_name)
 			if grad:
-				e, f = fn(pose, grad=True, box=box, **kwargs)
+				e, f = fn(pose, cache=self._cache, grad=True, box=box, **kwargs)
 				E += e; F += f
 			else:
-				E += fn(pose, grad=False, box=box, **kwargs)
+				E += fn(pose, cache=self._cache, grad=False, box=box, **kwargs)
 		return (E, F) if grad else E
 
+	def _prepare(self, pose):
+		'''
+		Compile and store topology + parameter arrays for the given pose
+		Arguments:
+		----------
+			pose: Pose - molecule source protein, DNA, RNA, or Molecule pose
+		Returns:
+		--------
+			None: cache and cache hash are stored on the instance
+		'''
+		self._cache = self._compile(pose)
+		self._cache_hash = self._topology_hash(pose)
 
-
+	@staticmethod
+	def _topology_hash(pose):
+		'''
+		Deterministic hash of bond graph, atom records and AA assignments
+		Arguments:
+		----------
+			pose: Pose - molecule source protein, DNA, RNA, or Molecule pose
+		Returns:
+		--------
+			int: hash value used to detect cache invalidation
+		'''
+		bonds_key = tuple((int(k), tuple(sorted(int(j) for j in v)))
+			for k, v in sorted(pose.data['Bonds'].items()))
+		atoms_key = tuple((int(k), tuple(a))
+			for k, a in sorted(pose.data['Atoms'].items()))
+		aas = pose.data.get('Amino Acids')
+		aas_key = None if aas is None else tuple(
+			(int(k), info[0], info[1], tuple(info[2]))
+			for k, info in sorted(aas.items()))
+		return hash((bonds_key, atoms_key, aas_key))
+	def _compile(self, pose):
+		'''
+		Build all topology and parameter arrays consumed by every term
+		Arguments:
+		----------
+			pose: Pose - molecule source protein, DNA, RNA, or Molecule pose
+		Returns:
+		--------
+			dict: cache of topology arrays, per-atom and per-pair parameters
+		'''
+		atoms = pose.data['Atoms']
+		n = len(atoms)
+		cache = {'n': n}
+		idx = np.array([(int(k), int(j)) for k, vs in pose.data['Bonds'].items()
+			for j in vs], dtype=np.int64).reshape(-1, 2)
+		idx.sort(axis=1)
+		pairs = np.unique(idx[idx[:, 0] != idx[:, 1]], axis=0)
+		cache['pairs'] = pairs
+		flat = (np.concatenate([pairs, pairs[:, ::-1]])
+			if len(pairs) else np.empty((0, 2), dtype=np.int64))
+		nbrs = ({int(a): np.sort(flat[flat[:, 0] == a, 1])
+			for a in np.unique(flat[:, 0])} if len(flat) else {})
+		cache['nbrs'] = nbrs
+		cache['triplets'] = np.array(
+			[(int(i), j, int(k)) for j, ns in nbrs.items()
+			for p, i in enumerate(ns) for k in ns[p+1:]],
+			dtype=np.int64).reshape(-1, 3)
+		cache['excl_13'] = np.array(
+			[(int(i), int(k)) for j, ns in nbrs.items()
+			for p, i in enumerate(ns) for k in ns[p+1:]],
+			dtype=np.int64).reshape(-1, 2)
+		quartets = np.array(
+			[(int(i), int(j), int(k), int(l)) for j, k in pairs
+			for i in nbrs[int(j)] if i != k
+			for l in nbrs[int(k)] if l != j and l != i],
+			dtype=np.int64).reshape(-1, 4)
+		if len(quartets):
+			rev = quartets[:, ::-1]
+			swap = (quartets[:, 0] > rev[:, 0]) | (
+				(quartets[:, 0] == rev[:, 0]) & (quartets[:, 1] > rev[:, 1]))
+			quartets = np.where(swap[:, None], rev, quartets)
+			quartets = np.unique(quartets, axis=0)
+		cache['quartets'] = quartets
+		excl_14 = np.array(
+			[(int(i), int(l)) for j, k in pairs
+			for i in nbrs[int(j)] if i != k
+			for l in nbrs[int(k)] if l != j and l != i],
+			dtype=np.int64).reshape(-1, 2)
+		if len(excl_14):
+			excl_14.sort(axis=1)
+			excl_14 = np.unique(excl_14[excl_14[:, 0] != excl_14[:, 1]], axis=0)
+		cache['excl_14'] = excl_14
+		cache['impropers'] = np.array(
+			[(int(ns[0]), int(j), int(ns[1]), int(ns[2]))
+			for j, ns in nbrs.items() if len(ns) == 3],
+			dtype=np.int64).reshape(-1, 4)
+		Pb = Parameters['bonds']; df_b = Pb['default']
+		bond_params = np.array([Pb.get(tuple(sorted((
+			self._atomtype(atoms[int(i)]),
+			self._atomtype(atoms[int(j)])))), df_b)
+			for i, j in pairs], dtype=np.float64).reshape(-1, 4)
+		cache['bond_Kb'] = bond_params[:, 0]
+		cache['bond_De'] = bond_params[:, 1]
+		cache['bond_a']  = bond_params[:, 2]
+		cache['bond_r0'] = bond_params[:, 3]
+		Pa = Parameters['angles']; df_a = Pa['default']
+		triplets = cache['triplets']
+		angle_params = np.array([Pa.get((
+			min(self._atomtype(atoms[int(i)]), self._atomtype(atoms[int(k)])),
+			self._atomtype(atoms[int(j)]),
+			max(self._atomtype(atoms[int(i)]), self._atomtype(atoms[int(k)]))),
+			df_a) for i, j, k in triplets], dtype=np.float64).reshape(-1, 4)
+		cache['angle_K_theta'] = angle_params[:, 0]
+		cache['angle_theta0']  = np.deg2rad(angle_params[:, 1])
+		cache['ub_K_ub']       = angle_params[:, 2]
+		cache['ub_s0']         = angle_params[:, 3]
+		Pd = Parameters['dihedrals']; df_d = Pd['default']
+		component_lists = []
+		for i, j, k, l in cache['quartets']:
+			t = (self._atomtype(atoms[int(i)]), self._atomtype(atoms[int(j)]),
+				self._atomtype(atoms[int(k)]), self._atomtype(atoms[int(l)]))
+			if t > t[::-1]: t = t[::-1]
+			component_lists.append(Pd.get(t, df_d))
+		counts = np.array([len(c) for c in component_lists], dtype=np.int64)
+		flat_p = (np.array([row for cl in component_lists for row in cl],
+			dtype=np.float64).reshape(-1, 3) if component_lists
+			else np.empty((0, 3), dtype=np.float64))
+		cache['dihedral_counts'] = counts
+		cache['dihedral_q_idx']  = np.repeat(np.arange(len(counts)), counts)
+		cache['dihedral_k_phi']  = flat_p[:, 0]
+		cache['dihedral_n_mult'] = flat_p[:, 1]
+		cache['dihedral_phi0']   = np.deg2rad(flat_p[:, 2])
+		Pi = Parameters['impropers']; df_i = Pi['default']
+		impropers = cache['impropers']
+		keys = [(self._atomtype(atoms[int(j)]),
+			*sorted([self._atomtype(atoms[int(i)]),
+				self._atomtype(atoms[int(k)]),
+				self._atomtype(atoms[int(l)])]))
+			for i, j, k, l in impropers]
+		imp_params = (np.array([Pi.get(key, df_i) for key in keys],
+			dtype=np.float64).reshape(-1, 3) if keys
+			else np.empty((0, 3), dtype=np.float64))
+		cache['imp_k']    = imp_params[:, 0]
+		cache['imp_n']    = imp_params[:, 1]
+		cache['imp_psi0'] = np.deg2rad(imp_params[:, 2])
+		Plj = Parameters['lennard_jones']; df_lj = Plj['default']
+		sig = np.empty(n); eps = np.empty(n); alpha = np.empty(n)
+		for i in range(n):
+			v = Plj.get(self._atomtype(atoms[i]), Plj.get(atoms[i][1], df_lj))
+			sig[i], eps[i], alpha[i] = v[0], v[1], v[2]
+		cache['lj_sig']    = sig
+		cache['lj_eps']    = eps
+		cache['lj_alpha']  = alpha
+		cache['lj_sigma']  = 0.5 * (sig[:, None] + sig[None, :])
+		cache['lj_eps_ij'] = np.sqrt(eps[:, None] * eps[None, :])
+		q = np.array([atoms[i][2] for i in range(n)], dtype=np.float64)
+		cache['charges'] = q
+		cache['qq']      = q[:, None] * q[None, :]
+		excl = np.eye(n, dtype=bool)
+		if len(pairs):
+			excl[pairs[:, 0], pairs[:, 1]] = True
+			excl[pairs[:, 1], pairs[:, 0]] = True
+		if len(cache['excl_13']):
+			excl[cache['excl_13'][:, 0], cache['excl_13'][:, 1]] = True
+			excl[cache['excl_13'][:, 1], cache['excl_13'][:, 0]] = True
+		scal14 = np.zeros((n, n), dtype=bool)
+		if len(excl_14):
+			scal14[excl_14[:, 0], excl_14[:, 1]] = True
+			scal14[excl_14[:, 1], excl_14[:, 0]] = True
+			scal14 &= ~excl
+		upper = np.triu(np.ones((n, n), dtype=bool), k=1)
+		cache['mask_far']    = (~excl) & (~scal14) & upper
+		cache['mask_14']     = scal14 & upper
+		f_lj   = Parameters['scaling_14']['f_lj']
+		f_elec = Parameters['scaling_14']['f_elec']
+		cache['weight_lj']   = np.where(excl, 0.0, np.where(scal14, f_lj,  1.0))
+		cache['weight_elec'] = np.where(excl, 0.0, np.where(scal14, f_elec,1.0))
+		cache['scal14_bool'] = scal14
+		cache['excl_bool']   = excl
+		Pcmap = Parameters['cmap']; df_cm = Pcmap['default']
+		aas = pose.data.get('Amino Acids')
+		phi_q, psi_q, codes = [], [], []
+		if aas is not None and len(aas) >= 3:
+			res_atoms = {ai: (info[0], info[1],
+				{atoms[k][0]: k for k in info[2]})
+				for ai, info in aas.items()}
+			for r in sorted(res_atoms.keys())[1:-1]:
+				aa_curr, ch_curr, names_curr = res_atoms[r]
+				_, ch_prev, names_prev = res_atoms[r - 1]
+				_, ch_next, names_next = res_atoms[r + 1]
+				if ch_curr != ch_prev or ch_curr != ch_next: continue
+				try:
+					phi_q.append((names_prev['C'], names_curr['N'],
+						names_curr['CA'], names_curr['C']))
+					psi_q.append((names_curr['N'], names_curr['CA'],
+						names_curr['C'], names_next['N']))
+					codes.append(aa_curr)
+				except KeyError: continue
+		if phi_q:
+			cache['cmap_phi_q']  = np.asarray(phi_q, dtype=np.int64)
+			cache['cmap_psi_q']  = np.asarray(psi_q, dtype=np.int64)
+			cache['cmap_tables'] = np.stack([np.asarray(Pcmap.get(c, df_cm),
+				dtype=np.float64) for c in codes])
+		else:
+			cache['cmap_phi_q']  = np.empty((0, 4), dtype=np.int64)
+			cache['cmap_psi_q']  = np.empty((0, 4), dtype=np.int64)
+			cache['cmap_tables'] = np.empty((0, 24, 24), dtype=np.float64)
+		return cache
 	def _wrap(self, dvec, box):
 		'''
 		Apply minimum-image convention to displacement vectors for PBC.
@@ -173,53 +373,44 @@ class ForceField():
 		f = dvec @ inv_B
 		f -= np.round(f)
 		return f @ box
-	def _atomtype(self, atom_index):
+	def _atomtype(self, atom_record):
 		'''
-		Converts atom index to atom name
+		Map an atom record to a parameter-lookup atom type string
 		Arguments:
 		----------
-			atom_index: atom index
+			atom_record: tuple - (name, element, charge, ...) per atom record
 		Returns:
 		--------
-			list: [name, element q?, q?, q?, hybridisation]
+			str: atom name when in backbone set, otherwise the element symbol
 		'''
-		name, element = atom_index[0], atom_index[1]
+		name, element = atom_record[0], atom_record[1]
 		backbone = {'N', 'CA', 'C', 'O', 'H', 'HA', 'CB', 'HB'}
 		return name if name in backbone else element
-	def bond_potential(self, pose, alg='harmonic', grad=True, box=None):
+	def BondPotential(self, pose, cache, alg='harmonic', grad=True, box=None):
 		'''
 		Calculates the Bond stretching potential for all bonded atom pairs
 		Arguments:
 		----------
-			pose: Pose - molecule source protein, DNA, RNA, or Molecule pose
-			alg:  Str algorithm type either 'harmonic' or 'morse'
-			grad: bool - if True, also return per-atom forces (N, 3) array
-			box:  None for no PBC; (3,) array for orthorhombic; (3, 3) for triclinic
+			pose:  Pose - molecule source protein, DNA, RNA, or Molecule pose
+			cache: dict - precomputed topology + parameter from _compile()
+			alg:   Str algorithm type either 'harmonic' or 'morse'
+			grad:  bool - if True, also return per-atom forces (N, 3) array
+			box:   None for no PBC; (3,) for orthorhombic; (3, 3) for triclinic
 		Returns:
 		--------
 			float: potential energy in kcal/mol  (when grad=False)
 			(float, ndarray): energy and (N, 3) forces  (when grad=True)
 		'''
-		atoms = pose.data['Atoms']
-		n = len(atoms)
-		coords = np.asarray(pose.data['Coordinates'], dtype=np.float64)
-		idx = np.array(
-			[(int(k), int(j)) for k, vs in pose.data['Bonds'].items()
-			for j in vs], dtype=np.int64).reshape(-1, 2)
-		idx.sort(axis=1)
-		pairs = np.unique(idx[idx[:, 0] != idx[:, 1]], axis=0)
+		n     = cache['n']
+		pairs = cache['pairs']
 		if len(pairs) == 0:
 			return (0.0, np.zeros((n, 3))) if grad else 0.0
+		coords = np.asarray(pose.data['Coordinates'], dtype=np.float64)
 		i_idx, j_idx = pairs[:, 0], pairs[:, 1]
 		dvec = self._wrap(coords[i_idx] - coords[j_idx], box)
 		r = np.linalg.norm(dvec, axis=1)
-		P  = Parameters['bonds']
-		df = P['default']
-		params = np.array([P.get(tuple(sorted((
-			self._atomtype(atoms[int(i)]),
-			self._atomtype(atoms[int(j)])))),
-			df) for i, j in pairs], dtype=np.float64).reshape(-1, 4)
-		Kb, De, a, r0 = params[:, 0], params[:, 1], params[:, 2], params[:, 3]
+		Kb, De, a, r0 = (cache['bond_Kb'], cache['bond_De'],
+			cache['bond_a'], cache['bond_r0'])
 		if   alg.upper() == 'HARMONIC':
 			dr = r - r0
 			energy = float(np.sum(Kb * dr**2))
@@ -239,36 +430,25 @@ class ForceField():
 		np.add.at(forces, i_idx, fij)
 		np.add.at(forces, j_idx, -fij)
 		return energy, forces
-	def angle_potential(self, pose, grad=True, box=None):
+	def AnglePotential(self, pose, cache, grad=True, box=None):
 		'''
 		Calculates the Harmonic Angle potential for every bonded triplet
 		Arguments:
 		----------
-			pose: Pose - molecule source protein, DNA, RNA, or Molecule pose
-			grad: bool - if True, also return per-atom forces (N, 3) array
-			box:  None for no PBC; (3,) array for orthorhombic; (3, 3) for triclinic
+			pose:  Pose - molecule source protein, DNA, RNA, or Molecule pose
+			cache: dict - precomputed topology + parameter from _compile()
+			grad:  bool - if True, also return per-atom forces (N, 3) array
+			box:   None for no PBC; (3,) for orthorhombic; (3, 3) for triclinic
 		Returns:
 		--------
 			float: potential energy in kcal/mol  (when grad=False)
 			(float, ndarray): energy and (N, 3) forces  (when grad=True)
 		'''
-		atoms = pose.data['Atoms']
-		n = len(atoms)
-		coords = np.asarray(pose.data['Coordinates'], dtype=np.float64)
-		idx = np.array(
-			[(int(k), int(j)) for k, vs in pose.data['Bonds'].items()
-			for j in vs], dtype=np.int64).reshape(-1, 2)
-		idx.sort(axis=1)
-		pairs = np.unique(idx[idx[:, 0] != idx[:, 1]], axis=0)
-		flat = np.concatenate([pairs, pairs[:, ::-1]])
-		nbrs = {int(a): np.sort(flat[flat[:, 0] == a, 1])
-			for a in np.unique(flat[:, 0])}
-		triplets = np.array(
-			[(int(i), j, int(k)) for j, ns in nbrs.items()
-			for p, i in enumerate(ns) for k in ns[p+1:]],
-			dtype=np.int64).reshape(-1, 3)
+		n        = cache['n']
+		triplets = cache['triplets']
 		if len(triplets) == 0:
 			return (0.0, np.zeros((n, 3))) if grad else 0.0
+		coords = np.asarray(pose.data['Coordinates'], dtype=np.float64)
 		i_idx, j_idx, k_idx = triplets[:, 0], triplets[:, 1], triplets[:, 2]
 		v1 = self._wrap(coords[i_idx] - coords[j_idx], box)
 		v2 = self._wrap(coords[k_idx] - coords[j_idx], box)
@@ -277,14 +457,8 @@ class ForceField():
 		cos = np.einsum('ij,ij->i', v1, v2) / (mag1 * mag2)
 		cos = np.clip(cos, -1.0, 1.0)
 		theta = np.arccos(cos)
-		P  = Parameters['angles']
-		df = P['default']
-		params = np.array([P.get((
-			min(self._atomtype(atoms[int(i)]), self._atomtype(atoms[int(k)])),
-			self._atomtype(atoms[int(j)]),
-			max(self._atomtype(atoms[int(i)]), self._atomtype(atoms[int(k)]))),
-			df) for i, j, k in triplets], dtype=np.float64).reshape(-1, 4)
-		K_theta, theta0 = params[:, 0], np.deg2rad(params[:, 1])
+		K_theta = cache['angle_K_theta']
+		theta0  = cache['angle_theta0']
 		energy = float(np.sum(K_theta * (theta - theta0)**2))
 		if not grad: return energy
 		forces = np.zeros((n, 3), dtype=np.float64)
@@ -301,67 +475,31 @@ class ForceField():
 		np.add.at(forces, j_idx, Fj)
 		np.add.at(forces, k_idx, Fk)
 		return energy, forces
-	def lj_potential(self, pose, alg='12-6', grad=True, box=None):
+	def LJPotential(self, pose, cache, alg='12-6', grad=True, box=None):
 		'''
 		Calculates the Lennard-Jones non-bonded potential for all atom pairs
 		Arguments:
 		----------
-			pose: Pose - molecule source protein, DNA, RNA, or Molecule pose
-			alg:  Str algorithm type either '12-6' or '9-6'
-			grad: bool - if True, also return per-atom forces (N, 3) array
-			box:  None for no PBC; (3,) array for orthorhombic; (3, 3) for triclinic
+			pose:  Pose - molecule source protein, DNA, RNA, or Molecule pose
+			cache: dict - precomputed topology + parameter from _compile()
+			alg:   Str algorithm type either '12-6' or '9-6'
+			grad:  bool - if True, also return per-atom forces (N, 3) array
+			box:   None for no PBC; (3,) for orthorhombic; (3, 3) for triclinic
 		Returns:
 		--------
 			float: potential energy in kcal/mol  (when grad=False)
 			(float, ndarray): energy and (N, 3) forces  (when grad=True)
 		'''
-		atoms = pose.data['Atoms']
-		n = len(atoms)
+		n = cache['n']
 		coords = np.asarray(pose.data['Coordinates'], dtype=np.float64)
-		idx = np.array(
-			[(int(k), int(j)) for k, vs in pose.data['Bonds'].items()
-			for j in vs], dtype=np.int64).reshape(-1, 2)
-		idx.sort(axis=1)
-		pairs = np.unique(idx[idx[:, 0] != idx[:, 1]], axis=0)
-		flat = np.concatenate([pairs, pairs[:, ::-1]])
-		nbrs = {int(a): np.sort(flat[flat[:, 0] == a, 1])
-			for a in np.unique(flat[:, 0])}
-		excl_13 = np.array(
-			[(int(i), int(k)) for j, ns in nbrs.items()
-			for p, i in enumerate(ns) for k in ns[p+1:]],
-			dtype=np.int64).reshape(-1, 2)
-		excl_14 = np.array(
-			[(int(i), int(l)) for j, k in pairs
-			for i in nbrs[int(j)] if i != k
-			for l in nbrs[int(k)] if l != j and l != i],
-			dtype=np.int64).reshape(-1, 2)
-		excl_14.sort(axis=1)
-		excl_14 = np.unique(excl_14[excl_14[:, 0] != excl_14[:, 1]], axis=0)
-		P  = Parameters['lennard_jones']
-		df = P['default']
-		sig = np.array([P.get(self._atomtype(atoms[i]),
-			P.get(atoms[i][1], df))[0]
-			for i in range(n)], dtype=np.float64)
-		sigma = 0.5 * (sig[:, None] + sig[None, :])
-		eps = np.array([P.get(self._atomtype(atoms[i]),
-			P.get(atoms[i][1], df))[1]
-			for i in range(n)], dtype=np.float64)
-		epsilon = np.sqrt(eps[:, None] * eps[None, :])
+		sigma    = cache['lj_sigma']
+		epsilon  = cache['lj_eps_ij']
+		mask_far = cache['mask_far']
+		mask14   = cache['mask_14']
+		weight   = cache['weight_lj']
 		dvec = self._wrap(coords[:, None, :] - coords[None, :, :], box)
 		r = np.linalg.norm(dvec, axis=-1)
 		np.fill_diagonal(r, 1.0)
-		excl = np.eye(n, dtype=bool)
-		excl[pairs[:, 0], pairs[:, 1]] = True
-		excl[pairs[:, 1], pairs[:, 0]] = True
-		excl[excl_13[:, 0], excl_13[:, 1]] = True
-		excl[excl_13[:, 1], excl_13[:, 0]] = True
-		scal14 = np.zeros((n, n), dtype=bool)
-		scal14[excl_14[:, 0], excl_14[:, 1]] = True
-		scal14[excl_14[:, 1], excl_14[:, 0]] = True
-		scal14 &= ~excl
-		upper = np.triu(np.ones((n, n), dtype=bool), k=1)
-		mask14 = scal14 & upper
-		mask_far = (~excl) & (~scal14) & upper
 		f_lj = Parameters['scaling_14']['f_lj']
 		if   alg == '12-6':
 			ratio_6  = (sigma / r)**6
@@ -377,65 +515,35 @@ class ForceField():
 			raise ValueError('Algorithm not supported, choose (12-6 or 9-6)')
 		energy = float(np.sum(lj[mask_far]) + f_lj * np.sum(lj[mask14]))
 		if not grad: return energy
-		weight = np.where(excl, 0.0, np.where(scal14, f_lj, 1.0))
 		coef = -dU_dr / r * weight
 		fij_per_pair = coef[:, :, None] * dvec
 		forces = np.sum(fij_per_pair, axis=1)
 		return energy, forces
-	def electrostatic_potential(self,pose,alg='constant',grad=True,box=None):
+	def ElectrostaticPotential(self,pose,cache,alg='constant',grad=True,box=None):
 		'''
 		Calculates the Electrostatic non-bonded potential for all atom pairs
 		Arguments:
 		----------
-			pose: Pose - molecule source protein, DNA, RNA, or Molecule pose
-			alg:  Str algorithm type either 'constant' (uniform εr) or 'ddd'
+			pose:  Pose - molecule source protein, DNA, RNA, or Molecule pose
+			cache: dict - precomputed topology + parameter from _compile()
+			alg:   Str algorithm type either 'constant' (uniform εr) or 'ddd'
 				(distance-dependent dielectric, ε(r) = εr·r)
-			grad: bool - if True, also return per-atom forces (N, 3) array
-			box:  None for no PBC; (3,) array for orthorhombic; (3, 3) for triclinic
+			grad:  bool - if True, also return per-atom forces (N, 3) array
+			box:   None for no PBC; (3,) for orthorhombic; (3, 3) for triclinic
 		Returns:
 		--------
 			float: potential energy in kcal/mol  (when grad=False)
 			(float, ndarray): energy and (N, 3) forces  (when grad=True)
 		'''
-		atoms = pose.data['Atoms']
-		n = len(atoms)
+		n        = cache['n']
+		qq       = cache['qq']
+		mask_far = cache['mask_far']
+		mask_14  = cache['mask_14']
+		weight   = cache['weight_elec']
 		coords = np.asarray(pose.data['Coordinates'], dtype=np.float64)
-		idx = np.array(
-			[(int(k), int(j)) for k, vs in pose.data['Bonds'].items()
-			for j in vs], dtype=np.int64).reshape(-1, 2)
-		idx.sort(axis=1)
-		pairs = np.unique(idx[idx[:, 0] != idx[:, 1]], axis=0)
-		flat = np.concatenate([pairs, pairs[:, ::-1]])
-		nbrs = {int(a): np.sort(flat[flat[:, 0] == a, 1])
-			for a in np.unique(flat[:, 0])}
-		excl_13 = np.array(
-			[(int(i), int(k)) for j, ns in nbrs.items()
-			for p, i in enumerate(ns) for k in ns[p+1:]],
-			dtype=np.int64).reshape(-1, 2)
-		excl_14 = np.array(
-			[(int(i), int(l)) for j, k in pairs
-			for i in nbrs[int(j)] if i != k
-			for l in nbrs[int(k)] if l != j and l != i],
-			dtype=np.int64).reshape(-1, 2)
-		excl_14.sort(axis=1)
-		excl_14 = np.unique(excl_14[excl_14[:, 0] != excl_14[:, 1]], axis=0)
-		q = np.array([atoms[i][2] for i in range(n)], dtype=np.float64)
-		qq = q[:, None] * q[None, :]
 		dvec = self._wrap(coords[:, None, :] - coords[None, :, :], box)
 		r = np.linalg.norm(dvec, axis=-1)
 		np.fill_diagonal(r, 1.0)
-		excl = np.eye(n, dtype=bool)
-		excl[pairs[:, 0], pairs[:, 1]] = True
-		excl[pairs[:, 1], pairs[:, 0]] = True
-		excl[excl_13[:, 0], excl_13[:, 1]] = True
-		excl[excl_13[:, 1], excl_13[:, 0]] = True
-		scal14 = np.zeros((n, n), dtype=bool)
-		scal14[excl_14[:, 0], excl_14[:, 1]] = True
-		scal14[excl_14[:, 1], excl_14[:, 0]] = True
-		scal14 &= ~excl
-		upper = np.triu(np.ones((n, n), dtype=bool), k=1)
-		mask_far = (~excl) & (~scal14) & upper
-		mask_14  = scal14 & upper
 		epsilon_r = Parameters['electrostatic']['epsilon_r']
 		if alg == 'constant':
 			elec = (332.06 * qq) / (epsilon_r * r)
@@ -449,47 +557,29 @@ class ForceField():
 		f_elec = Parameters['scaling_14']['f_elec']
 		energy = float(np.sum(elec[mask_far]) + f_elec * np.sum(elec[mask_14]))
 		if not grad: return energy
-		weight = np.where(excl, 0.0, np.where(scal14, f_elec, 1.0))
 		coef = -dU_dr / r * weight
 		fij_per_pair = coef[:, :, None] * dvec
 		forces = np.sum(fij_per_pair, axis=1)
 		return energy, forces
-	def dihedral_potential(self, pose, grad=True, box=None):
+	def DihedralPotential(self, pose, cache, grad=True, box=None):
 		'''
 		Calculates the Proper Dihedral (torsion) potential for i-j-k-l atoms
 		Arguments:
 		----------
-			pose: Pose - molecule source protein, DNA, RNA, or Molecule pose
-			grad: bool - if True, also return per-atom forces (N, 3) array
-			box:  None for no PBC; (3,) array for orthorhombic; (3, 3) for triclinic
+			pose:  Pose - molecule source protein, DNA, RNA, or Molecule pose
+			cache: dict - precomputed topology + parameter from _compile()
+			grad:  bool - if True, also return per-atom forces (N, 3) array
+			box:   None for no PBC; (3,)  for orthorhombic; (3, 3) for triclinic
 		Returns:
 		--------
 			float: potential energy in kcal/mol  (when grad=False)
 			(float, ndarray): energy and (N, 3) forces  (when grad=True)
 		'''
-		atoms = pose.data['Atoms']
-		n = len(atoms)
-		coords = np.asarray(pose.data['Coordinates'], dtype=np.float64)
-		idx = np.array(
-			[(int(k), int(j)) for k, vs in pose.data['Bonds'].items()
-			for j in vs], dtype=np.int64).reshape(-1, 2)
-		idx.sort(axis=1)
-		pairs = np.unique(idx[idx[:, 0] != idx[:, 1]], axis=0)
-		flat = np.concatenate([pairs, pairs[:, ::-1]])
-		nbrs = {int(a): np.sort(flat[flat[:, 0] == a, 1])
-			for a in np.unique(flat[:, 0])}
-		quartets = np.array(
-			[(int(i), int(j), int(k), int(l)) for j, k in pairs
-			for i in nbrs[int(j)] if i != k
-			for l in nbrs[int(k)] if l != j and l != i],
-			dtype=np.int64).reshape(-1, 4)
-		rev = quartets[:, ::-1]
-		swap = (quartets[:, 0] > rev[:, 0]) | (
-			(quartets[:, 0] == rev[:, 0]) & (quartets[:, 1] > rev[:, 1]))
-		quartets = np.where(swap[:, None], rev, quartets)
-		quartets = np.unique(quartets, axis=0)
+		n        = cache['n']
+		quartets = cache['quartets']
 		if len(quartets) == 0:
 			return (0.0, np.zeros((n, 3))) if grad else 0.0
+		coords = np.asarray(pose.data['Coordinates'], dtype=np.float64)
 		i_idx, j_idx, k_idx, l_idx = quartets.T
 		b1 = self._wrap(coords[j_idx] - coords[i_idx], box)
 		b2 = self._wrap(coords[k_idx] - coords[j_idx], box)
@@ -501,24 +591,15 @@ class ForceField():
 		phi = np.arctan2(
 			np.einsum('ij,ij->i', np.cross(n1, b2n), n2),
 			np.einsum('ij,ij->i', n1, n2))
-		P  = Parameters['dihedrals']
-		df = P['default']
-		component_lists = []
-		for i, j, k, l in quartets:
-			t = (self._atomtype(atoms[int(i)]), self._atomtype(atoms[int(j)]),
-				self._atomtype(atoms[int(k)]), self._atomtype(atoms[int(l)]))
-			if t > t[::-1]: t = t[::-1]
-			component_lists.append(P.get(t, df))
-		counts = np.array([len(c) for c in component_lists], dtype=np.int64)
-		phi_flat = np.repeat(phi, counts)
-		flat_p = np.array([row for cl in component_lists for row in cl],
-			dtype=np.float64).reshape(-1, 3)
-		k_phi, n_mult, phi0 = flat_p[:, 0], flat_p[:,1], np.deg2rad(flat_p[:,2])
+		q_idx  = cache['dihedral_q_idx']
+		k_phi  = cache['dihedral_k_phi']
+		n_mult = cache['dihedral_n_mult']
+		phi0   = cache['dihedral_phi0']
+		phi_flat = phi[q_idx]
 		energy = float(np.sum(k_phi * (1 + np.cos(n_mult * phi_flat - phi0))))
 		if not grad: return energy
 		dU_dphi_flat = -k_phi * n_mult * np.sin(n_mult * phi_flat - phi0)
 		dU_dphi = np.zeros(len(quartets), dtype=np.float64)
-		q_idx = np.repeat(np.arange(len(quartets)), counts)
 		np.add.at(dU_dphi, q_idx, dU_dphi_flat)
 		forces = np.zeros((n, 3), dtype=np.float64)
 		n1_sq = np.einsum('ij,ij->i', n1, n1)
@@ -535,37 +616,26 @@ class ForceField():
 		np.add.at(forces, k_idx, Fk)
 		np.add.at(forces, l_idx, Fl)
 		return energy, forces
-	def improper_dihedral_potential(self,pose,alg='harmonic',grad=True,box=None):
+	def ImproperPotential(self,pose,cache,alg='harmonic',grad=True,box=None):
 		'''
 		Calculates the total Improper Dihedral potential energy
 		Arguments:
 		----------
-			pose: Pose - molecule source protein, DNA, RNA, or Molecule pose
-			alg:  Str algorithm type either 'harmonic' or 'fourier'
-			grad: bool - if True, also return per-atom forces (N, 3) array
-			box:  None for no PBC; (3,) array for orthorhombic; (3, 3) for triclinic
+			pose:  Pose - molecule source protein, DNA, RNA, or Molecule pose
+			cache: dict - precomputed topology + parameter from _compile()
+			alg:   Str algorithm type either 'harmonic' or 'fourier'
+			grad:  bool - if True, also return per-atom forces (N, 3) array
+			box:   None for no PBC; (3,) for orthorhombic; (3, 3) for triclinic
 		Returns:
 		--------
 			float: potential energy in kcal/mol  (when grad=False)
 			(float, ndarray): energy and (N, 3) forces  (when grad=True)
 		'''
-		atoms = pose.data['Atoms']
-		n = len(atoms)
-		coords = np.asarray(pose.data['Coordinates'], dtype=np.float64)
-		idx = np.array(
-			[(int(k), int(j)) for k, vs in pose.data['Bonds'].items()
-			for j in vs], dtype=np.int64).reshape(-1, 2)
-		idx.sort(axis=1)
-		pairs = np.unique(idx[idx[:, 0] != idx[:, 1]], axis=0)
-		flat = np.concatenate([pairs, pairs[:, ::-1]])
-		nbrs = {int(a): np.sort(flat[flat[:, 0] == a, 1])
-			for a in np.unique(flat[:, 0])}
-		impropers = np.array(
-			[(int(ns[0]), int(j), int(ns[1]), int(ns[2]))
-			for j, ns in nbrs.items() if len(ns) == 3],
-			dtype=np.int64).reshape(-1, 4)
+		n         = cache['n']
+		impropers = cache['impropers']
 		if len(impropers) == 0:
 			return (0.0, np.zeros((n, 3))) if grad else 0.0
+		coords = np.asarray(pose.data['Coordinates'], dtype=np.float64)
 		i_idx, j_idx, k_idx, l_idx = impropers.T
 		b1 = self._wrap(coords[j_idx] - coords[i_idx], box)
 		b2 = self._wrap(coords[k_idx] - coords[j_idx], box)
@@ -577,19 +647,9 @@ class ForceField():
 		psi = np.arctan2(
 			np.einsum('ij,ij->i', np.cross(n1, b2n), n2),
 			np.einsum('ij,ij->i', n1, n2))
-		P  = Parameters['impropers']
-		df = P['default']
-		keys = []
-		for i, j, k, l in impropers:
-			nb = sorted([self._atomtype(atoms[int(i)]),
-				self._atomtype(atoms[int(k)]),
-				self._atomtype(atoms[int(l)])])
-			keys.append((self._atomtype(atoms[int(j)]), nb[0], nb[1], nb[2]))
-		params = np.array([P.get(key, df) for key in keys],
-			dtype=np.float64).reshape(-1, 3)
-		k_imp = params[:, 0]
-		n_mult = params[:, 1]
-		psi0  = np.deg2rad(params[:, 2])
+		k_imp  = cache['imp_k']
+		n_mult = cache['imp_n']
+		psi0   = cache['imp_psi0']
 		if   alg == 'harmonic':
 			delta = ((psi - psi0 + np.pi) % (2 * np.pi)) - np.pi
 			energy = float(np.sum(k_imp * delta**2))
@@ -616,47 +676,30 @@ class ForceField():
 		np.add.at(forces, k_idx, Fk)
 		np.add.at(forces, l_idx, Fl)
 		return energy, forces
-	def ub_potential(self, pose, grad=True, box=None):
+	def UBPotential(self, pose, cache, grad=True, box=None):
 		'''
 		Calculates Urey-Bradley 1-3 stretching potential between all three atoms
 		Arguments:
 		----------
-			pose: Pose - molecule source protein, DNA, RNA, or Molecule pose
-			grad: bool - if True, also return per-atom forces (N, 3) array
-			box:  None for no PBC; (3,) array for orthorhombic; (3, 3) for triclinic
+			pose:  Pose - molecule source protein, DNA, RNA, or Molecule pose
+			cache: dict - precomputed topology + parameter from _compile()
+			grad:  bool - if True, also return per-atom forces (N, 3) array
+			box:   None for no PBC; (3,) for orthorhombic; (3, 3) for triclinic
 		Returns:
 		--------
 			float: potential energy in kcal/mol  (when grad=False)
 			(float, ndarray): energy and (N, 3) forces  (when grad=True)
 		'''
-		atoms = pose.data['Atoms']
-		coords = np.asarray(pose.data['Coordinates'], dtype=np.float64)
-		idx = np.array(
-			[(int(k), int(j)) for k, vs in pose.data['Bonds'].items()
-			for j in vs], dtype=np.int64).reshape(-1, 2)
-		idx.sort(axis=1)
-		pairs = np.unique(idx[idx[:, 0] != idx[:, 1]], axis=0)
-		flat = np.concatenate([pairs, pairs[:, ::-1]])
-		nbrs = {int(a): np.sort(flat[flat[:, 0] == a, 1])
-			for a in np.unique(flat[:, 0])}
-		triplets = np.array(
-			[(int(i), j, int(k)) for j, ns in nbrs.items()
-			for p, i in enumerate(ns) for k in ns[p+1:]],
-			dtype=np.int64).reshape(-1, 3)
-		n = len(atoms)
+		n        = cache['n']
+		triplets = cache['triplets']
 		if len(triplets) == 0:
 			return (0.0, np.zeros((n, 3))) if grad else 0.0
+		coords = np.asarray(pose.data['Coordinates'], dtype=np.float64)
 		i_idx, j_idx, k_idx = triplets[:, 0], triplets[:, 1], triplets[:, 2]
 		dvec = self._wrap(coords[i_idx] - coords[k_idx], box)
 		r = np.linalg.norm(dvec, axis=1)
-		P  = Parameters['angles']
-		df = P['default']
-		params = np.array([P.get((
-			min(self._atomtype(atoms[int(i)]), self._atomtype(atoms[int(k)])),
-			self._atomtype(atoms[int(j)]),
-			max(self._atomtype(atoms[int(i)]), self._atomtype(atoms[int(k)]))),
-			df) for i, j, k in triplets], dtype=np.float64).reshape(-1, 4)
-		k_ub, s0 = params[:, 2], params[:, 3]
+		k_ub = cache['ub_K_ub']
+		s0   = cache['ub_s0']
 		energy = float(np.sum(k_ub * (r - s0)**2))
 		if not grad: return energy
 		forces = np.zeros((n, 3), dtype=np.float64)
@@ -665,59 +708,29 @@ class ForceField():
 		np.add.at(forces, i_idx, fik)
 		np.add.at(forces, k_idx, -fik)
 		return energy, forces
-	def polarisation_potential(self, pose, alg='constant', grad=True, box=None):
+	def PolarisationPotential(self,pose,cache,alg='constant',grad=True,box=None):
 		'''
-		Calculates total Polarisation potential energy
+		Calculates the induced-dipole polarisation potential for all atoms
 		Arguments:
 		----------
-			pose: Pose - molecule source protein, DNA, RNA, or Molecule pose
-			alg:  Str algorithm type either 'constant' or 'ddd'
+			pose:  Pose - molecule source protein, DNA, RNA, or Molecule pose
+			cache: dict - precomputed topology + parameter from _compile()
+			alg:   Str algorithm type either 'constant' or 'ddd'
+			grad:  bool - if True, also return per-atom forces (N, 3) array
+			box:   None for no PBC; (3,) for orthorhombic; (3, 3) for triclinic
 		Returns:
 		--------
-			float: potential energy in kcal/mol
+			float: potential energy in kcal/mol  (when grad=False)
+			(float, ndarray): energy and (N, 3) forces  (when grad=True)
 		'''
-		atoms = pose.data['Atoms']
-		n = len(atoms)
+		n      = cache['n']
+		q      = cache['charges']
+		alpha  = cache['lj_alpha']
+		weight = cache['weight_elec']
 		coords = np.asarray(pose.data['Coordinates'], dtype=np.float64)
-		idx = np.array(
-			[(int(k), int(j)) for k, vs in pose.data['Bonds'].items()
-			for j in vs], dtype=np.int64).reshape(-1, 2)
-		idx.sort(axis=1)
-		pairs = np.unique(idx[idx[:, 0] != idx[:, 1]], axis=0)
-		flat = np.concatenate([pairs, pairs[:, ::-1]])
-		nbrs = {int(a): np.sort(flat[flat[:, 0] == a, 1])
-			for a in np.unique(flat[:, 0])}
-		excl_13 = np.array(
-			[(int(i), int(k)) for j, ns in nbrs.items()
-			for p, i in enumerate(ns) for k in ns[p+1:]],
-			dtype=np.int64).reshape(-1, 2)
-		excl_14 = np.array(
-			[(int(i), int(l)) for j, k in pairs
-			for i in nbrs[int(j)] if i != k
-			for l in nbrs[int(k)] if l != j and l != i],
-			dtype=np.int64).reshape(-1, 2)
-		excl_14.sort(axis=1)
-		excl_14 = np.unique(excl_14[excl_14[:, 0] != excl_14[:, 1]], axis=0)
-		q = np.array([atoms[i][2] for i in range(n)], dtype=np.float64)
-		P  = Parameters['lennard_jones']
-		df = P['default']
-		alpha = np.array(
-			[P.get(self._atomtype(atoms[i]), P.get(atoms[i][1], df))[2]
-			for i in range(n)], dtype=np.float64)
 		dr = self._wrap(coords[:, None, :] - coords[None, :, :], box)
 		r = np.linalg.norm(dr, axis=-1)
 		np.fill_diagonal(r, 1.0)
-		excl = np.eye(n, dtype=bool)
-		excl[pairs[:, 0], pairs[:, 1]] = True
-		excl[pairs[:, 1], pairs[:, 0]] = True
-		excl[excl_13[:, 0], excl_13[:, 1]] = True
-		excl[excl_13[:, 1], excl_13[:, 0]] = True
-		scal14 = np.zeros((n, n), dtype=bool)
-		scal14[excl_14[:, 0], excl_14[:, 1]] = True
-		scal14[excl_14[:, 1], excl_14[:, 0]] = True
-		scal14 &= ~excl
-		f_elec = Parameters['scaling_14']['f_elec']
-		weight = np.where(excl, 0.0, np.where(scal14, f_elec, 1.0))
 		epsilon_r = Parameters['electrostatic']['epsilon_r']
 		if alg == 'constant':
 			coeff = 332.06 * q[None, :] / (epsilon_r * r**3)
@@ -739,48 +752,28 @@ class ForceField():
 		M = A[:, :, None] * G
 		forces = -np.sum(M, axis=1) + np.sum(M, axis=0)
 		return energy, forces
-	def cmap_potential(self, pose, grad=True, box=None):
+	def CMAPPotential(self, pose, cache, grad=True, box=None):
 		'''
-		Calculates the total CMAP backbone (φ, ψ) correction energy
+		Calculates the CMAP backbone (phi, psi) cross-term correction energy
 		Arguments:
 		----------
-			pose: Pose - molecule source protein, DNA, RNA, or Molecule pose
-			grad: bool - if True, also return per-atom forces (N, 3) array
-			box:  None for no PBC; (3,) orthorhombic; (3, 3) triclinic
+			pose:  Pose - molecule source protein, DNA, RNA, or Molecule pose
+			cache: dict - precomputed topology + parameter from _compile()
+			grad:  bool - if True, also return per-atom forces (N, 3) array
+			box:   None for no PBC; (3,) for orthorhombic; (3, 3) for triclinic
 		Returns:
 		--------
 			float: potential energy in kcal/mol  (when grad=False)
 			(float, ndarray): energy and (N, 3) forces  (when grad=True)
 		'''
-		atoms = pose.data['Atoms']
-		n = len(atoms)
-		coords = np.asarray(pose.data['Coordinates'], dtype=np.float64)
-		aas = pose.data.get('Amino Acids')
-		if aas is None or len(aas) < 3:
-			return (0.0, np.zeros((n, 3))) if grad else 0.0
-		res_atoms = {ai: (info[0], info[1],
-			{atoms[k][0]: k for k in info[2]}) for ai, info in aas.items()}
-		phi_q, psi_q, codes = [], [], []
-		for r in sorted(res_atoms.keys())[1:-1]:
-			aa_curr, ch_curr, names_curr = res_atoms[r]
-			_,       ch_prev, names_prev = res_atoms[r - 1]
-			_,       ch_next, names_next = res_atoms[r + 1]
-			if ch_curr != ch_prev or ch_curr != ch_next: continue
-			try:
-				C_prev  = names_prev['C']
-				N_curr  = names_curr['N']
-				CA_curr = names_curr['CA']
-				C_curr  = names_curr['C']
-				N_next  = names_next['N']
-			except KeyError: continue
-			phi_q.append((C_prev, N_curr, CA_curr, C_curr))
-			psi_q.append((N_curr, CA_curr, C_curr, N_next))
-			codes.append(aa_curr)
+		n      = cache['n']
+		phi_q  = cache['cmap_phi_q']
+		psi_q  = cache['cmap_psi_q']
+		tables = cache['cmap_tables']
 		if len(phi_q) == 0:
 			return (0.0, np.zeros((n, 3))) if grad else 0.0
 		M = len(phi_q)
-		phi_q = np.asarray(phi_q, dtype=np.int64)
-		psi_q = np.asarray(psi_q, dtype=np.int64)
+		coords = np.asarray(pose.data['Coordinates'], dtype=np.float64)
 		quartets = np.concatenate([phi_q, psi_q], axis=0)
 		i_idx, j_idx, k_idx, l_idx = quartets.T
 		b1 = self._wrap(coords[j_idx] - coords[i_idx], box)
@@ -794,10 +787,6 @@ class ForceField():
 			np.einsum('ij,ij->i', np.cross(n1, b2n), n2),
 			np.einsum('ij,ij->i', n1, n2))
 		phi, psi = ang[:M], ang[M:]
-		P  = Parameters['cmap']
-		df = P['default']
-		tables = np.stack([np.asarray(P.get(c,df),dtype=np.float64)
-			for c in codes])
 		N_grid = tables.shape[1]
 		H = 2.0 * np.pi / N_grid
 		x = (phi + np.pi) / H
@@ -841,7 +830,6 @@ class ForceField():
 		np.add.at(forces, k_idx, Fk)
 		np.add.at(forces, l_idx, Fl)
 		return energy, forces
-
 
 
 
