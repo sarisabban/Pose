@@ -431,8 +431,9 @@ def Parameterise(filename, unicode, tricode):
 
 def _energy(pose):
 	''' Calculate potential energy for BBDEP values in Parameterise() '''
-	E = Energy(pose, alg='Lennard_Jones')
-	return E
+	ff = ForceField()
+	E = ff(pose)
+	return E[0]
 
 def RMSD(pose1, pose2, alg='align', export=None):
 	'''
@@ -1832,20 +1833,21 @@ def Rotamers(index, pose):
 		result = math.degrees(math.atan2(s, c))
 		pose.RotateDihedral(index, result, 'CHI', ci+1)
 
-
 def Minimise(pose, ff=None, max_steps=500, ftol=1.0, dt_fs=0.1,
-		dt_max_fs=2.0, fmax_cap=200.0, box=None):
+		dt_max_fs=2.0, step_max=0.2, etol=1e-6, stall_k=10, box=None):
 	'''
-	Relax pose coordinates with the FIRE algorithm (Bitzek et al. 2006)
+	Relax pose coordinates with FIRE2 (Guenole et al. 2020) + trust region
 	Arguments:
 	----------
 		pose:      Pose - molecule source protein, DNA, RNA, or Molecule
 		ff:        ForceField - reusable evaluator; created if None
-		max_steps: int - maximum number of FIRE iterations
-		ftol:      float - convergence threshold on max|force| kcal/mol/A
+		max_steps: int - maximum number of FIRE2 iterations
+		ftol:      float - convergence on max|force| (L_inf) in kcal/mol/A
 		dt_fs:     float - initial integrator step in femtoseconds
 		dt_max_fs: float - upper bound on the adaptive step in fs
-		fmax_cap:  float - per-atom force cap in kcal/mol/A; 0 disables
+		step_max:  float - trust-region cap on |dt*v| per atom in Angstrom
+		etol:      float - energy-stall tolerance in kcal/mol
+		stall_k:   int - consecutive stalled steps that trigger early stop
 		box:       None for no PBC; (3,) orthorhombic; (3, 3) triclinic
 	Returns:
 	--------
@@ -1861,9 +1863,10 @@ def Minimise(pose, ff=None, max_steps=500, ftol=1.0, dt_fs=0.1,
 	dt = float(dt_fs) / AKMA_FS
 	dt_max = float(dt_max_fs) / AKMA_FS
 	alpha, n_pos = float(A_START), 0
-	energies, fmaxes = [], []
+	energies, fmaxes, max_steps_log = [], [], []
 	E, F = ff(pose, grad=True, box=box)
-	converged, steps_done = False, 0
+	converged, steps_done, stall = False, 0, 0
+	E_prev = float(E)
 	for step in range(int(max_steps)):
 		fmax = float(np.max(np.abs(F)))
 		energies.append(float(E)); fmaxes.append(fmax)
@@ -1871,54 +1874,65 @@ def Minimise(pose, ff=None, max_steps=500, ftol=1.0, dt_fs=0.1,
 		if fmax < ftol:
 			converged = True
 			break
-		nrm = np.linalg.norm(F, axis=1, keepdims=True)
-		F_use = F * np.where(
-			(fmax_cap > 0.0) & (nrm > fmax_cap),
-			fmax_cap / np.maximum(nrm, 1e-12), 1.0)
-		v += 0.5 * dt * F_use / m
-		pose.data['Coordinates'] = pose.data['Coordinates'] + dt * v
+		stall = stall + 1 if abs(float(E) - E_prev) < etol else 0
+		E_prev = float(E)
+		if stall >= stall_k and step > 0:
+			converged = True
+			break
+		v += 0.5 * dt * F / m
+		step_vec = dt * v
+		nrm = np.linalg.norm(step_vec, axis=1, keepdims=True)
+		scale = np.minimum(1.0, step_max / np.maximum(nrm, 1e-12))
+		v *= scale
+		step_vec = dt * v
+		max_steps_log.append(float(np.max(np.abs(step_vec))))
+		pose.data['Coordinates'] = pose.data['Coordinates'] + step_vec
 		E, F = ff(pose, grad=True, box=box)
-		nrm = np.linalg.norm(F, axis=1, keepdims=True)
-		F_use = F * np.where(
-			(fmax_cap > 0.0) & (nrm > fmax_cap),
-			fmax_cap / np.maximum(nrm, 1e-12), 1.0)
-		v += 0.5 * dt * F_use / m
-		P = float(np.sum(F_use * v))
-		f_norm = float(np.linalg.norm(F_use))
+		v += 0.5 * dt * F / m
+		P = float(np.sum(F * v))
+		f_norm = float(np.linalg.norm(F))
 		v_norm = float(np.linalg.norm(v))
 		if P > 0.0:
-			scale = (alpha * v_norm / f_norm) if f_norm > 1e-12 else 0.0
-			v = (1.0 - alpha) * v + scale * F_use
+			mix = (alpha * v_norm / f_norm) if f_norm > 1e-12 else 0.0
+			v = (1.0 - alpha) * v + mix * F
 			n_pos += 1
 			if n_pos > N_MIN:
 				dt = min(dt * F_INC, dt_max)
 				alpha *= F_ALPHA
 		else:
+			pose.data['Coordinates'] = pose.data['Coordinates'] - 0.5*dt*v
 			v.fill(0.0)
 			dt *= F_DEC
 			alpha = A_START
 			n_pos = 0
 	log = {
-		'energies': np.asarray(energies, dtype=np.float64),
-		'fmax':     np.asarray(fmaxes,   dtype=np.float64),
+		'energies':  np.asarray(energies,       dtype=np.float64),
+		'fmax':      np.asarray(fmaxes,         dtype=np.float64),
+		'max_step':  np.asarray(max_steps_log,  dtype=np.float64),
 		'converged': bool(converged),
 		'n_steps':   int(steps_done)}
 	return float(E), log
 
 def Anneal(pose, ff=None, n_steps=10000, T_start=2000.0, T_end=10.0,
-		sigma_deg=20.0, seed=None, box=None):
+		sigma_small=5.0, sigma_large=30.0, p_large=0.2, p_shear=0.5,
+		target_acc=0.30, adapt_window=100, seed=None, box=None):
 	'''
-	Backbone phi/psi simulated annealing with geometric cooling
+	Simulated annealing with shear+single moves and adaptive small sigma
 	Arguments:
 	----------
-		pose:      Pose - molecule source protein with Amino Acids dict
-		ff:        ForceField - reusable evaluator; created if None
-		n_steps:   int - total Metropolis steps in the cooling schedule
-		T_start:   float - starting temperature in Kelvin
-		T_end:     float - final temperature in Kelvin
-		sigma_deg: float - Gaussian std-dev of the dihedral perturbation
-		seed:      int or None - RNG seed for reproducibility
-		box:       None for no PBC; (3,) orthorhombic; (3, 3) triclinic
+		pose:         Pose - protein pose with Amino Acids dict
+		ff:           ForceField - reusable evaluator; created if None
+		n_steps:      int - total Metropolis steps in the cooling schedule
+		T_start:      float - starting temperature in Kelvin
+		T_end:        float - final temperature in Kelvin
+		sigma_small:  float - initial small-move std-dev in degrees
+		sigma_large:  float - large-move std-dev in degrees (fixed)
+		p_large:      float - probability of choosing a large move
+		p_shear:      float - probability of choosing a shear move
+		target_acc:   float - target acceptance ratio for small moves
+		adapt_window: int - small moves between sigma_small updates
+		seed:         int or None - RNG seed for reproducibility
+		box:          None for no PBC; (3,) ortho; (3, 3) triclinic
 	Returns:
 	--------
 		tuple: (float, dict) - best energy seen and per-step log
@@ -1926,36 +1940,61 @@ def Anneal(pose, ff=None, n_steps=10000, T_start=2000.0, T_end=10.0,
 	if ff is None: ff = ForceField()
 	if pose.data.get('Amino Acids') is None:
 		raise ValueError('Anneal requires a protein pose with Amino Acids')
+	GAIN, SIGMA_MIN, SIGMA_MAX = 0.5, 0.5, 60.0
 	rng = np.random.default_rng(seed)
 	res_ids = np.array(sorted(pose.data['Amino Acids']), dtype=np.int64)
 	n_res = len(res_ids)
 	kB = 1.987204259e-3
 	T_arr = T_start * (T_end / T_start) ** (
 		np.arange(n_steps) / max(n_steps - 1, 1))
-	res_arr = res_ids[rng.integers(0, n_res, size=n_steps)]
-	kind_arr = np.where(rng.integers(0, 2, size=n_steps) == 0,
+	res_arr   = res_ids[rng.integers(0, n_res, size=n_steps)]
+	kind_arr  = np.where(rng.integers(0, 2, size=n_steps) == 0,
 		'PHI', 'PSI')
-	delta_arr = rng.normal(0.0, sigma_deg, size=n_steps)
-	uniform_arr = rng.random(size=n_steps)
+	shear_arr = rng.random(size=n_steps) < p_shear
+	large_arr = rng.random(size=n_steps) < p_large
+	noise_arr = rng.standard_normal(size=n_steps)
+	uni_arr   = rng.random(size=n_steps)
+	def try_single(res, kind, delta):
+		theta_old = pose.GetDihedral(res, kind)
+		if math.isnan(theta_old): return False
+		pose.RotateDihedral(res, theta_old + delta, kind)
+		return True
+	def try_shear(res, delta):
+		psi_old = pose.GetDihedral(res, 'PSI')
+		phi_next = pose.GetDihedral(res + 1, 'PHI') \
+			if (res + 1) in pose.data['Amino Acids'] else float('nan')
+		if math.isnan(psi_old) or math.isnan(phi_next): return False
+		pose.RotateDihedral(res, psi_old + delta, 'PSI')
+		pose.RotateDihedral(res + 1, phi_next - delta, 'PHI')
+		return True
 	E_curr = float(ff(pose, grad=False, box=box))
 	E_best = E_curr
 	coords_best = pose.data['Coordinates'].copy()
-	energies = np.empty(n_steps, dtype=np.float64)
-	accepted = np.zeros(n_steps, dtype=bool)
-	best_step = 0
+	energies   = np.empty(n_steps, dtype=np.float64)
+	accepted   = np.zeros(n_steps, dtype=bool)
+	move_types = np.full(n_steps, 2, dtype=np.int8)  # 0=single,1=shear,2=invalid
+	sigma_history = [float(sigma_small)]
+	small_count, small_acc, best_step = 0, 0, 0
 	for s in range(int(n_steps)):
-		res = int(res_arr[s]); kind = str(kind_arr[s])
-		theta_old = pose.GetDihedral(res, kind)
-		if math.isnan(theta_old):
+		sigma = sigma_large if large_arr[s] else sigma_small
+		delta = float(noise_arr[s] * sigma)
+		res = int(res_arr[s])
+		coords_old = pose.data['Coordinates'].copy()
+		applied = (try_shear(res, delta) if shear_arr[s]
+			else try_single(res, str(kind_arr[s]), delta))
+		mtype = 1 if shear_arr[s] else 0
+		if not applied and shear_arr[s]:
+			applied = try_single(res, str(kind_arr[s]), delta)
+			mtype = 0
+		if not applied:
 			energies[s] = E_curr
 			continue
-		coords_old = pose.data['Coordinates'].copy()
-		pose.RotateDihedral(res, theta_old + float(delta_arr[s]), kind)
 		E_new = float(ff(pose, grad=False, box=box))
 		dE = E_new - E_curr
 		RT = kB * float(T_arr[s])
 		boltz = math.exp(-dE / RT) if (dE > 0.0 and RT > 0.0) else 1.0
-		accept = (dE <= 0.0) or (uniform_arr[s] < boltz)
+		accept = (dE <= 0.0) or (uni_arr[s] < boltz)
+		move_types[s] = mtype
 		if accept:
 			E_curr = E_new
 			accepted[s] = True
@@ -1966,12 +2005,23 @@ def Anneal(pose, ff=None, n_steps=10000, T_start=2000.0, T_end=10.0,
 		else:
 			pose.data['Coordinates'] = coords_old
 		energies[s] = E_curr
+		if not large_arr[s]:
+			small_count += 1
+			small_acc += int(accept)
+			if small_count >= adapt_window:
+				rate = small_acc / small_count
+				sigma_small *= math.exp(GAIN * (rate - target_acc))
+				sigma_small = max(SIGMA_MIN, min(sigma_small, SIGMA_MAX))
+				sigma_history.append(float(sigma_small))
+				small_count, small_acc = 0, 0
 	pose.data['Coordinates'] = coords_best
 	log = {
-		'energies':     energies,
-		'temperatures': T_arr,
-		'accepted':     accepted,
-		'best_step':    int(best_step)}
+		'energies':      energies,
+		'temperatures':  T_arr,
+		'accepted':      accepted,
+		'move_types':    move_types,
+		'sigma_history': np.asarray(sigma_history, dtype=np.float64),
+		'best_step':     int(best_step)}
 	return float(E_best), log
 
 def Pack(pose, ff=None, max_iter=10, include_bbdep=True, box=None):
@@ -2075,11 +2125,12 @@ def Pack(pose, ff=None, max_iter=10, include_bbdep=True, box=None):
 		'converged': bool(converged)}
 	return float(E_curr), log
 
-def MolecularDynamics(pose, ff=None, n_steps=1000, dt_fs=1.0, T=300.0,
-		thermostat='nve', friction_ps=1.0, seed=None,
+def MolecularDynamics(pose, ff=None, n_steps=1000, dt_fs=2.0, T=300.0,
+		thermostat='nve', friction_ps=1.0, constraints='hbonds',
+		shake_tol=1e-8, shake_max=100, seed=None,
 		trajectory_every=0, box=None):
 	'''
-	Velocity-Verlet NVE or BAOAB Langevin NVT molecular dynamics
+	Velocity-Verlet NVE or BAOAB Langevin NVT MD with SHAKE/RATTLE
 	Arguments:
 	----------
 		pose:             Pose - molecule source pose
@@ -2089,6 +2140,9 @@ def MolecularDynamics(pose, ff=None, n_steps=1000, dt_fs=1.0, T=300.0,
 		T:                float - temperature in Kelvin (initial + bath)
 		thermostat:       str - 'nve' or 'langevin'
 		friction_ps:      float - Langevin friction in ps^-1
+		constraints:      str - 'hbonds' constrains every X-H bond; 'none'
+		shake_tol:        float - relative tolerance on |d^2 - r0^2|/r0^2
+		shake_max:        int - max iterations for SHAKE/RATTLE projection
 		seed:             int or None - RNG seed for reproducibility
 		trajectory_every: int - snapshot stride; 0 disables snapshots
 		box:              None for no PBC; (3,) ortho; (3, 3) triclinic
@@ -2099,22 +2153,74 @@ def MolecularDynamics(pose, ff=None, n_steps=1000, dt_fs=1.0, T=300.0,
 	if ff is None: ff = ForceField()
 	if thermostat not in ('nve', 'langevin'):
 		raise ValueError("thermostat must be 'nve' or 'langevin'")
+	if constraints not in ('hbonds', 'none'):
+		raise ValueError("constraints must be 'hbonds' or 'none'")
 	rng = np.random.default_rng(seed)
 	atoms = pose.data['Atoms']
-	m = np.array([pose.masses[atoms[i][1]] for i in sorted(atoms)],
+	sorted_ids = sorted(atoms)
+	m = np.array([pose.masses[atoms[i][1]] for i in sorted_ids],
 		dtype=np.float64)
 	n = len(m)
 	m_col = m[:, None]
+	inv_m = 1.0 / m
+	inv_m_col = inv_m[:, None]
 	AKMA_FS = 48.88821291
 	kB = 1.987204259e-3
 	dt = float(dt_fs) / AKMA_FS
 	gamma = float(friction_ps) * AKMA_FS / 1000.0
 	c1 = math.exp(-gamma * dt)
 	c2 = np.sqrt((1.0 - c1 * c1) * kB * float(T) / m)[:, None]
+	if ff._cache is None or ff._cache_hash != ff._topology_hash(pose):
+		ff._prepare(pose)
+	cache = ff._cache
+	is_h = np.array([atoms[i][1] == 'H' for i in sorted_ids], dtype=bool)
+	if constraints == 'hbonds' and len(cache['pairs']):
+		cmask = is_h[cache['pairs'][:, 0]] | is_h[cache['pairs'][:, 1]]
+		con = cache['pairs'][cmask]
+		r0  = cache['bond_r0'][cmask]
+	else:
+		con = np.empty((0, 2), dtype=np.int64)
+		r0  = np.empty((0,),   dtype=np.float64)
+	K = len(con)
+	i_c, j_c = con[:, 0], con[:, 1]
+	r0sq = r0 * r0
+	inv_red = inv_m[i_c] + inv_m[j_c] if K else np.empty(0)
+	r0sq_max = float(r0sq.max()) if K else 1.0
+	def shake(x_new, x_old, vel, dt_eff):
+		if K == 0: return
+		r_old = x_old[i_c] - x_old[j_c]
+		for _ in range(int(shake_max)):
+			r = x_new[i_c] - x_new[j_c]
+			d2 = np.einsum('ij,ij->i', r, r)
+			sigma = d2 - r0sq
+			if float(np.max(np.abs(sigma))) < shake_tol * r0sq_max:
+				return
+			rdot = np.einsum('ij,ij->i', r, r_old)
+			lam  = sigma / (2.0 * inv_red * rdot)
+			delta = lam[:, None] * r_old
+			np.add.at(x_new, i_c, -delta * inv_m_col[i_c])
+			np.add.at(x_new, j_c,  delta * inv_m_col[j_c])
+			np.add.at(vel,   i_c, -(delta / dt_eff) * inv_m_col[i_c])
+			np.add.at(vel,   j_c,  (delta / dt_eff) * inv_m_col[j_c])
+	def rattle(x, vel):
+		if K == 0: return
+		for _ in range(int(shake_max)):
+			r = x[i_c] - x[j_c]
+			v_rel = vel[i_c] - vel[j_c]
+			rv = np.einsum('ij,ij->i', r, v_rel)
+			d2 = np.einsum('ij,ij->i', r, r)
+			if float(np.max(np.abs(rv))) < shake_tol * r0sq_max:
+				return
+			mu = rv / (d2 * inv_red)
+			delta_v = mu[:, None] * r
+			np.add.at(vel, i_c, -delta_v * inv_m_col[i_c])
+			np.add.at(vel, j_c,  delta_v * inv_m_col[j_c])
 	sigma_v = np.sqrt(kB * float(T) / m)[:, None]
-	v = rng.normal(0.0, 1.0, size=(n, 3)) * sigma_v
+	v = rng.standard_normal(size=(n, 3)) * sigma_v
 	v -= ((m_col * v).sum(axis=0) / m.sum())[None, :]
+	rattle(pose.data['Coordinates'], v)
 	E, F = ff(pose, grad=True, box=box)
+	dof = max(3 * n - K - 3, 1)
 	energies = np.empty(int(n_steps), dtype=np.float64)
 	kinetics = np.empty(int(n_steps), dtype=np.float64)
 	temps    = np.empty(int(n_steps), dtype=np.float64)
@@ -2123,25 +2229,36 @@ def MolecularDynamics(pose, ff=None, n_steps=1000, dt_fs=1.0, T=300.0,
 	for step in range(int(n_steps)):
 		if use_langevin:
 			v += 0.5 * dt * F / m_col
-			pose.data['Coordinates'] = pose.data['Coordinates'] + 0.5*dt*v
-			v = c1 * v + c2 * rng.normal(0.0, 1.0, size=(n, 3))
-			pose.data['Coordinates'] = pose.data['Coordinates'] + 0.5*dt*v
+			x_old = pose.data['Coordinates'].copy()
+			pose.data['Coordinates'] = x_old + 0.5 * dt * v
+			shake(pose.data['Coordinates'], x_old, v, 0.5 * dt)
+			v = c1 * v + c2 * rng.standard_normal(size=(n, 3))
+			rattle(pose.data['Coordinates'], v)
+			x_old = pose.data['Coordinates'].copy()
+			pose.data['Coordinates'] = x_old + 0.5 * dt * v
+			shake(pose.data['Coordinates'], x_old, v, 0.5 * dt)
 			E, F = ff(pose, grad=True, box=box)
 			v += 0.5 * dt * F / m_col
+			rattle(pose.data['Coordinates'], v)
 		else:
 			v += 0.5 * dt * F / m_col
-			pose.data['Coordinates'] = pose.data['Coordinates'] + dt * v
+			x_old = pose.data['Coordinates'].copy()
+			pose.data['Coordinates'] = x_old + dt * v
+			shake(pose.data['Coordinates'], x_old, v, dt)
 			E, F = ff(pose, grad=True, box=box)
 			v += 0.5 * dt * F / m_col
+			rattle(pose.data['Coordinates'], v)
 		KE = 0.5 * float(np.sum(m_col * v * v))
 		energies[step] = float(E)
 		kinetics[step] = KE
-		temps[step] = 2.0 * KE / (3.0 * n * kB) if n > 0 else 0.0
+		temps[step] = 2.0 * KE / (dof * kB)
 		if trajectory_every > 0 and (step + 1) % trajectory_every == 0:
 			frames.append(pose.data['Coordinates'].copy())
 	log = {
 		'energies':     energies,
 		'kinetic':      kinetics,
 		'temperatures': temps,
-		'frames':       frames}
+		'frames':       frames,
+		'n_constraints': int(K),
+		'dof':           int(dof)}
 	return float(E), log

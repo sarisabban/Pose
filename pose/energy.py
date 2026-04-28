@@ -1,106 +1,11 @@
+import os
+import json
 import numpy as np
-
-Parameters = {
-	'bonds': {
-		#i     j       Kb    De     a     r0
-		('C',  'CA'): (317.0, 88.0, 1.91, 1.522),
-		('C',  'N' ): (490.0,143.0, 2.05, 1.335),
-		('C',  'O' ): (570.0,170.0, 2.20, 1.229),
-		('CA', 'CB'): (310.0, 85.0, 1.91, 1.526),
-		('CA', 'HA'): (340.0, 97.0, 1.84, 1.090),
-		('CA', 'N' ): (337.0, 95.0, 1.95, 1.449),
-		('CB', 'HB'): (340.0, 97.0, 1.84, 1.090),
-		('H',  'N' ): (434.0,110.0, 2.07, 1.010),
-		# Generic element-pair stand-ins so unknown types still
-		('C',  'C' ): (310.0, 85.0, 1.91, 1.526),
-		('C',  'H' ): (340.0, 97.0, 1.84, 1.090),
-		('C',  'S' ): (227.0, 60.0, 1.80, 1.810),
-		('H',  'O' ): (553.0,115.0, 2.27, 0.960),
-		('H',  'S' ): (274.0, 80.0, 1.85, 1.336),
-		('O',  'P' ): (525.0, 90.0, 2.00, 1.610),
-		'default': (300.0,90.0, 2.00,  1.500)},
-	'angles': {
-		#i     j     k      theta0 K theta K_ub   S0
-		('C',  'CA', 'N' ): (63.0, 110.1, 0.0,  1.500),
-		('CA', 'C',  'N' ): (70.0, 116.6, 50.0, 2.450),
-		('CA', 'C',  'O' ): (80.0, 120.4, 50.0, 2.388),
-		('N',  'C',  'O' ): (80.0, 122.9, 50.0, 2.250),
-		('C',  'N',  'CA'): (50.0, 121.9, 50.0, 2.453),
-		('CA', 'N',  'H' ): (50.0, 118.0, 0.0,  1.500),
-		('C',  'N',  'H' ): (50.0, 119.8, 0.0,  1.500),
-		('CB', 'CA', 'N' ): (80.0, 109.7, 50.0, 2.510),
-		('C',  'CA', 'CB'): (63.0, 111.1, 50.0, 2.561),
-		('CB', 'CA', 'HA'): (50.0, 109.5, 0.0,  1.500),
-		('C',  'CA', 'HA'): (50.0, 109.5, 0.0,  1.500),
-		('HA', 'CA', 'N' ): (50.0, 109.5, 0.0,  1.500),
-		('CA', 'CB', 'HB'): (50.0, 109.5, 0.0,  1.500),
-		('HB', 'CB', 'HB'): (35.0, 109.5, 0.0,  1.500),
-		# Generic element-pair stand-ins so unknown types still resolve.
-		('C',  'C',  'C' ): (63.0, 111.0, 0.0,  1.500),
-		('C',  'C',  'H' ): (50.0, 109.5, 0.0,  1.500),
-		('H',  'C',  'H' ): (35.0, 109.5, 0.0,  1.500),
-		('C',  'C',  'N' ): (80.0, 110.0, 0.0,  1.500),
-		('C',  'C',  'O' ): (80.0, 120.0, 0.0,  1.500),
-		('H',  'N',  'H' ): (35.0, 109.5, 0.0,  1.500),
-		('C',  'O',  'H' ): (55.0, 108.5, 0.0,  1.500),
-		('CA', 'CB', 'H' ): (50.0, 109.5, 0.0,  1.500),
-		('H',  'CB', 'H' ): (35.0, 109.5, 0.0,  1.500),
-		('C',  'CB', 'H' ): (50.0, 109.5, 0.0,  1.500),
-		'default': (50.0, 109.5, 0.0, 1.500)},
-	'lennard_jones': {
-		#i     sigma  epsilon alpha
-		'H' : (2.886, 0.044, 0.496),
-		'C' : (3.851, 0.105, 1.334),
-		'N' : (3.660, 0.069, 1.073),
-		'O' : (3.500, 0.060, 0.837),
-		'F' : (3.364, 0.050, 0.444),
-		'P' : (4.147, 0.305, 1.828),
-		'S' : (4.035, 0.274, 2.500),
-		'Cl': (3.947, 0.227, 2.315),
-		'Br': (4.189, 0.251, 3.013),
-		'I' : (4.500, 0.339, 4.692),
-		'Se': (4.205, 0.291, 2.700),
-		'default': (3.851, 0.105, 1.000)},
-	'electrostatic': {
-		'epsilon_r': 1.0},
-	'scaling_14': {
-		'f_lj'  : 0.5,
-		'f_elec': 1.0 / 1.2},
-	'dihedrals': {
-		#i     j     k     l       k_phi  n  phi0_deg
-		('CA', 'C',  'N',  'CA'): [(2.50, 2, 180.0)],
-		('C',  'N',  'CA', 'C' ): [(0.20, 1, 180.0), (0.20, 2,   0.0)],
-		('N',  'CA', 'C',  'N' ): [(0.45, 2, 180.0)],
-		('N',  'CA', 'CB', 'HB'): [(0.16, 3,   0.0)],
-		('C',  'CA', 'CB', 'HB'): [(0.16, 3,   0.0)],
-		('HA', 'CA', 'CB', 'HB'): [(0.16, 3,   0.0)],
-		# Generic element-pair stand-ins.
-		('C',  'C',  'C',  'C' ): [(0.18, 3,   0.0)],
-		('C',  'C',  'C',  'H' ): [(0.16, 3,   0.0)],
-		('H',  'C',  'C',  'H' ): [(0.15, 3,   0.0)],
-		'default': [(0.0, 1, 0.0)]},
-	'impropers': {
-		#a     b     c     d      k_phi n  phi0_deg
-		('C', 'CA', 'N',  'O' ): (1.10, 2, 180.0),
-		('N', 'C',  'CA', 'H' ): (1.10, 2, 180.0),
-		'default': (1.10, 2, 180.0)},
-	'cmap': {
-		# Per-residue 1-letter code → 24×24 grid of CMAP energies in
-		# kcal/mol over (φ, ψ) ∈ [-π, π)². Replace 'default' with real
-		# per-residue tables when populating the FF.
-		# in the future should be instead of default 'G':[[PHI/PSI 24x24 matrix]]
-		'default': 0.1 * np.cos(
-			np.linspace(-np.pi, np.pi, 24, endpoint=False))[:, None] * np.cos(
-			np.linspace(-np.pi, np.pi, 24, endpoint=False))[None, :]},
-}
-
-
 
 class ForceField():
 	'''
 	Configurable molecular mechanics force field assembled from energy terms
 	'''
-
 	def __init__(self, terms=None):
 		'''
 		Initialise the force field with a chosen set of energy terms
@@ -122,9 +27,15 @@ class ForceField():
 			('PolarisationPotential',  {'alg': 'constant'}),
 			('CMAPPotential',          {})]
 		self.terms = terms if terms is not None else self.DEFAULT_TERMS
+		path = os.path.join(os.path.dirname(__file__), 'parameters.json')
+		with open(path) as f:
+			P = json.load(f)
+		for sect in ('bonds', 'angles', 'dihedrals', 'impropers'):
+			P[sect] = {(tuple(k.split('-')) if k != 'default' else k): v
+				for k, v in P[sect].items()}
+		self.Parameters = P
 		self._cache = None
 		self._cache_hash = None
-
 	def __call__(self, pose, grad=True, box=None):
 		'''
 		Calculates the total potential energy summed over configured terms
@@ -152,7 +63,6 @@ class ForceField():
 			else:
 				E += fn(pose, cache=self._cache, grad=False, box=box, **kwargs)
 		return (E, F) if grad else E
-
 	def _prepare(self, pose):
 		'''
 		Compile and store topology + parameter arrays for the given pose
@@ -165,7 +75,6 @@ class ForceField():
 		'''
 		self._cache = self._compile(pose)
 		self._cache_hash = self._topology_hash(pose)
-
 	@staticmethod
 	def _topology_hash(pose):
 		'''
@@ -242,7 +151,7 @@ class ForceField():
 			[(int(ns[0]), int(j), int(ns[1]), int(ns[2]))
 			for j, ns in nbrs.items() if len(ns) == 3],
 			dtype=np.int64).reshape(-1, 4)
-		Pb = Parameters['bonds']; df_b = Pb['default']
+		Pb = self.Parameters['bonds']; df_b = Pb['default']
 		bond_params = np.array([Pb.get(tuple(sorted((
 			self._atomtype(atoms[int(i)]),
 			self._atomtype(atoms[int(j)])))), df_b)
@@ -251,7 +160,7 @@ class ForceField():
 		cache['bond_De'] = bond_params[:, 1]
 		cache['bond_a']  = bond_params[:, 2]
 		cache['bond_r0'] = bond_params[:, 3]
-		Pa = Parameters['angles']; df_a = Pa['default']
+		Pa = self.Parameters['angles']; df_a = Pa['default']
 		triplets = cache['triplets']
 		angle_params = np.array([Pa.get((
 			min(self._atomtype(atoms[int(i)]), self._atomtype(atoms[int(k)])),
@@ -262,7 +171,7 @@ class ForceField():
 		cache['angle_theta0']  = np.deg2rad(angle_params[:, 1])
 		cache['ub_K_ub']       = angle_params[:, 2]
 		cache['ub_s0']         = angle_params[:, 3]
-		Pd = Parameters['dihedrals']; df_d = Pd['default']
+		Pd = self.Parameters['dihedrals']; df_d = Pd['default']
 		component_lists = []
 		for i, j, k, l in cache['quartets']:
 			t = (self._atomtype(atoms[int(i)]), self._atomtype(atoms[int(j)]),
@@ -278,7 +187,7 @@ class ForceField():
 		cache['dihedral_k_phi']  = flat_p[:, 0]
 		cache['dihedral_n_mult'] = flat_p[:, 1]
 		cache['dihedral_phi0']   = np.deg2rad(flat_p[:, 2])
-		Pi = Parameters['impropers']; df_i = Pi['default']
+		Pi = self.Parameters['impropers']; df_i = Pi['default']
 		impropers = cache['impropers']
 		keys = [(self._atomtype(atoms[int(j)]),
 			*sorted([self._atomtype(atoms[int(i)]),
@@ -291,7 +200,7 @@ class ForceField():
 		cache['imp_k']    = imp_params[:, 0]
 		cache['imp_n']    = imp_params[:, 1]
 		cache['imp_psi0'] = np.deg2rad(imp_params[:, 2])
-		Plj = Parameters['lennard_jones']; df_lj = Plj['default']
+		Plj = self.Parameters['lennard_jones']; df_lj = Plj['default']
 		sig = np.empty(n); eps = np.empty(n); alpha = np.empty(n)
 		for i in range(n):
 			v = Plj.get(self._atomtype(atoms[i]), Plj.get(atoms[i][1], df_lj))
@@ -319,13 +228,13 @@ class ForceField():
 		upper = np.triu(np.ones((n, n), dtype=bool), k=1)
 		cache['mask_far']    = (~excl) & (~scal14) & upper
 		cache['mask_14']     = scal14 & upper
-		f_lj   = Parameters['scaling_14']['f_lj']
-		f_elec = Parameters['scaling_14']['f_elec']
+		f_lj   = self.Parameters['scaling_14']['f_lj']
+		f_elec = self.Parameters['scaling_14']['f_elec']
 		cache['weight_lj']   = np.where(excl, 0.0, np.where(scal14, f_lj,  1.0))
 		cache['weight_elec'] = np.where(excl, 0.0, np.where(scal14, f_elec,1.0))
 		cache['scal14_bool'] = scal14
 		cache['excl_bool']   = excl
-		Pcmap = Parameters['cmap']; df_cm = Pcmap['default']
+		Pcmap = self.Parameters['cmap']; df_cm = Pcmap['default']
 		aas = pose.data.get('Amino Acids')
 		phi_q, psi_q, codes = [], [], []
 		if aas is not None and len(aas) >= 3:
@@ -500,7 +409,7 @@ class ForceField():
 		dvec = self._wrap(coords[:, None, :] - coords[None, :, :], box)
 		r = np.linalg.norm(dvec, axis=-1)
 		np.fill_diagonal(r, 1.0)
-		f_lj = Parameters['scaling_14']['f_lj']
+		f_lj = self.Parameters['scaling_14']['f_lj']
 		if   alg == '12-6':
 			ratio_6  = (sigma / r)**6
 			ratio_12 = ratio_6**2
@@ -544,7 +453,7 @@ class ForceField():
 		dvec = self._wrap(coords[:, None, :] - coords[None, :, :], box)
 		r = np.linalg.norm(dvec, axis=-1)
 		np.fill_diagonal(r, 1.0)
-		epsilon_r = Parameters['electrostatic']['epsilon_r']
+		epsilon_r = self.Parameters['electrostatic']['epsilon_r']
 		if alg == 'constant':
 			elec = (332.06 * qq) / (epsilon_r * r)
 			dU_dr = -elec / r
@@ -554,7 +463,7 @@ class ForceField():
 		else:
 			raise ValueError(
 				'Algorithm not supported, choose (constant or ddd)')
-		f_elec = Parameters['scaling_14']['f_elec']
+		f_elec = self.Parameters['scaling_14']['f_elec']
 		energy = float(np.sum(elec[mask_far]) + f_elec * np.sum(elec[mask_14]))
 		if not grad: return energy
 		coef = -dU_dr / r * weight
@@ -731,7 +640,7 @@ class ForceField():
 		dr = self._wrap(coords[:, None, :] - coords[None, :, :], box)
 		r = np.linalg.norm(dr, axis=-1)
 		np.fill_diagonal(r, 1.0)
-		epsilon_r = Parameters['electrostatic']['epsilon_r']
+		epsilon_r = self.Parameters['electrostatic']['epsilon_r']
 		if alg == 'constant':
 			coeff = 332.06 * q[None, :] / (epsilon_r * r**3)
 		elif alg == 'ddd':
@@ -830,23 +739,3 @@ class ForceField():
 		np.add.at(forces, k_idx, Fk)
 		np.add.at(forces, l_idx, Fl)
 		return energy, forces
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-def Energy(pose, alg='lennard_jones'):
-	''' Main energy function where you choose which force field to use '''
-	if alg.upper() == 'LENNARD_JONES':
-		return lj_potential(pose, alg='12-6')
-	else:
-		raise Exception('Algorithm no supported')
