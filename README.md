@@ -85,16 +85,16 @@ p_d.Build('MsLeSnRgI', chain='A', fmt='Protein') # mixed L/D — chirality-aware
 
 # === Energy, design score, and protocols ===
 ff = ForceField()
-sc = Score(ff=ff)
+sf = Score()
 
 E, F        = ff(p)                              # potential energy + forces
-total       = sc(p)                              # design score (kcal/mol)
-total, term = sc(p, decompose=True)              # 8-term breakdown
+total       = sf(p)                              # design score (kcal/mol)
+total, term = sf(p, decompose=True)              # 8-term breakdown
 
 E_min, log  = Minimise(p, ff)                    # FIRE2 relaxation
 E_md,  log  = MolecularDynamics(p, ff, n_steps=1000,
               dt_fs=2.0, T=300.0, thermostat='langevin')
-E_pk,  log  = Pack(p, score=sc)                  # rotamer packing ranked by Score
+E_pk,  log  = Pack(p, score=sf)                  # rotamer packing ranked by Score
 ```
 
 > Uppercase sequence letters build L-amino acids (natural form), lowercase builds D-amino acids (mirror images), and mixed sequences (e.g. `'MsLeSnRgI'` above) are fully supported. `Score()` produces correct, chirality-aware values for them automatically — see the **Score** subsection in the API Reference for the per-term breakdown.
@@ -252,7 +252,7 @@ The `ForceField()` class evaluates the total potential energy and analytical per
 
 | Method                                                                          | Description |
 |---------------------------------------------------------------------------------|-------------|
-| `ff = ForceField(terms=None)`                                                   | Build a force field. `terms` is an optional list of `(method_name, kwargs)` tuples that selects which energy terms to sum and which algorithm variants to use. With `terms=None` for the default setup. Force-field parameters are loaded once from `parameters.json` |
+| `ff = ForceField(terms=None)`                                                   | Build a force field. `terms` is an optional list of `(method_name, kwargs)` tuples that selects which energy terms to sum and which algorithm variants to use. With `terms=None` for the default setup. Force-field parameters are loaded once from `database.json['Energy Parameters']` via the cached `DBLoad()` module-level function |
 | `E = ff(pose, grad=False, box=None)`                                            | Evaluate total potential energy in kcal/mol. `box=None` disables PBC; pass a `(3,)` array for an orthorhombic box or a `(3, 3)` array for a triclinic box, in Å |
 | `E, F = ff(pose, grad=True, box=None)`                                          | Evaluate total potential energy plus per-atom forces. Returns a tuple `(float, ndarray)` where forces are shape `(N, 3)` in kcal/mol/Å |
 | `ff.BondPotential(pose, cache, alg='harmonic', grad=True, box=None)`            | Bond-stretching term. `alg='harmonic'` uses `Σ K_b·(r − r₀)²`, `alg='morse'` uses `Σ D_e·(1 − e^(−a(r − r₀)))²` |
@@ -263,32 +263,32 @@ The `ForceField()` class evaluates the total potential energy and analytical per
 | `ff.LJPotential(pose, cache, alg='12-6', grad=True, box=None)`                  | Lennard-Jones non-bonded term, with 1-4 scaling masks. `alg='12-6'` is the standard form, `alg='9-6'` is a softer variant |
 | `ff.ElectrostaticPotential(pose, cache, alg='constant', grad=True, box=None)`   | Electrostatic non-bonded term. `alg='constant'` uses uniform εᵣ; `alg='ddd'` uses a distance-dependent dielectric `ε(r) = εᵣ·r` |
 | `ff.PolarisationPotential(pose, cache, alg='constant', grad=True, box=None)`    | Induced-dipole polarisation term, `−½·Σ α_i·\|E_i\|²` with the per-atom field built from neighbour charges |
-| `ff.CMAPPotential(pose, cache, grad=True, box=None)`                            | CMAP backbone (φ, ψ) cross-term correction over every interior protein residue, evaluated by bicubic Catmull-Rom interpolation on the per-residue 24×24 energy grids in `parameters.json` |
+| `ff.CMAPPotential(pose, cache, grad=True, box=None)`                            | CMAP backbone (φ, ψ) cross-term correction over every interior protein residue, evaluated by bicubic Catmull-Rom interpolation on the per-residue 24×24 energy grids in `database.json['Energy Parameters']['cmap']` |
 
-The `Score()` class is a hybrid physics + statistical energy function for protein design. It sums eight terms (four reused from `ForceField`, four added) and returns a single design score in kcal/mol-equivalent units. All term weights, reference-state values, atom-type tables, and grids are loaded once from `parameters.json` at construction. **Score is chirality-aware from line zero** — L-amino acids, D-amino acids, mixed L/D sequences, and non-canonical residues all score correctly with no extra arguments or special-cased call sites. **Missing parameters raise `KeyError` with the missing key named** — the score function never silently substitutes defaults for unknown amino acids or atom types.
+The `Score()` class is a hybrid physics + statistical energy function for protein design. It sums eight terms (three reused from `ForceField`, five added) and returns a single design score in kcal/mol-equivalent units. All term weights, reference-state values, atom-type tables, CMAP grids, and force-field parameters are loaded once from `database.json['Energy Parameters']` at construction; the rotamer prior additionally reads `database.json['Rotamer Library']`. **Score is chirality-aware from line zero** — L-amino acids, D-amino acids, mixed L/D sequences, and non-canonical residues all score correctly with no extra arguments or special-cased call sites. **Missing parameters raise `KeyError` with the missing key named** for atom-type and reference-state lookups; the rotamer prior is the only intentional softening of this contract — non-canonical amino acids missing from the Rotamer Library are silently skipped (with a one-time warning) rather than aborting evaluation.
 
 | Method                                    | Description |
 |-------------------------------------------|-------------|
-| `sc = Score(ff=None, box=None)`           | Build a design scorer. `ff` is a reusable `ForceField` instance used for the four physics terms (LJ, Electrostatic, CMAP) and the topology cache; created internally if `None`. `box` is the optional PBC box: `None` disables PBC, `(3,)` orthorhombic, `(3, 3)` triclinic, in Å. The 8 term weights, LK Lazaridis-Karplus parameters, H-bond geometry parameters, KBP table, per-aa reference-state values, and rotamer Gaussian σ are all read once from `parameters.json` |
+| `sc = Score(ff=None, box=None)`           | Build a design scorer. `ff` is a reusable `ForceField` instance used for the three physics terms (LJ, Electrostatic, CMAP) and the topology cache; created internally if `None`. `box` is the optional PBC box: `None` disables PBC, `(3,)` orthorhombic, `(3, 3)` triclinic, in Å. The 8 term weights, LK Lazaridis-Karplus parameters, H-bond geometry parameters, KBP table, and per-aa reference-state values are all read once from `database.json['Energy Parameters']`; the per-(residue, rotamer, χ) means and σ values consumed by `_rotamer_prior` are read from `database.json['Rotamer Library']` (no global rotamer σ — every rotamer carries its own σ) |
 | `total = sc(pose, decompose=False)`       | Evaluate the weighted total score in kcal/mol. Topology and atom-type caches are built on the first call and reused on subsequent calls until the pose's `Atoms` / `Bonds` / `Amino Acids` records change |
 | `total, terms = sc(pose, decompose=True)` | Same as above but also return a per-term dict with keys `'LJ'`, `'Electrostatic'`, `'LK'`, `'Hbond'`, `'CMAP'`, `'Rotamer'`, `'Reference'`, `'KBP'`. Useful for term-weight fitting and for diagnosing why a design scores poorly |
 
-The eight terms (three reused from `ForceField`, five added):
+The eight terms (three reused from `ForceField`, five added). LJ, Electrostatic, and CMAP are evaluated by reusing the corresponding `ForceField` methods; the other five live on `Score()`:
 
 | Term            | Source                       | Form |
 |-----------------|------------------------------|------|
 | `LJ`            | `ff.LJPotential`             | Lennard-Jones with 1-4 scaling |
 | `Electrostatic` | `ff.ElectrostaticPotential`  | Coulomb with `ε_r` or distance-dependent dielectric |
 | `CMAP`          | `ff.CMAPPotential`           | Per-residue (φ, ψ) backbone correction grid; D-AA grids are mirrored from L-AA grids in `_compile` automatically |
-| `LK`            | Added                        | Lazaridis-Karplus EEF1 implicit solvation. Per-atom (ΔG_free, λ, V) parameters from `parameters.json['lk_solvation']` |
+| `LK`            | Added                        | Lazaridis-Karplus EEF1 implicit solvation. Per-atom (ΔG_free, λ, V) parameters from `database.json['Energy Parameters']['lk_solvation']` |
 | `Hbond`         | Added                        | Kortemme-Baker geometric H-bond term, `E_r(r_HA) · F(θ_DHA) · F(θ_HAB)` over every donor-H/acceptor-base quartet detected from the bond graph (donor = N or O bonded to ≥1 H; acceptor = N or O with ≥1 heavy neighbour) |
-| `Rotamer`       | Added                        | Gaussian rotamer prior `½(Δχ/σ)²` centred on the BBDEP-predicted mean χ at the residue's current (φ, ψ). For D-AA the BBDEP grid is queried at (−φ, −ψ) and the predicted χ is negated, recovering the mirror-symmetric rotamer well |
+| `Rotamer`       | Added                        | Multimodal rotamer prior. For each protein residue with χ angles, the residue's backbone (φ, ψ) is snapped to the nearest 10° cell of the Rotamer Library. The cell's full set of rotamer mixture components `{P_k, μ_k_χ_c, σ_k_χ_c}` is read, and the per-residue energy is the mixture-of-Gaussians log-likelihood `E_r = −kT · log Σ_k P_k(φ,ψ) · ∏_c (1/(√(2π)·σ_kc)) · exp(−½·(Δχ_c/σ_kc)²)`, evaluated stably via logsumexp. Per-rotamer σ values come from the library (no global σ); `kT = 0.5961` kcal/mol (RT at 300 K). For D-AAs the cell is fetched at (−φ, −ψ) and library μ values are negated, recovering the mirror-symmetric mixture |
 | `Reference`     | Added                        | Per-aa unfolded-state baseline `E_ref[aa]` summed over the sequence. Required for fair sequence-to-sequence comparison |
 | `KBP`           | Added                        | Knowledge-based pair potential, DFIRE-style. Sums `KBP[type_i, type_j, distance_bin]` over every long-range atom pair (`mask_far` in the cache) |
 
 > `Score()` is the single API surface in this library that is chirality-aware end to end — it produces correct, comparable design scores for D-amino acids, mixed L/D sequences, mirror-image proteins, and non-canonical residues without any extra arguments. ML-based ranking proxies (AlphaFold pLDDT, ProteinMPNN log-likelihoods) do not work in this regime because they were trained on canonical-L PDB data only.
 
-> All numerical values currently in `parameters.json` for the four added terms (`lk_solvation`, `hbond`, `kbp`, `ref_state`) and the term `weights` are placeholders. The math, vectorisation, and chirality logic are production-quality; replacing the placeholders with values fitted from your own PDB-derived dataset is the only remaining step before the score function is production-ready.
+> All numerical values currently in `database.json['Energy Parameters']` for the four added terms (`lk_solvation`, `hbond`, `kbp`, `ref_state`) and the term `weights` are placeholders. The math, vectorisation, and chirality logic are production-quality; replacing the placeholders with values fitted from your own PDB-derived dataset is the only remaining step before the score function is production-ready. The Rotamer Library values themselves are derived from Dunbrack BBDEP2010 (CC-BY-4.0) and are real; only the eight term weights and the four added-term parameter blocks are placeholder.
 
 ### Tools
 
@@ -313,11 +313,11 @@ These are standalone tools (not Pose() class methods) and thus are called on the
 | `PROSITE(sequence, pattern)`                                       | Search a protein sequence for a PROSITE-style pattern. Pattern grammar: `[ABC]` = any of A/B/C, `{ABC}` = any except A/B/C, `x` = any residue, `x(n)` / `x(n,m)` = quantifiers, `A(n)` / `A(n,m)` = repeat literal residues, `<` / `>` = anchor at sequence start/end, `-` = token separator (stripped). Returns a list of tuples `[(start, end, match), ...]` with 1-based, inclusive positions |
 | `HydrogenBondMap(pose)`                                            | Generates a backbone hydrogen-bond donor/acceptor map for a protein pose (proteins only). Uses the same DSSP electrostatic criterion as `p.CalcDSSP()` (Kabsch & Sander 1983: `E < -0.5` kcal/mol). Returns an array of shape `(N_atoms, N_atoms)` where 0 = no bond, 1 = this atom is a donor (backbone N), 2 = this atom is an acceptor (backbone O) |
 | `ContactMap(pose)`                                                 | Generates a monomer-monomer distance map in angstroms. The molecule type is auto-detected from `pose.data['Type']`: distances between protein residues are calculated from the Cα atoms, while distances between DNA and RNA bases are calculated from their C1' atoms. Returns an array of shape `(N_residues, N_residues)` with zero on the diagonal |
-| `Rotamers(10, pose)`                                               | Update χ dihedrals (rotamers) with the most-probable χ dihedrals for a residue given backbone phi, psi. Derived from the Dunbrack rotamer library |
+| `Rotamers(10, pose)`                                               | Single-amino-acid rotamer packer: snap the residue's backbone (φ, ψ) to the nearest 10° cell of `database.json['Rotamer Library']`, pick the rotamer k\* with the largest `P_k` in that cell, and apply its mean χ values to every χ of the residue via `pose.RotateDihedral`. No-op (silent) for residues with no χ atoms (Gly, Ala), residues at chain ends with undefined backbone, and non-canonical residues missing from the library. Handles D-amino acids automatically via lookup at (−φ, −ψ) and μ negation. Derived from the Dunbrack BBDEP2010 rotamer library (CC-BY-4.0) |
 | `Minimise(pose, ff=None, max_steps=500, ftol=1.0, dt_fs=0.1, dt_max_fs=2.0, step_max=0.2, etol=1e-6, stall_k=10, box=None)`                                                                           | Relax pose coordinates using the FIRE2 algorithm (Guénolé et al. 2020) with a trust-region step limiter that bounds per-atom displacement to `step_max` Å. Mutates `pose.data['Coordinates']` in place. `ftol` is the convergence threshold on max\|force\| in kcal/mol/Å; `dt_fs` is the initial integration step in fs and `dt_max_fs` the adaptive ceiling; `etol` and `stall_k` trigger early stop after K consecutive stalled energy steps. Returns `(final_E, log)` where `log` carries `'energies'`, `'fmax'`, `'max_step'`, `'converged'`, `'n_steps'` |
 | `Anneal(pose, ff=None, n_steps=10000, T_start=2000.0, T_end=10.0, sigma_small=5.0, sigma_large=30.0, p_large=0.2, p_shear=0.5, target_acc=0.30, adapt_window=100, seed=None, box=None)`               | Simulated annealing over backbone φ/ψ with two Metropolis move types — single-angle (random φ or ψ) and shear (compensating ψᵢ +Δ / φᵢ₊₁ −Δ that leaves residues 0..i−1 unmoved). Each step picks a small (adaptive `sigma_small`) or large (fixed `sigma_large`) Gaussian perturbation; `sigma_small` is updated by Robbins-Monro every `adapt_window` small moves to track `target_acc` ~ 0.30. Geometric cooling from `T_start` to `T_end`. Returns `(E_best, log)` with `'energies'`, `'temperatures'`, `'accepted'`, `'move_types'` (0=single, 1=shear, 2=invalid), `'sigma_history'`, `'best_step'`. The pose is left at the lowest-energy frame |
-| `Pack(pose, score=None, ff=None, max_iter=10, include_bbdep=True, box=None)`                                                                                                                          | Pack sidechains by ICM greedy iteration over discrete rotamers, ranked by `Score()`. The candidate set per residue is the cartesian product of the three canonical χ wells `{−60°, 60°, 180°}` for each χ angle, optionally augmented with the Dunbrack BBDEP-suggested χ vector (`include_bbdep=True`) read from `pose.aminoacids[aa]['BBDEP']` at the residue's current φ/ψ. Iterates over residues with sidechains, accepts the lowest-score rotamer per residue, repeats until convergence or `max_iter`. `score` is a reusable `Score` instance; if `None`, one is constructed from `ff` (or from a fresh `ForceField` if `ff` is also `None`). Using `Score` rather than the bare force field matters because the statistical terms (rotamer prior, KBP, reference state) discriminate native-like rotamer choices in a way pure-physics forces cannot. Returns `(final_E, log)` with `'energies_per_iter'`, `'changes_per_iter'`, `'converged'` |
-| `MolecularDynamics(pose, ff=None, n_steps=1000, dt_fs=2.0, T=300.0, thermostat='nve', friction_ps=1.0, constraints='hbonds', shake_tol=1e-8, shake_max=100, seed=None, trajectory_every=0, box=None)` | Velocity-Verlet NVE or BAOAB Langevin NVT integration. Initial velocities are sampled from Maxwell-Boltzmann at `T` with the centre-of-mass momentum zeroed and projected onto the constraint manifold. `thermostat='nve'` runs energy-conserving dynamics; `thermostat='langevin'` runs the BAOAB stochastic splitting at temperature `T` with friction `friction_ps` ps⁻¹. `constraints='hbonds'` enables vectorised SHAKE/RATTLE on every X–H bond (target lengths read from `parameters.json`), making `dt_fs=2.0` stable; `constraints='none'` disables them. `trajectory_every=k` saves a coordinate snapshot every k steps. Returns `(final_E, log)` with `'energies'`, `'kinetic'`, `'temperatures'`, `'frames'`, `'n_constraints'`, `'dof'` |
+| `Pack(pose, score=None, ff=None, n_steps=2000, T_start=10.0, T_end=0.1, patience=400, seed=None, box=None)` | Sidechain repacking via simulated annealing over the **full Rotamer Library ensemble** at each residue's current backbone (φ, ψ). At construction the candidate set per repackable residue is built once from `database.json['Rotamer Library']` (the full list of (μ_χ tuple, P_k) entries at that residue's grid cell — this can be 3 rotamers for Val, up to ~80 for Lys/Arg). The SA loop picks a random repackable residue, samples one of its rotamers k weighted by `P_k` (so dominant rotamers are explored more often but rare ones remain reachable), applies the trial χ tuple, rescores, and accepts via Metropolis: `dE ≤ 0` or `random() < exp(−dE/T)`. Geometric cooling from `T_start` to `T_end`. Tracks the best-scoring configuration seen and restores it before returning. Early-exit if no acceptance occurs in `patience` consecutive steps. `score` is a reusable `Score` instance; if `None`, one is built from `ff` (or a fresh `ForceField` if `ff` is also `None`). Using `Score` rather than the bare force field matters because the statistical terms (rotamer prior, KBP, reference state) discriminate native-like rotamer choices in a way pure-physics forces cannot. D-amino acids handled automatically. Returns `(E_final, log)` where `log` carries `'energies'`, `'temperatures'`, `'accepts'` (bool array of accept/reject per step), `'best_E'`, `'steps_run'`, `'converged'` (True if early-exited via stagnation), `'n_residues'` (count of repackable residues) |
+| `MolecularDynamics(pose, ff=None, n_steps=1000, dt_fs=2.0, T=300.0, thermostat='nve', friction_ps=1.0, constraints='hbonds', shake_tol=1e-8, shake_max=100, seed=None, trajectory_every=0, box=None)` | Velocity-Verlet NVE or BAOAB Langevin NVT integration. Initial velocities are sampled from Maxwell-Boltzmann at `T` with the centre-of-mass momentum zeroed and projected onto the constraint manifold. `thermostat='nve'` runs energy-conserving dynamics; `thermostat='langevin'` runs the BAOAB stochastic splitting at temperature `T` with friction `friction_ps` ps⁻¹. `constraints='hbonds'` enables vectorised SHAKE/RATTLE on every X–H bond (target lengths read from `database.json['Energy Parameters']`), making `dt_fs=2.0` stable; `constraints='none'` disables them. `trajectory_every=k` saves a coordinate snapshot every k steps. Returns `(final_E, log)` with `'energies'`, `'kinetic'`, `'temperatures'`, `'frames'`, `'n_constraints'`, `'dof'` |
 
 > BLAST handles sequences beyond the 20 canonical L-amino acids automatically: **D-amino acids**: stored as lowercase letters in `pose.data['FASTA']`. BLAST uppercases both sequences before alignment, treating each D-amino acid as its L-counterpart for scoring purposes. This correctly reflects the chemical reality that D- and L-forms of the same residue have identical side-chain chemistry. **Non-canonical amino acids**: any letter not in the 20-letter BLOSUM62 alphabet falls back to: `+4` for a self-match (equal to the minimum BLOSUM62 diagonal), `−1` for a mismatch. This keeps non-canonical residues visible to the aligner without inflating scores.
 
@@ -382,7 +382,7 @@ for idx, atom in p.data['Atoms'].items():
 |K - LYS|L - LEU|M - MET|N - ASN|O - PYL|
 |P - PRO|Q - GLN|R - ARG|S - SER|T - THR|
 |U - SEC|V - VAL|W - TRP|X - TRF|Y - TYR|
-|Z - TSO|
+|Z - TYS|
 
 ## Supported Nucleotides
 
@@ -445,6 +445,27 @@ This `m.data` structure from the `Molecule()` class represents small organic mol
 
 ---
 
+## database.json overview
+
+Pose ships a single `database.json` file (~54 MB) under `pose/` with **four** top-level keys:
+
+| Top-level key      | Purpose |
+|--------------------|---------|
+| `Amino Acids`      | Per-residue topology templates: backbone & sidechain atoms, vectors, bonds, χ angle atoms. Used by `Pose.Build`, `Pose.Mutate`, all dihedral routines |
+| `Nucleotides`      | Per-nucleotide topology templates for DNA and RNA |
+| `Rotamer Library`  | Backbone-dependent rotamer mixture data (Dunbrack BBDEP2010 derived) — multimodal `{P_k, μ_k_χ_c, σ_k_χ_c}` per residue type per 10° (φ, ψ) cell. Consumed by `Score._rotamer_prior`, `tools.Rotamers`, and `tools.Pack` |
+| `Energy Parameters`| All numerical force-field and score parameters: bond/angle/dihedral/improper constants, LJ, electrostatic, scaling_14, CMAP grids, Score weights, LK / Hbond / KBP / ref_state blocks |
+
+The whole file is loaded once per Python process via the cached module-level loader `pose.DBLoad()`:
+
+```python
+from pose import DBLoad
+db = DBLoad()                       # parses 54 MB once; subsequent calls are free
+DBLoad.cache_clear()                # force a re-read after Parameterise() writes the file
+```
+
+`Pose()`, `ForceField()`, `Score()`, `Rotamers()`, and `Pack()` all share the same cached parse — no duplicate I/O.
+
 ## Description of amino acids in database.json:
 
 This information resides in `database['Amino Acids'][AMINO_ACID_UNICODE or BACKBONE]`
@@ -458,7 +479,8 @@ This information resides in `database['Amino Acids'][AMINO_ACID_UNICODE or BACKB
 | `Chi Angle Atoms`                     | List of lists  | The atoms in the sidechain that are contributing to a chi angle |
 | `Bonds`                               | Dictionary     | The bond graph as an adjacency list |
 | `BondOrders`                          | Dictionary     | The bond order graph as an adjacency list, 1 = single bonds, 1.5 = aromatic resonance partial-double bond, 2 = double bonds, 3 = triple bonds |
-| `BBDEP`                               | Dictionary     | The sin/cos×10000 grids, canonical amino acids were derived from the Dunbrack BBDEP2010 library (CC-BY-4.0), non-canonical amino acids were calculated, at each 10° (φ, ψ) bin the highest-probability rotamer's χ dihedrals were encoded as (sin χ, cos χ) pairs on a 36×36 grid. At runtime, tools.Rotamers() uses residue name, its φ dihedral, and its ψ dihedral and bilinearly interpolates the four neighbouring grid cells and recovers each χ via atan2(sin_interp, cos_interp). The non-canonical BBDEP (LYX, MSE, PYL, SEC, TRF, TSO) that have no Dunbrack entries were borrowed verbatim from the closest canonical analog whose χ definitions match (MSE↔MET, SEC↔CYS, TRF↔TRP, first χ of LYX/PYL from LYS, first chis of TSO from TYR). Any extra chi angles beyond what the analog provides are filled with a "trans pad" (chi = 180° everywhere, encoded as sin=0, cos=−10000), a deliberate and explicit placeholder that downstream MD minimization will relax into the correct local minimum |
+
+> Backbone-dependent rotamer data (formerly carried as a per-amino-acid `BBDEP` field on this object) now lives in the separate `Rotamer Library` top-level block — see "Description of the Rotamer Library in database.json" below.
 
 ## Description of nucleotides in database.json:
 
@@ -475,9 +497,57 @@ This information resides in `database['Nucleotides'][NUCEOTIDE_TRICODE]`
 | `Bonds`           | Dictionary     | The bond graph as an adjacency list |
 | `BondOrders`      | Dictionary     | The bond order graph as an adjacency list, 1 = single bonds, 1.5 = aromatic resonance partial-double bond, 2 = double bonds, 3 = triple bonds |
 
-## Description of parameters in parameters.json:
+## Description of the Rotamer Library in database.json:
 
-The `parameters.json` file holds every numerical parameter consumed by both `ForceField()` and `Score()`, loaded once at each class's construction. Tuple-style force-field keys (bonds, angles, dihedrals, impropers) are stored as dash-joined strings (`"C-CA"`, `"CA-C-N"`, `"CA-C-N-CA"`) and converted back to tuples internally for parameter lookup. The score-side keys (`weights`, `ref_state`, `lk_solvation`, `hbond`, `kbp`, `rotamer`) raise `KeyError` on missing entries — there is no silent default.
+This information resides in `database['Rotamer Library']` and is consumed by `Score()`, `tools.Rotamers()`, and `tools.Pack()`. Derived from the Dunbrack BBDEP2010 rotamer library (Shapovalov & Dunbrack 2011, CC-BY-4.0). Currently covers 21 chi-bearing residue types: ARG, ASN, ASP, CYS, GLN, GLU, HIS, ILE, LEU, LYS, MET, MSE, PHE, PRO, SEC, SER, THR, TRF, TRP, TYR, VAL. Glycine and Alanine carry no χ angles and need no entry; LYX, PYL, TSO are not in the library and are silently skipped (with a one-time warning) by `_rotamer_prior` / `Rotamers()` / `Pack()`.
+
+**Top-level shape:**
+
+| Key             | Value Type     | Description |
+|-----------------|----------------|-------------|
+| `format`        | String         | Format identifier (currently `"rot_v1"`) |
+| `version`       | Int            | Schema version |
+| `phi_start`     | Float          | First (φ, ψ) bin lower edge in degrees, default `-180` |
+| `phi_step`      | Float          | (φ, ψ) bin width in degrees, default `10` |
+| `phi_n`         | Int            | Number of φ bins, default `36` |
+| `psi_start`     | Float          | (analogous) |
+| `psi_step`      | Float          | (analogous) |
+| `psi_n`         | Int            | Number of ψ bins, default `36` |
+| `density_grids` | List           | Per-residue total-density grids (auxiliary, not consumed by current code paths) |
+| `residues`      | Dict           | Per-residue rotamer mixture data, keyed by 3-letter code |
+
+**Per-residue entry — `database['Rotamer Library']['residues'][TRICODE]`:**
+
+| Key        | Value Type | Description |
+|------------|------------|-------------|
+| `n_chi`    | Int        | Number of χ angles for this residue type (1 for VAL/SER/THR/CYS/SEC, 2 for LEU/ILE/PHE/TYR/TRP/HIS/ASN/ASP/PRO/MSE/TRF, 3 for MET/GLN/GLU, 4 for ARG/LYS) |
+| `rotamers` | Dict       | The CSR-packed rotamer mixture (see below) |
+| `densities`| List/None  | Optional per-cell density auxiliary; usually `null` |
+
+**Per-residue `rotamers` block — CSR-packed for compactness:**
+
+| Key            | Value Type     | Description |
+|----------------|----------------|-------------|
+| `columns`      | List of strings| Column schema for each row of `table`, e.g. for VAL: `['r1', 'count', 'prob', 'chi1', 'sig1']`; for LEU (n_chi=2): `['r1', 'r2', 'count', 'prob', 'chi1', 'chi2', 'sig1', 'sig2']`; in general `[r1..rN, count, prob, chi1..chiN, sig1..sigN]` |
+| `table`        | List of rows   | Flat list of all rotamer rows across every (φ, ψ) cell. Each row matches `columns`: the integer rotamer state labels, the empirical observation `count`, the per-cell normalised probability `prob` (sums to 1 within a cell), the per-rotamer mean χ values in degrees, and the per-rotamer χ standard deviations in degrees |
+| `bin_offsets`  | List of ints   | CSR indexing — length `phi_n × psi_n + 1 = 1297` for the default 36×36 grid. Cell `(i_phi, i_psi)` is at `bin_idx = i_phi × psi_n + i_psi`, and its rotamer rows are `table[bin_offsets[bin_idx] : bin_offsets[bin_idx+1]]` |
+| `top_chi`      | List           | Optional precomputed (most-probable rotamer mean χ values per cell) lookup, currently unused by `Score._rotamer_prior` / `Rotamers` / `Pack` (which slice `table` directly) |
+
+**Lookup pattern (used internally by `Rotamers`, `Pack`, and `Score._rotamer_prior`):**
+
+```python
+i_phi = int(math.floor((phi - phi_start) / phi_step)) % phi_n
+i_psi = int(math.floor((psi - psi_start) / psi_step)) % psi_n
+bidx  = i_phi * psi_n + i_psi
+rows  = table[bin_offsets[bidx] : bin_offsets[bidx + 1]]
+# each row is [r1..rN, count, prob, chi1..chiN, sig1..sigN]
+```
+
+D-amino acid handling: the library is keyed on the L-form 3-letter code only. Consumers fetch the L cell at `(−φ, −ψ)` and negate the recovered μ values when applying them, exploiting the chi/Ramachandran mirror symmetry between enantiomers.
+
+## Description of energy parameters in database.json:
+
+This information resides in `database['Energy Parameters']` and holds every numerical parameter consumed by both `ForceField()` and `Score()`, loaded once at each class's construction via the cached `DBLoad()`. Tuple-style force-field keys (bonds, angles, dihedrals, impropers) are stored as dash-joined strings (`"C-CA"`, `"CA-C-N"`, `"CA-C-N-CA"`) and converted back to tuples internally for parameter lookup. The score-side keys (`weights`, `ref_state`, `lk_solvation`, `hbond`, `kbp`) raise `KeyError` on missing entries — there is no silent default for these.
 
 | Top-level Key   | Value Type     | Description of Values |
 |-----------------|----------------|-----------------------|
@@ -494,9 +564,8 @@ The `parameters.json` file holds every numerical parameter consumed by both `For
 | `lk_solvation`  | Dict           | Lazaridis-Karplus EEF1 implicit-solvation parameters used by `Score()._lk_solvation`. Inner key `atom_types` maps a composite `"{PDB_name}-{element}"` or element-only key to `[ΔG_free, λ, V]` — solvation free energy in kcal/mol, correlation length in Å, atomic volume in Å³. Lookup falls back from composite to element; missing keys raise `KeyError` |
 | `hbond`         | Dict           | Kortemme-Baker geometric H-bond parameters used by `Score()._hbond_geom`. Scalars: `well_depth` in kcal/mol; `r_opt`, `r_sigma` (Å) define the radial Gaussian; `theta_DHA_opt_deg`, `theta_HAB_opt_deg` are the donor-H-acceptor and H-acceptor-base optimal angles |
 | `kbp`           | Dict           | Knowledge-based pair potential (DFIRE-style) used by `Score()._kbp_score`. `cutoff` is the maximum pair distance in Å; `bin_width` the histogram bin width; `atom_types` maps composite/element keys to integer type indices; `table` is a `(N_types, N_types, N_bins)` nested-list 3D array of pair energies in kcal/mol |
-| `rotamer`       | Dict           | Rotamer-prior parameters used by `Score()._rotamer_prior`. `sigma_chi_deg` is the Gaussian standard deviation in degrees applied to chi deviations from the BBDEP-predicted mean: `½(Δχ/σ)²` |
 
-> The numbers currently shipped in `parameters.json` are just placeholders. Will be replaced later with real parameter values.
+> The numbers currently shipped in `database.json['Energy Parameters']` are placeholder values for the four added Score terms (`lk_solvation`, `hbond`, `kbp`, `ref_state`) and the term `weights`. They will be replaced later with values fitted against a curated PDB-derived dataset. The Rotamer Library numerical content is real (Dunbrack BBDEP2010, CC-BY-4.0); only the score-weight tunables are placeholder.
 
 ---
 

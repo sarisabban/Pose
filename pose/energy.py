@@ -3,6 +3,8 @@ import json
 import math
 import numpy as np
 
+from .pose import DBLoad
+
 class ForceField():
 	'''
 	Configurable molecular mechanics force field assembled from energy terms
@@ -28,9 +30,7 @@ class ForceField():
 			('PolarisationPotential',  {'alg': 'constant'}),
 			('CMAPPotential',          {})]
 		self.terms = terms if terms is not None else self.DEFAULT_TERMS
-		path = os.path.join(os.path.dirname(__file__), 'parameters.json')
-		with open(path) as f:
-			P = json.load(f)
+		P = dict(DBLoad()['Energy Parameters'])
 		for sect in ('bonds', 'angles', 'dihedrals', 'impropers'):
 			P[sect] = {(tuple(k.split('-')) if k != 'default' else k): v
 				for k, v in P[sect].items()}
@@ -261,8 +261,8 @@ class ForceField():
 				if key not in Pcmap:
 					raise KeyError(
 						f"ForceField/CMAP: amino acid '{key}' missing "
-						f"from parameters.json['cmap']. Add a 24x24 "
-						f"per-aa grid for this residue type.")
+						f"from database.json['Energy Parameters']['cmap']. "
+						f"Add a 24x24 per-aa grid for this residue type.")
 				t = np.asarray(Pcmap[key], dtype=np.float64)
 				if c != key:
 					t = t[::-1, ::-1]
@@ -770,14 +770,13 @@ class Score():
 		if ff is None: ff = ForceField()
 		self.ff = ff
 		self.box = box
-		path = os.path.join(os.path.dirname(__file__), 'parameters.json')
-		with open(path) as f: P = json.load(f)
+		db = DBLoad()
+		P = db['Energy Parameters']
 		self.weights     = P['weights']
 		self.ref_state   = P['ref_state']
 		self.lk          = P['lk_solvation']
 		self.hb          = P['hbond']
 		self.kbp         = P['kbp']
-		self.rot_sigma   = float(P['rotamer']['sigma_chi_deg'])
 		self._kbp_table  = np.asarray(self.kbp['table'], dtype=np.float64)
 		self._lk_types   = None
 		self._kbp_types  = None
@@ -785,6 +784,18 @@ class Score():
 		self._lk_lam     = None
 		self._lk_V       = None
 		self._cache_hash = None
+		# Rotamer Library: backbone-dependent rotamer mixture data, CSR-packed
+		# (residues -> n_chi / rotamers{columns, table, bin_offsets} / densities).
+		# Used by _rotamer_prior to evaluate the multimodal mixture log-likelihood.
+		rl = db.get('Rotamer Library', {}) or {}
+		self._rotlib       = rl.get('residues', {})
+		self._rl_phi_start = float(rl.get('phi_start', -180.0))
+		self._rl_phi_step  = float(rl.get('phi_step',   10.0))
+		self._rl_phi_n     = int  (rl.get('phi_n',     36))
+		self._rl_psi_start = float(rl.get('psi_start', -180.0))
+		self._rl_psi_step  = float(rl.get('psi_step',   10.0))
+		self._rl_psi_n     = int  (rl.get('psi_n',     36))
+		self._rl_warned    = set()
 	def __call__(self, pose, decompose=False):
 		'''
 		Evaluate the design score; optionally return per-term breakdown
@@ -853,8 +864,8 @@ class Score():
 				raise KeyError(
 					f"Score: atom type '{composite}' "
 					f"(atom #{i}, name='{a[0]}', element='{a[1]}') "
-					f"missing from "
-					f"parameters.json['lk_solvation']['atom_types']. "
+					f"missing from database.json"
+					f"['Energy Parameters']['lk_solvation']['atom_types']. "
 					f"Add an entry [dG_free, lambda, volume] for "
 					f"this type or its element fallback.")
 			vals = lk_map[lk_key]
@@ -867,8 +878,8 @@ class Score():
 				raise KeyError(
 					f"Score: atom type '{composite}' "
 					f"(atom #{i}, name='{a[0]}', element='{a[1]}') "
-					f"missing from "
-					f"parameters.json['kbp']['atom_types']. "
+					f"missing from database.json"
+					f"['Energy Parameters']['kbp']['atom_types']. "
 					f"Add an integer type index for this type or its "
 					f"element fallback.")
 		self._lk_dG  = np.asarray(dG_list,  dtype=np.float64)
@@ -896,64 +907,115 @@ class Score():
 				raise KeyError(
 					f"Score: amino acid '{key}' "
 					f"(residue #{r}) missing from "
-					f"parameters.json['ref_state']. "
+					f"database.json['Energy Parameters']['ref_state']. "
 					f"Add a per-aa reference energy. Known canonical "
 					f"codes: ACDEFGHIKLMNPQRSTVWY; non-canonical: "
 					f"BJOUXZ.")
 			total += d[key]
 		return total
+	def _rotlib_cell(self, three_letter, phi_deg, psi_deg):
+		'''
+		Slice the Rotamer Library CSR table for one (residue, phi, psi) cell
+		Arguments:
+		----------
+			three_letter: str - 3-letter residue code (uppercase)
+			phi_deg, psi_deg: float - backbone angles in degrees
+		Returns:
+		--------
+			tuple (entry, table_slice) where:
+				entry: dict {'n_chi': int} or None if the residue is not in the library
+				table_slice: list of rows (each [r..., count, prob, chi..., sig...])
+		'''
+		entry = self._rotlib.get(three_letter)
+		if entry is None: return None, []
+		rot = entry['rotamers']
+		bin_offsets = rot['bin_offsets']
+		i_phi = int(math.floor((phi_deg - self._rl_phi_start)
+			/ self._rl_phi_step)) % self._rl_phi_n
+		i_psi = int(math.floor((psi_deg - self._rl_psi_start)
+			/ self._rl_psi_step)) % self._rl_psi_n
+		bidx = i_phi * self._rl_psi_n + i_psi
+		start = bin_offsets[bidx]
+		end = bin_offsets[bidx + 1]
+		return entry, rot['table'][start:end]
 	def _rotamer_prior(self, pose):
 		'''
-		Gaussian rotamer prior centered at BBDEP-predicted mean chi
+		Multimodal rotamer prior: per-residue mixture-of-Gaussians log-likelihood
+		evaluated at the current chi tuple, given the residue's backbone cell
+		from the Rotamer Library. Each rotamer k contributes
+			P_k(phi,psi) * prod_c N(chi_c; mu_kc, sigma_kc)
+		and the residue energy is  -kT * log( sum_k that ),
+		stably evaluated via logsumexp.
+		Per-rotamer sigmas come from the library (NOT a global hyperparameter).
 		Arguments:
 		----------
 			pose: Pose - molecule source pose
 		Returns:
 		--------
-			float: 0.5 * sum (Delta_chi / sigma)^2 over interior chis
+			float: total rotamer-prior energy in kcal/mol summed over residues
 		'''
 		aas = pose.data.get('Amino Acids')
-		if aas is None: return 0.0
-		inv_sigma_sq = 0.5 / (self.rot_sigma ** 2)
+		if aas is None or not self._rotlib: return 0.0
+		kT      = 0.5961                  # RT at 300 K, kcal/mol
+		LOG_2PI = math.log(2.0 * math.pi)
+		SIG_MIN = 0.5                     # degrees, numerical floor
 		total = 0.0
 		for r, info in aas.items():
-			c = info[0]
-			aa = c.upper()
-			db = pose.aminoacids.get(aa, {})
-			chi_atoms = db.get('Chi Angle Atoms') or []
+			c    = info[0]
+			aa_u = c.upper()
+			aa_db     = pose.aminoacids.get(aa_u, {})
+			chi_atoms = aa_db.get('Chi Angle Atoms') or []
 			if not chi_atoms: continue
-			grids = db.get('BBDEP')
-			if not grids:
-				raise KeyError(
-					f"Score: amino acid '{aa}' has "
-					f"{len(chi_atoms)} chi angle(s) but no BBDEP "
-					f"grids in pose.aminoacids. Database inconsistency.")
-			n_chi = min(len(chi_atoms), len(grids) // 2)
+			three = aa_db.get('Tricode')
+			if not three: continue
+			# D-amino acid handling: pose stores lowercase code; library is
+			# keyed on the L-form 3-letter. Mirror phi/psi for lookup and
+			# negate library mu values when reading rotamers back.
+			flip = (c != aa_u)
 			phi = pose.GetDihedral(r, 'PHI')
 			psi = pose.GetDihedral(r, 'PSI')
 			if math.isnan(phi) or math.isnan(psi): continue
-			flip = (c != aa)
 			phi_q = -phi if flip else phi
 			psi_q = -psi if flip else psi
-			fx = ((phi_q + 180.0) % 360.0) / 10.0
-			fy = ((psi_q + 180.0) % 360.0) / 10.0
-			i0 = int(math.floor(fx)) % 36
-			j0 = int(math.floor(fy)) % 36
-			i1 = (i0 + 1) % 36; j1 = (j0 + 1) % 36
-			u = fx - math.floor(fx); v = fy - math.floor(fy)
-			w = ((1-u)*(1-v), u*(1-v), (1-u)*v, u*v)
+			entry, rows = self._rotlib_cell(three, phi_q, psi_q)
+			if entry is None:
+				if three not in self._rl_warned:
+					self._rl_warned.add(three)
+				continue
+			if not rows: continue
+			n_chi = int(entry['n_chi'])
+			if n_chi == 0: continue
+			# Snapshot residue's current chi values once.
+			chi_now = np.empty(n_chi, dtype=np.float64)
+			bad = False
 			for ci in range(n_chi):
-				sg = grids[2*ci]; cg = grids[2*ci+1]
-				s = 1e-4 * (w[0]*sg[i0,j0] + w[1]*sg[i1,j0]
-					+ w[2]*sg[i0,j1] + w[3]*sg[i1,j1])
-				cv = 1e-4 * (w[0]*cg[i0,j0] + w[1]*cg[i1,j0]
-					+ w[2]*cg[i0,j1] + w[3]*cg[i1,j1])
-				chi_pred = math.degrees(math.atan2(s, cv))
-				if flip: chi_pred = -chi_pred
-				chi_now = pose.GetDihedral(r, 'CHI', chi_type=ci+1)
-				if math.isnan(chi_now): continue
-				d = ((chi_now - chi_pred + 180.0) % 360.0) - 180.0
-				total += inv_sigma_sq * d * d
+				v = pose.GetDihedral(r, 'CHI', chi_type=ci+1)
+				if math.isnan(v): bad = True; break
+				chi_now[ci] = v
+			if bad: continue
+			# Column layout: [r1..rN, count, prob, chi1..N, sig1..N]
+			prob_i = n_chi + 1
+			chi_i  = n_chi + 2
+			sig_i  = 2 * n_chi + 2
+			log_terms = []
+			for row in rows:
+				P_k = row[prob_i]
+				if P_k <= 0.0: continue
+				lt = math.log(P_k)
+				for ci in range(n_chi):
+					mu_kc  = row[chi_i + ci]
+					sig_kc = row[sig_i + ci]
+					if sig_kc < SIG_MIN: sig_kc = SIG_MIN
+					if flip: mu_kc = -mu_kc
+					d = ((chi_now[ci] - mu_kc + 180.0) % 360.0) - 180.0
+					lt += -0.5*LOG_2PI - math.log(sig_kc) \
+						- 0.5 * (d / sig_kc) ** 2
+				log_terms.append(lt)
+			if not log_terms: continue
+			# Stable logsumexp.
+			m = max(log_terms)
+			lse = m + math.log(sum(math.exp(lt - m) for lt in log_terms))
+			total += -kT * lse
 		return total
 	def _lk_solvation(self, pose, cache):
 		'''

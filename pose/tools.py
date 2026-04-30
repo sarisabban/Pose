@@ -4,6 +4,7 @@ import json
 import math
 import itertools
 import numpy as np
+from .pose import DBLoad
 from .energy import ForceField
 from collections import defaultdict, deque
 
@@ -428,12 +429,6 @@ def Parameterise(filename, unicode, tricode):
 		if os.path.exists(tmp_path):
 			os.remove(tmp_path)
 		raise
-
-def _energy(pose):
-	''' Calculate potential energy for BBDEP values in Parameterise() '''
-	ff = ForceField()
-	E = ff(pose)
-	return E[0]
 
 def RMSD(pose1, pose2, alg='align', export=None):
 	'''
@@ -1780,58 +1775,89 @@ def ContactMap(pose):
 	np.fill_diagonal(mat, 0.0)
 	return mat
 
-def Rotamers(index, pose):
+def _rotlib_lookup(rotlib_root, three_letter, phi_deg, psi_deg):
 	'''
-	Update CHI dihedrals (rotamers) with the most-probable chi angles for a residue given backbone phi, psi.
-	Derived from the Dunbrack BBDEP2010 library (CC-BY-4.0, https://dunbrack.fccc.edu/lab/bbdep2010)
-	Shapovalov MV, Dunbrack RL Jr. *A smoothed backbone-dependent rotamer library for proteins derived from adaptive kernel density estimates and regressions. Structure. 2011;19(6):844–858. doi:10.1016/j.str.2011.03.019
+	Slice the Rotamer Library CSR table for one (residue, phi, psi) cell
 	Arguments:
 	----------
-		index : The residue to updates its rotamers
-		pose  : Pose - Protein or nucleic-acid pose with a non-empty residue table
+		rotlib_root: dict - database['Rotamer Library']
+		three_letter: str - 3-letter residue code (uppercase, L-form)
+		phi_deg, psi_deg: float - backbone angles in degrees
+	Returns:
+	--------
+		(n_chi, table_slice) where table_slice is a list of rotamer rows;
+		(0, []) if the residue has no entry, or rows is empty if the cell
+		has no rotamers.
+	'''
+	residues = rotlib_root.get('residues', {}) if rotlib_root else {}
+	entry = residues.get(three_letter)
+	if entry is None: return 0, []
+	phi_start = float(rotlib_root.get('phi_start', -180.0))
+	phi_step  = float(rotlib_root.get('phi_step',   10.0))
+	phi_n     = int  (rotlib_root.get('phi_n',     36))
+	psi_start = float(rotlib_root.get('psi_start', -180.0))
+	psi_step  = float(rotlib_root.get('psi_step',   10.0))
+	psi_n     = int  (rotlib_root.get('psi_n',     36))
+	rot         = entry['rotamers']
+	bin_offsets = rot['bin_offsets']
+	i_phi = int(math.floor((phi_deg - phi_start) / phi_step)) % phi_n
+	i_psi = int(math.floor((psi_deg - psi_start) / psi_step)) % psi_n
+	bidx  = i_phi * psi_n + i_psi
+	start = bin_offsets[bidx]
+	end   = bin_offsets[bidx + 1]
+	return int(entry['n_chi']), rot['table'][start:end]
+
+def Rotamers(index, pose):
+	'''
+	Single-amino-acid rotamer packer: set every chi of one residue to the
+	dominant (most-populated) rotamer from the Rotamer Library at that
+	residue's current backbone (phi, psi).
+
+	Algorithm (production):
+	  1. Look up the residue's 3-letter code; bail out if it has no chis.
+	  2. Read backbone phi, psi; bail out if either is undefined (chain end).
+	  3. Snap to the nearest (phi, psi) grid cell in the Rotamer Library.
+	  4. Pick the rotamer k* with maximum P_k in that cell.
+	  5. Apply mu_k*_chi[c] for c = 1..n_chi via pose.RotateDihedral.
+
+	D-amino acids (lowercase 1-letter codes) are handled via the standard
+	chi/backbone mirror trick: lookup with negated phi/psi, negate predicted
+	mu values when applying.
+	Arguments:
+	----------
+		index : int - residue index in pose.data['Amino Acids']
+		pose  : Pose - protein pose with a non-empty residue table
 	Return:
 	-------
-		Updates the residues rotamers using pose.RotateDihedral(index, ideal_CHI, 'CHI', CHI_type)
+		None - mutates the pose in place. No-op if the residue has no chis,
+		undefined backbone, or no rotamer-library entry for its type.
 	'''
-	aa  = pose.data['Amino Acids'][index][0].upper()
+	info  = pose.data.get('Amino Acids', {}).get(index)
+	if info is None: return
+	c     = info[0]
+	aa_u  = c.upper()
+	aa_db = pose.aminoacids.get(aa_u, {})
+	chi_atoms = aa_db.get('Chi Angle Atoms') or []
+	if not chi_atoms: return                # Gly, Ala -- no chis
+	three = aa_db.get('Tricode')
+	if not three: return
 	phi = pose.GetDihedral(index, 'PHI')
 	psi = pose.GetDihedral(index, 'PSI')
-	_SCALE = 1.0 / 10000.0  # undo the integer scaling applied when BBDEP was built
-	_N = 36                 # grid is 36x36 (every 10 degrees of phi and psi)
-	_STEP = 10.0
-	def _bilinear(grid, phi, psi):
-		'''
-		Local bilinear interpolation on a 36x36 periodic grid.
-		grid is an int16 numpy array holding sin(chi)*10000 or cos(chi)*10000
-		at every (phi, psi) node in {-180, -170, ..., 170} x {-180, -170, ..., 170}.
-		phi and psi are already normalized to [-180, 180).
-		'''
-		fx = (phi + 180.0) / _STEP
-		fy = (psi + 180.0) / _STEP
-		i0 = int(math.floor(fx)) % _N
-		j0 = int(math.floor(fy)) % _N
-		i1 = (i0 + 1) % _N
-		j1 = (j0 + 1) % _N
-		u = fx - math.floor(fx)
-		v = fy - math.floor(fy)
-		s00 = grid[i0, j0]
-		s10 = grid[i1, j0]
-		s01 = grid[i0, j1]
-		s11 = grid[i1, j1]
-		blended = ((1.0 - u) * (1.0 - v) * s00
-			+ u * (1.0 - v) * s10
-			+ (1.0 - u) * v * s01
-			+ u * v * s11)
-		return float(blended) * _SCALE
-	d = pose.aminoacids[aa]['BBDEP']
-	n = len(pose.aminoacids[aa]['Chi Angle Atoms'])
-	phi = ((float(phi) + 180.0) % 360.0) - 180.0
-	psi = ((float(psi) + 180.0) % 360.0) - 180.0
-	for ci in range(n):
-		s = _bilinear(d[2 * ci], phi, psi)
-		c = _bilinear(d[2 * ci + 1], phi, psi)
-		result = math.degrees(math.atan2(s, c))
-		pose.RotateDihedral(index, result, 'CHI', ci+1)
+	if math.isnan(phi) or math.isnan(psi): return  # chain ends
+	flip = (c != aa_u)
+	phi_q = -phi if flip else phi
+	psi_q = -psi if flip else psi
+	rotlib = DBLoad().get('Rotamer Library')
+	n_chi, rows = _rotlib_lookup(rotlib, three, phi_q, psi_q)
+	if n_chi == 0 or not rows: return
+	# Find argmax_k by P_k.  Column layout: [r1..rN, count, prob, chi1..N, sig1..N]
+	prob_i = n_chi + 1
+	chi_i  = n_chi + 2
+	best   = max(rows, key=lambda row: row[prob_i])
+	for ci in range(n_chi):
+		mu = best[chi_i + ci]
+		if flip: mu = -mu
+		pose.RotateDihedral(index, float(mu), 'CHI', ci + 1)
 
 def Minimise(pose, ff=None, max_steps=500, ftol=1.0, dt_fs=0.1,
 		dt_max_fs=2.0, step_max=0.2, etol=1e-6, stall_k=10, box=None):
@@ -2024,110 +2050,157 @@ def Anneal(pose, ff=None, n_steps=10000, T_start=2000.0, T_end=10.0,
 		'best_step':     int(best_step)}
 	return float(E_best), log
 
-def Pack(pose, score=None, ff=None, max_iter=10, include_bbdep=True,
-		box=None):
+def Pack(pose, score=None, ff=None, n_steps=2000, T_start=10.0, T_end=0.1,
+		patience=400, seed=None, box=None):
 	'''
-	Pack sidechains via discrete rotamer ICM greedy iteration
+	Sidechain repacking via simulated annealing on the full Rotamer Library
+	ensemble at each residue's current backbone (phi, psi).
+
+	Algorithm (production):
+	  1. For each residue with chis and a defined (phi, psi), build the static
+	     candidate set = list of (mu_chi_tuple, prob) from the rotamer library
+	     cell at that residue's backbone.
+	  2. Initialise from the pose's current chi configuration and score it.
+	  3. SA loop with geometric cooling T = T_start * (T_end/T_start)^(t/N):
+	     - pick a random repackable residue
+	     - propose one of its rotamers k weighted by prob (so dominant
+	       rotamers are explored more often, but rare ones remain reachable)
+	     - apply trial chis; rescore
+	     - accept if dE <= 0 or random() < exp(-dE / T); else revert
+	     - track best-so-far
+	  4. Early-exit if no accepted move in `patience` consecutive steps.
+	  5. Restore best-found configuration; return its energy.
+
+	D-amino acids: looked up against the L-form table with mirrored phi/psi,
+	mu values negated when applied (same convention as Rotamers / _rotamer_prior).
+
 	Arguments:
 	----------
-		pose:          Pose - protein pose with Amino Acids dict
-		score:         Score - reusable; built from `ff` if None
-		ff:            ForceField - used only when `score` is None
-		max_iter:      int - maximum ICM sweeps over the residue list
-		include_bbdep: bool - add the Dunbrack BBDEP chi as a candidate
-		box:           None for no PBC; (3,) orthorhombic; (3, 3) triclinic
+		pose:    Pose - protein pose with Amino Acids dict
+		score:   Score - reusable; built from `ff` if None
+		ff:      ForceField - used only when `score` is None
+		n_steps: int - max number of SA proposals
+		T_start: float - initial temperature (in score units, typically kcal/mol)
+		T_end:   float - final temperature
+		patience:int - early-exit if no acceptance in this many consecutive steps
+		seed:    int or None - RNG seed for reproducibility
+		box:     None for no PBC; (3,) orthorhombic; (3, 3) triclinic
 	Returns:
 	--------
-		tuple: (float, dict) - final energy and per-iteration log
+		tuple: (E_best, log) where log contains 'energies', 'temperatures',
+		       'accepts', 'best_E', 'steps_run', 'converged', 'n_residues'.
 	'''
 	if score is None:
 		from .energy import Score
 		score = Score(ff=ff, box=box)
 	if pose.data.get('Amino Acids') is None:
 		raise ValueError('Pack requires a protein pose with Amino Acids')
-	WELLS = (-60.0, 60.0, 180.0)
-	SCALE = 1.0 / 10000.0
-	GRID = 36
-	STEP = 10.0
-	def bbdep_chi(res):
-		aa = pose.data['Amino Acids'][res][0].upper()
-		grids = pose.aminoacids.get(aa, {}).get('BBDEP')
-		if not grids: return None
-		phi = pose.GetDihedral(res, 'PHI')
-		psi = pose.GetDihedral(res, 'PSI')
-		if math.isnan(phi) or math.isnan(psi): return None
-		fx = ((phi + 180.0) % 360.0) / STEP
-		fy = ((psi + 180.0) % 360.0) / STEP
-		i0 = int(math.floor(fx)) % GRID
-		j0 = int(math.floor(fy)) % GRID
-		i1 = (i0 + 1) % GRID; j1 = (j0 + 1) % GRID
-		u = fx - math.floor(fx); v = fy - math.floor(fy)
-		w = np.array([(1-u)*(1-v), u*(1-v), (1-u)*v, u*v])
-		out = []
-		n_chi = len(grids) // 2
-		for c in range(n_chi):
-			s = grids[2*c]; cg = grids[2*c+1]
-			s_blend = SCALE * (w[0]*s[i0,j0] + w[1]*s[i1,j0]
-				+ w[2]*s[i0,j1] + w[3]*s[i1,j1])
-			c_blend = SCALE * (w[0]*cg[i0,j0] + w[1]*cg[i1,j0]
-				+ w[2]*cg[i0,j1] + w[3]*cg[i1,j1])
-			out.append(math.degrees(math.atan2(s_blend, c_blend)))
-		return tuple(out)
-	def candidates(res):
-		aa = pose.data['Amino Acids'][res][0].upper()
-		n_chi = len(pose.aminoacids.get(aa, {}).get('Chi Angle Atoms', []))
-		if n_chi == 0: return []
-		cand = list(itertools.product(WELLS, repeat=n_chi))
-		if include_bbdep:
-			bb = bbdep_chi(res)
-			if bb is not None: cand.append(bb)
-		return cand
-	def apply_chi(res, chi_set):
-		for c, theta in enumerate(chi_set):
-			pose.RotateDihedral(res, float(theta), 'CHI', chi_type=c+1)
-	def current_chi(res, n_chi):
-		return tuple(pose.GetDihedral(res, 'CHI', chi_type=c+1)
-			for c in range(n_chi))
-	residues = []
-	for res in sorted(pose.data['Amino Acids']):
-		aa = pose.data['Amino Acids'][res][0].upper()
-		n_chi = len(pose.aminoacids.get(aa, {}).get('Chi Angle Atoms', []))
-		if n_chi > 0: residues.append((res, n_chi))
-	E_curr = float(score(pose))
-	energies_per_iter, changes_per_iter = [], []
-	converged = False
-	for it in range(int(max_iter)):
-		changes = 0
-		for res, n_chi in residues:
-			cands = candidates(res)
-			if not cands: continue
-			chi_old = current_chi(res, n_chi)
-			saved = pose.data['Coordinates'].copy()
-			best_E = E_curr; best_idx = -1
-			for k, chi_set in enumerate(cands):
-				pose.data['Coordinates'] = saved.copy()
-				apply_chi(res, chi_set)
-				E_k = float(score(pose))
-				if E_k < best_E:
-					best_E, best_idx = E_k, k
-			pose.data['Coordinates'] = saved
-			if best_idx >= 0:
-				apply_chi(res, cands[best_idx])
-				E_curr = best_E
-				new_chi = current_chi(res, n_chi)
-				if any(abs(((a - b + 180) % 360) - 180) > 1e-3
-					for a, b in zip(new_chi, chi_old)):
-					changes += 1
-		energies_per_iter.append(E_curr)
-		changes_per_iter.append(changes)
-		if changes == 0:
-			converged = True
-			break
+	rng = np.random.default_rng(seed)
+	rotlib = DBLoad().get('Rotamer Library')
+	# Step 1: build candidate sets per repackable residue.
+	# Each entry: (mus (K, n_chi), probs (K,) normalised, n_chi)
+	candidates = {}
+	for r, info in sorted(pose.data['Amino Acids'].items()):
+		c = info[0]
+		aa_u = c.upper()
+		aa_db = pose.aminoacids.get(aa_u, {})
+		chi_atoms = aa_db.get('Chi Angle Atoms') or []
+		if not chi_atoms: continue
+		three = aa_db.get('Tricode')
+		if not three: continue
+		phi = pose.GetDihedral(r, 'PHI')
+		psi = pose.GetDihedral(r, 'PSI')
+		if math.isnan(phi) or math.isnan(psi): continue
+		flip = (c != aa_u)
+		phi_q = -phi if flip else phi
+		psi_q = -psi if flip else psi
+		n_chi, rows = _rotlib_lookup(rotlib, three, phi_q, psi_q)
+		if n_chi == 0 or not rows: continue
+		prob_i = n_chi + 1
+		chi_i  = n_chi + 2
+		K = len(rows)
+		mus   = np.empty((K, n_chi), dtype=np.float64)
+		probs = np.empty(K,          dtype=np.float64)
+		for k, row in enumerate(rows):
+			probs[k] = max(float(row[prob_i]), 0.0)
+			for ci in range(n_chi):
+				m = float(row[chi_i + ci])
+				mus[k, ci] = -m if flip else m
+		s = probs.sum()
+		if s <= 0.0: continue
+		probs /= s
+		candidates[r] = (mus, probs, n_chi)
+	if not candidates:
+		E0 = float(score(pose))
+		return E0, {
+			'energies': np.array([E0]), 'temperatures': np.array([T_start]),
+			'accepts': np.array([], dtype=bool), 'best_E': E0, 'steps_run': 0,
+			'converged': True, 'n_residues': 0}
+	res_ids = list(candidates.keys())
+	# Step 2: initial energy + best-state snapshot.
+	def _snapshot():
+		return {r: tuple(pose.GetDihedral(r, 'CHI', chi_type=ci+1)
+			for ci in range(candidates[r][2])) for r in res_ids}
+	def _restore(snap):
+		for r, chis in snap.items():
+			n_chi = candidates[r][2]
+			for ci in range(n_chi):
+				pose.RotateDihedral(r, float(chis[ci]), 'CHI', ci+1)
+	E_curr  = float(score(pose))
+	E_best  = E_curr
+	best_state = _snapshot()
+	# Step 3: SA loop.
+	N = max(1, int(n_steps))
+	energies     = np.empty(N, dtype=np.float64)
+	temperatures = np.empty(N, dtype=np.float64)
+	accepts      = np.empty(N, dtype=bool)
+	last_accept  = 0
+	step         = 0
+	for step in range(N):
+		T = T_start * (T_end / T_start) ** (step / max(1, N - 1))
+		# Pick residue uniformly among repackable.
+		r = res_ids[int(rng.integers(0, len(res_ids)))]
+		mus, probs, n_chi = candidates[r]
+		# Sample rotamer k weighted by prob.
+		k = int(rng.choice(len(probs), p=probs))
+		# Snapshot current chis for revert.
+		snap = tuple(pose.GetDihedral(r, 'CHI', chi_type=ci+1)
+			for ci in range(n_chi))
+		# Apply trial.
+		for ci in range(n_chi):
+			pose.RotateDihedral(r, float(mus[k, ci]), 'CHI', ci+1)
+		E_trial = float(score(pose))
+		dE = E_trial - E_curr
+		if dE <= 0.0 or rng.random() < math.exp(-dE / max(T, 1e-12)):
+			E_curr = E_trial
+			last_accept = step
+			accepts[step] = True
+			if E_curr < E_best:
+				E_best = E_curr
+				best_state = _snapshot()
+		else:
+			# Revert.
+			for ci in range(n_chi):
+				pose.RotateDihedral(r, float(snap[ci]), 'CHI', ci+1)
+			accepts[step] = False
+		energies[step]     = E_curr
+		temperatures[step] = T
+		# Step 4: early-exit on stagnation.
+		if step - last_accept >= patience: break
+	steps_run = step + 1
+	# Step 5: restore best-found state.
+	_restore(best_state)
+	E_final = float(score(pose))
+	# Sanity: best_state may slightly differ from E_best due to caching; trust E_final.
 	log = {
-		'energies_per_iter': np.asarray(energies_per_iter, dtype=np.float64),
-		'changes_per_iter': np.asarray(changes_per_iter, dtype=np.int64),
-		'converged': bool(converged)}
-	return float(E_curr), log
+		'energies':     energies[:steps_run],
+		'temperatures': temperatures[:steps_run],
+		'accepts':      accepts[:steps_run],
+		'best_E':       float(E_best),
+		'steps_run':    int(steps_run),
+		'converged':    bool(steps_run < N),
+		'n_residues':   len(res_ids)}
+	return E_final, log
 
 def MolecularDynamics(pose, ff=None, n_steps=1000, dt_fs=2.0, T=300.0,
 		thermostat='nve', friction_ps=1.0, constraints='hbonds',

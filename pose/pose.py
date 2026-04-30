@@ -8,8 +8,24 @@ import json
 import math
 import copy
 import datetime
+import functools
 import numpy as np
 from collections import defaultdict
+
+@functools.lru_cache(maxsize=1)
+def DBLoad():
+	'''
+	Load the database.json file (cached: parsed once per Python process).
+	Call DBLoad.cache_clear() after writing the file to force a re-read.
+	Arguments:
+	----------
+		No arguments taken
+	Returns:
+	--------
+		loaded database.json to memory
+	'''
+	path, modulename = os.path.split(__file__)
+	with open(f'{path}/database.json') as f: return json.load(f)
 
 class Pose():
 	''' A class that builds and manipulates protein, DNA, and RNA '''
@@ -26,14 +42,10 @@ class Pose():
 			protein and nucleic-acid backbone atom-name sets cached,
 			self.data initialised as an empty pose
 		'''
-		path, modulename = os.path.split(__file__)
-		with open(f'{path}/database.json') as f: database = json.load(f)
-		self.aminoacids=database['Amino Acids']
-		self.nucleotides=database['Nucleotides']
-		for aa in self.aminoacids.values():
-			if isinstance(aa, dict) and 'BBDEP' in aa:
-				aa['BBDEP']=[np.asarray(g, dtype=np.int16) for g in aa['BBDEP']]
-		self.probbatoms = {
+		db = DBLoad()
+		self.aminoacids  = db['Amino Acids']
+		self.nucleotides = db['Nucleotides']
+		self.probbatoms  = {
 			'N', 'H', '1H', '2H', '3H', 'H1', 'H2', 'H3',
 			'HT1', 'HT2', 'HT3', 'HN',
 			'CA', 'HA', 'HA1', 'HA2', 'HA3',
