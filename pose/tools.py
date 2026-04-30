@@ -1,25 +1,157 @@
 import re
 import os
+import sys
 import json
 import math
+import time
+import shutil
 import itertools
 import numpy as np
 from .pose import DBLoad
 from .energy import ForceField
 from collections import defaultdict, deque
 
-def Parameterise(filename, unicode, tricode):
+def _validate_rot_entry(rot_entry, expected_tricode):
 	'''
-	Add a new amino acid entry to database.json
+	Validate a rotamer JSON against the Dunbrack BBDEP2010 schema.
+
+	The JSON must come from the nnca_pipeline (build_*_rotamer.py) or
+	an equivalent producer, with top-level keys
+	{tricode, n_chi, rotamers, method}. The method.chi_axes field is
+	required because Parameterise() uses it as the source of truth for
+	the Amino Acids entry's "Chi Angle Atoms" field.
+
 	Arguments:
 	----------
-		filename : str - Path to CIF file (download from RCSB Chemical Sketch)
-		unicode  : str - Single-letter key to use in AminoAcids.json (e.g. 'J')
-		tricode  : str - Three-letter residue code (e.g. 'MSE')
-	Return:
-	-------
-		Updated database.json
-		Notice   : str - What got updated or replaced
+		rot_entry         : dict - parsed JSON content
+		expected_tricode  : str  - tricode the caller is asking us to
+		                    insert; must match rot_entry['tricode']
+	Returns:
+	--------
+		None - raises ValueError on any schema violation with explicit
+		context.
+	'''
+	REQUIRED_TOP = ('tricode', 'n_chi', 'rotamers')
+	REQUIRED_ROT = ('columns', 'table', 'bin_offsets', 'top_chi')
+	PHI_N, PSI_N = 36, 36
+	missing_top = [k for k in REQUIRED_TOP if k not in rot_entry]
+	if missing_top:
+		raise ValueError(
+			f'rotamer JSON missing required keys: {missing_top}')
+	tri = rot_entry['tricode']
+	if not isinstance(tri, str) or len(tri) != 3:
+		raise ValueError(
+			f'rotamer JSON tricode must be a 3-letter str, got {tri!r}')
+	if tri.upper() != expected_tricode.upper():
+		raise ValueError(
+			f'rotamer JSON tricode {tri!r} does not match argument '
+			f'{expected_tricode!r}')
+	n_chi = int(rot_entry['n_chi'])
+	if n_chi < 1 or n_chi > 8:
+		raise ValueError(f'n_chi out of range (1-8): {n_chi}')
+	if ('method' not in rot_entry
+			or 'chi_axes' not in rot_entry['method']):
+		raise ValueError(
+			'rotamer JSON missing method.chi_axes (required as the '
+			'source of truth for Amino Acids "Chi Angle Atoms")')
+	chi_axes = rot_entry['method']['chi_axes']
+	if len(chi_axes) != n_chi:
+		raise ValueError(
+			f'method.chi_axes has {len(chi_axes)} axes but '
+			f'n_chi={n_chi}')
+	for k, axis in enumerate(chi_axes):
+		if len(axis) != 4:
+			raise ValueError(
+				f'chi_axes[{k}] has {len(axis)} atoms (need 4): {axis}')
+	rot = rot_entry['rotamers']
+	missing_rot = [k for k in REQUIRED_ROT if k not in rot]
+	if missing_rot:
+		raise ValueError(f'rotamers missing keys: {missing_rot}')
+	expect_cols = ([f'r{k+1}' for k in range(n_chi)]
+		+ ['count', 'prob']
+		+ [f'chi{k+1}' for k in range(n_chi)]
+		+ [f'sig{k+1}' for k in range(n_chi)])
+	if rot['columns'] != expect_cols:
+		raise ValueError(
+			f'rotamer columns mismatch.\n'
+			f'  got:      {rot["columns"]}\n'
+			f'  expected: {expect_cols}')
+	bo_off = rot['bin_offsets']
+	if len(bo_off) != PHI_N * PSI_N + 1:
+		raise ValueError(
+			f'bin_offsets length {len(bo_off)} != '
+			f'{PHI_N * PSI_N + 1}')
+	tc = rot['top_chi']
+	if len(tc) != PHI_N:
+		raise ValueError(
+			f'top_chi outer length {len(tc)} != {PHI_N}')
+	if any(len(r) != PSI_N for r in tc):
+		raise ValueError(
+			f'top_chi inner length != {PSI_N}')
+
+def _clamp_sigmas(rot_entry, floor=0.5):
+	'''
+	Clamp sigma columns of the rotamer table to >= floor degrees.
+
+	Some BGMM bins emit zero-width sigmas when the underlying data is
+	a single delta; the unified-DB schema requires sigmas >= 0.5 deg
+	to avoid divide-by-zero in Score._rotamer_prior.
+
+	Arguments:
+	----------
+		rot_entry : dict
+		floor     : float - minimum sigma in degrees (default 0.5)
+	Returns:
+	--------
+		int : count of values clamped (informational only)
+	'''
+	n_chi = int(rot_entry['n_chi'])
+	sig_col0 = n_chi + 2 + n_chi
+	table = rot_entry['rotamers']['table']
+	n_clamped = 0
+	for row in table:
+		for k in range(n_chi):
+			v = float(row[sig_col0 + k])
+			if v < floor:
+				row[sig_col0 + k] = floor
+				n_clamped += 1
+	return n_clamped
+
+def Parameterise(cif_file, rotamer_json_file, tricode, unicode,
+		backup=True):
+	'''
+	Add a non-canonical amino acid (NCAA) to Pose's unified
+	database.json.
+
+	Builds the entry under "Amino Acids"[unicode] from cif_file
+	(verified RCSB Chemical Component Dictionary CIF) and inserts the
+	matching backbone-dependent rotamer library under
+	"Rotamer Library"["residues"][tricode] from rotamer_json_file
+	(Dunbrack BBDEP2010-format JSON produced by the nnca_pipeline at
+	/Users/slurm/Desktop/Research/nnca_pipeline/). Both insertions
+	land in a single atomic write.
+
+	Arguments:
+	----------
+		cif_file          : str  - Path to RCSB CCD CIF
+		rotamer_json_file : str  - Path to Dunbrack-format rotamer JSON
+		tricode           : str  - Three-letter residue code, e.g. 'PTR'
+		unicode           : str  - Single-letter key for db['Amino Acids']
+		backup            : bool - If True (default), copy database.json
+		                    to database.json.bak.<YYYYMMDD-HHMMSS>
+		                    before modifying. Set False for batch / CI
+		                    runs that handle backups externally.
+	Behaviour on existing keys:
+	---------------------------
+		If `unicode` is already a key in db['Amino Acids'], or `tricode`
+		is already in db['Rotamer Library']['residues'], a warning is
+		logged to stderr identifying the old entry, and the new entries
+		overwrite the old.
+	Returns:
+	--------
+		None - database.json is updated in place; DBLoad cache is cleared
+		so subsequently constructed Pose / ForceField / Score / Rotamers
+		instances see the new residue without restart.
 	'''
 	# 1. ALA reference frame (N at origin): N, H1-3, CA, HA, CB, 1HB-3HB, C, O, OXT.
 	ALA = np.array([
@@ -31,9 +163,20 @@ def Parameterise(filename, unicode, tricode):
 		[ 2.009,  1.420,  0.000], [ 2.058,  2.045,  1.023],
 		[ 2.394,  1.914, -1.023]])
 	unicode, tricode = unicode.upper(), tricode.upper()
-	# 2. Parse CIF: atom rows have >=18 tokens (coords at [15:18] or fallback [12:15]); bond rows have 7 tokens.
+	# 2. Load + validate the rotamer JSON FIRST. Failing fast on a bad
+	#    schema means we never half-write a CIF-derived entry into the
+	#    DB without a matching rotamer library.
+	with open(rotamer_json_file) as fh:
+		rot_entry = json.load(fh)
+	_validate_rot_entry(rot_entry, tricode)
+	n_clamped = _clamp_sigmas(rot_entry)
+	if n_clamped:
+		print(f'Note: clamped {n_clamped} rotamer sigma values to '
+			f'>=0.5 deg floor.')
+	chi_axes_from_json = rot_entry['method']['chi_axes']
+	# 3. Parse CIF: atom rows have >=18 tokens (coords at [15:18] or fallback [12:15]); bond rows have 7 tokens.
 	COORD_RAW, ATOMS_RAW, BONDS = [], [], []
-	with open(filename) as fh:
+	with open(cif_file) as fh:
 		for line in fh:
 			t = line.strip().split()
 			if not t or t[0] != tricode: continue
@@ -52,29 +195,40 @@ def Parameterise(filename, unicode, tricode):
 	COORD   = np.array(COORD_RAW)
 	CIF_IDS = [a['id'] for a in ATOMS_RAW]
 	if 'CB' not in CIF_IDS:
-		raise ValueError(f'No CB atom found in {filename}. '
+		raise ValueError(f'No CB atom found in {cif_file}. '
 			'Only standard amino acids (not GLY) are supported.')
+	# 4. Validate every chi-axis atom from the JSON exists in the CIF.
+	#    Chi axes only ever reference heavy atoms, so a CIF-name lookup
+	#    is sufficient (no need to canonicalise H names yet).
+	cif_atom_set = set(CIF_IDS)
+	for k, axis in enumerate(chi_axes_from_json):
+		for an in axis:
+			if an not in cif_atom_set:
+				raise ValueError(
+					f'chi axis {k+1} references atom {an!r} which '
+					f'does not exist in {cif_file}. CIF atoms: '
+					f'{sorted(cif_atom_set)}')
 	bb_set = {a['id'] for a in ATOMS_RAW if a['bb']} or {
 		'N','CA','C','O','OXT','H','H1','H2','H3',
 		'HA','HA2','HA3','HXT'}
 	elem    = {a['id']: a['elem'] for a in ATOMS_RAW}
 	cif_ord = {a['id']: i for i, a in enumerate(ATOMS_RAW)}
-	# 3. Superimpose onto ALA backbone frame via rigid motion (N, CA, CB, C) with CA as origin.
+	# 5. Superimpose onto ALA backbone frame via rigid motion (N, CA, CB, C) with CA as origin.
 	try:
 		Ni, CAi = CIF_IDS.index('N'),  CIF_IDS.index('CA')
 		CBi, Ci = CIF_IDS.index('CB'), CIF_IDS.index('C')
 	except ValueError as e:
-		raise ValueError(f'Missing backbone atom in {filename}: {e}')
+		raise ValueError(f'Missing backbone atom in {cif_file}: {e}')
 	A = np.c_[ALA,   np.ones(len(ALA))]
 	B = np.c_[COORD, np.ones(len(COORD))]
 	AL = np.array([A[0]-A[4], A[6]-A[4], A[-3]-A[4], A[4]])
 	BL = np.array([B[Ni]-B[CAi], B[CBi]-B[CAi], B[Ci]-B[CAi], B[CAi]])
 	COORD = (B @ (np.linalg.inv(BL) @ AL))[:, :3]
-	# 4. Build undirected bond graph indexed by atom id.
+	# 6. Build undirected bond graph indexed by atom id.
 	adj = defaultdict(set)
 	for a1, a2, _v, _r in BONDS:
 		adj[a1].add(a2); adj[a2].add(a1)
-	# 5. BFS sidechain from CB (heavy-atom queue; H neighbours land next to their parent in CIF order).
+	# 7. BFS sidechain from CB (heavy-atom queue; H neighbours land next to their parent in CIF order).
 	ordered = []
 	seen    = set(bb_set) | {'CB'}
 	q       = deque(['CB'])
@@ -85,7 +239,7 @@ def Parameterise(filename, unicode, tricode):
 			if n in seen: continue
 			seen.add(n)
 			(ordered if elem.get(n, '').upper() in ('H', 'D') else q).append(n)
-	# 6. Rename atoms: CIF HB2 becomes Pose 1HB (per-base counter on H/D atoms).
+	# 8. Rename atoms: CIF HB2 becomes Pose 1HB (per-base counter on H/D atoms).
 	name_map, counter = {}, defaultdict(int)
 	for name in ordered:
 		m = re.match(r'^([A-Z]+)(\d+)$', name)
@@ -94,10 +248,10 @@ def Parameterise(filename, unicode, tricode):
 			name_map[name] = f'{counter[m.group(1)]}{m.group(1)}'
 		else:
 			name_map[name] = name
-	# 7. Detect fused sidechain: any sidechain atom bonded back to N (e.g. PRO).
+	# 9. Detect fused sidechain: any sidechain atom bonded back to N (e.g. PRO).
 	fused_atom = next((sc for sc in ordered if 'N' in adj[sc]), None)
 	fused = fused_atom is not None
-	# 8. Sidechain bond graph on new indices; -5 sentinel stands in for the backbone N of a fused ring.
+	# 10. Sidechain bond graph on new indices; -5 sentinel stands in for the backbone N of a fused ring.
 	sc_set  = set(ordered)
 	new_idx = {n: i for i, n in enumerate(ordered)}
 	sc_bonds, sc_orders, bo_lookup = (
@@ -124,7 +278,7 @@ def Parameterise(filename, unicode, tricode):
 		fi = new_idx[fused_atom]
 		sc_bonds[fi].append(-5);  sc_bonds[-5].append(fi)
 		sc_orders[fi].append(1);  sc_orders[-5].append(1)
-	# 9. Two-pass aromaticity: C with >=2 O/N neighbours and at least one double bond gets resonance (all C-O/N -> 1.5).
+	# 11. Two-pass aromaticity: C with >=2 O/N neighbours and at least one double bond gets resonance (all C-O/N -> 1.5).
 	elem_at_idx = {new_idx[n]: elem[n] for n in ordered}
 	for _p in range(2):
 		for i in list(sc_bonds.keys()):
@@ -140,7 +294,7 @@ def Parameterise(filename, unicode, tricode):
 					if mnb == i:
 						sc_orders[nb][kk] = 1.5
 						break
-	# 10. Final bond dicts with sorted neighbours for determinism; -5 sentinel kept last if fused.
+	# 12. Final bond dicts with sorted neighbours for determinism; -5 sentinel kept last if fused.
 	pos_keys     = sorted(k for k in sc_bonds if k >= 0)
 	final_bonds  = {k: sorted(sc_bonds[k]) for k in pos_keys}
 	final_orders = {k: [dict(zip(sc_bonds[k], sc_orders[k]))[nb]
@@ -149,19 +303,14 @@ def Parameterise(filename, unicode, tricode):
 		final_bonds[-5]  = sorted(sc_bonds[-5])
 		final_orders[-5] = [dict(zip(sc_bonds[-5], sc_orders[-5]))[nb]
 			for nb in final_bonds[-5]]
-	# 11. Chi angles: trace main chain from CB by CIF-ordinal preference; 4-atom window over [N, CA, *mc].
-	mc, visited, cur = [], set(bb_set) | {'CA'}, 'CB'
-	while cur is not None:
-		mc.append(cur); visited.add(cur)
-		hvs = [n for n in adj[cur] if n not in visited
-			and elem.get(n, '').upper() not in ('H', 'D')]
-		cur = min(hvs, key=lambda n: cif_ord.get(n, 9999)) if hvs else None
-	full_chain = ['N', 'CA'] + mc
-	chis = [full_chain[i:i+4] for i in range(len(full_chain) - 3)]
-	if fused and len(full_chain) >= 5:
-		chis.append(full_chain[-3:] + ['N'])
-		chis.append(full_chain[-2:] + ['N', 'CA'])
-	# 12. Assemble the new entry in the same field order as existing AAs.
+	# 13. Chi axes come from the rotamer JSON's method.chi_axes (the
+	#     plan's user-confirmed source of truth). The CIF walker that
+	#     this section used to do is removed -- it was fragile for
+	#     NCAAs with non-standard atom orderings, and any drift between
+	#     the Amino Acids "Chi Angle Atoms" field and the rotamer
+	#     library's chi convention silently corrupts the rotamer prior.
+	chis = [list(a) for a in chi_axes_from_json]
+	# 14. Assemble the new entry in the same field order as existing AAs.
 	id_to_i = {cid: i for i, cid in enumerate(CIF_IDS)}
 	def _infer_hybridisation(elem, bond_orders):
 		'''
@@ -193,14 +342,35 @@ def Parameterise(filename, unicode, tricode):
 		'Chi Angle Atoms': chis,
 		'Bonds':           {str(k): v for k, v in final_bonds.items()},
 		'BondOrders':      {str(k): v for k, v in final_orders.items()}}
-	# 13. Merge into database.json.
+	# 15. Load the existing database.
 	db_path = os.path.join(
 		os.path.dirname(os.path.abspath(__file__)), 'database.json')
 	with open(db_path) as fh: db = json.load(fh)
-	if unicode in db['Amino Acids']:
-		print(f'Warning: "{unicode}" already exists... overwriting.')
-	db['Amino Acids'][unicode] = entry
-	# 14. Validate Bonds/BondOrders symmetry across the whole DB before
+	# 16. Warn-and-overwrite on key collisions, per user-confirmed plan.
+	#     Both single-letter unicode (Amino Acids) and 3-letter tricode
+	#     (Rotamer Library.residues) are checked independently.
+	if unicode in db.get('Amino Acids', {}):
+		old_tri = db['Amino Acids'][unicode].get('Tricode', '?')
+		print(f'Warning: db["Amino Acids"]["{unicode}"] already '
+			f'exists (was Tricode={old_tri}); overwriting with '
+			f'Tricode={tricode}.', file=sys.stderr)
+	rl       = db.setdefault('Rotamer Library', {})
+	rl_resid = rl.setdefault('residues', {})
+	if tricode in rl_resid:
+		print(f'Warning: db["Rotamer Library"]["residues"]'
+			f'["{tricode}"] already exists; overwriting.',
+			file=sys.stderr)
+	# 17. Insert both entries. The Rotamer Library form keeps only
+	#     n_chi/rotamers/densities (matching merge_into_database.py);
+	#     the method/metadata fields are stripped on insertion to keep
+	#     database.json compact.
+	db.setdefault('Amino Acids', {})[unicode] = entry
+	rl_resid[tricode] = {
+		'n_chi':     int(rot_entry['n_chi']),
+		'rotamers':  rot_entry['rotamers'],
+		'densities': rot_entry.get('densities'),
+	}
+	# 18. Validate Bonds/BondOrders symmetry across the whole DB before
 	#     writing anything. Fails loudly on any malformed entry so the
 	#     hot paths in Pose (_bondtree, Import) can stay guard-free.
 	def _validate_db(db):
@@ -224,211 +394,29 @@ def Parameterise(filename, unicode, tricode):
 							f'Bonds has {len(nbrs)} entries but '
 							f'BondOrders has {len(bo[k])}')
 	_validate_db(db)
-	# 15. Serialise preserving the compact layout; atomic write via rename.
-	def _fmt_field(field, val):
-		'''Format one database.json field as a list of pre-indented
-		lines (no trailing comma; the enclosing entry closes the dict).
-		Unknown fields fall back to json.dumps so no data is dropped.'''
-		if field == 'Vectors':
-			out = ['        "Vectors": [']
-			n = len(val) - 1
-			for vi, v in enumerate(val):
-				tail = ',' if vi < n else ']'
-				body = '[' + ', '.join(
-					json.dumps(round(float(x), 3)) for x in v) + ']'
-				out.append('            ' + body + tail)
-			return out
-		if field in ('Tricode', 'Type'):
-			return [f'        "{field}": "{val}"']
-		if field == 'Fused':
-			return ['        "Fused": ' + ('true' if val else 'false')]
-		if field in ('Sidechain Atoms', 'Backbone Atoms', 'Base Atoms'):
-			out = [f'        "{field}": [']
-			n = len(val) - 1
-			for ai, a in enumerate(val):
-				if len(a) == 6:
-					body = (f'["{a[0]}", "{a[1]}", '
-						f'{float(a[2]):.1f}, {float(a[3]):.1f}, '
-						f'{float(a[4]):.1f}, "{a[5]}"]')
-				elif len(a) == 5:
-					body = (f'["{a[0]}", "{a[1]}", '
-						f'{float(a[2]):.1f}, {float(a[3]):.1f}, '
-						f'{float(a[4]):.1f}]')
-				else:
-					body = (f'["{a[0]}", "{a[1]}", '
-						f'{int(a[2])}, {int(a[3])}]')
-				tail = ',' if ai < n else ']'
-				out.append('            ' + body + tail)
-			return out
-		if field == 'Chi Angle Atoms':
-			if not val:
-				return [f'        "{field}": []']
-			if isinstance(val[0], str):
-				inner = ', '.join(f'"{x}"' for x in val)
-				return [f'        "{field}": [{inner}]']
-			out = [f'        "{field}": [']
-			n = len(val) - 1
-			for ci, c in enumerate(val):
-				tail = ',' if ci < n else ']'
-				inner = ', '.join(f'"{x}"' for x in c)
-				out.append('            [' + inner + ']' + tail)
-			return out
-		if field in ('Bonds', 'BondOrders'):
-			out = [f'        "{field}": {{']
-			bi = list(val.items()); n = len(bi) - 1
-			for k, (bk, bv) in enumerate(bi):
-				inner = ', '.join(
-					(f'{x:g}' if isinstance(x, float) else str(x))
-					for x in bv)
-				tail = ',' if k < n else '}'
-				out.append(
-					'            "' + str(bk) + '":[' + inner + ']' + tail)
-			return out
-		if field == 'BBDEP':
-			# list of 2-D int grids; per-row inline (no spaces between
-			# commas) at 12-space indent, grids separated by `], [`,
-			# matching the existing ARG entry's layout.
-			out = [f'        "{field}": [[']
-			last_gi = len(val) - 1
-			for gi, g in enumerate(val):
-				last_ri = len(g) - 1
-				for ri, row in enumerate(g):
-					body = ','.join(str(int(x)) for x in row)
-					if ri < last_ri:
-						out.append('            [' + body + '],')
-					elif gi < last_gi:
-						out.append('            [' + body + ']], [')
-					else:
-						# Last row of last grid: close row, grid, outer
-						# BBDEP list. _fmt_entry appends the `}` after.
-						out.append('            [' + body + ']]]')
-			return out
-		encoded = json.dumps(val, indent=4)
-		enc_lines = encoded.split('\n')
-		out = [f'        "{field}": {enc_lines[0]}']
-		for el in enc_lines[1:]:
-			out.append('        ' + el)
-		return out
-	def _fmt_entry(entry_key, entry):
-		out = [f'    "{entry_key}": {{']
-		blocks = [_fmt_field(f, v) for f, v in entry.items()]
-		for bi, block in enumerate(blocks):
-			if bi < len(blocks) - 1:
-				block[-1] = block[-1] + ','
-			out.extend(block)
-		out[-1] = out[-1] + '}'
-		return out
-	def _fmt_db(db):
-		L = ['{']
-		sections = list(db.items())
-		for si, (sname, entries) in enumerate(sections):
-			L.append(f'"{sname}": {{')
-			items = list(entries.items())
-			for ei, (ekey, e) in enumerate(items):
-				block = _fmt_entry(ekey, e)
-				if ei < len(items) - 1:
-					block[-1] = block[-1] + ','
-				L.extend(block)
-				if ei < len(items) - 1:
-					L.append('')
-			L[-1] = L[-1] + '}'
-			if si < len(sections) - 1:
-				L[-1] = L[-1] + ','
-				L.append('')
-		L.append('}')
-		return '\n'.join(L) + '\n'
-	# 15a. Snapshot pre-Parameterise file bytes for full rollback if
-	#      step 16 fails (the new residue must land on disk before
-	#      GenerateBBDEP can see it via Pose()).
-	try:
-		with open(db_path, 'rb') as _fh: _rollback_bytes = _fh.read()
-	except FileNotFoundError:
-		_rollback_bytes = None
+	# 19. Optional timestamped backup before atomic write.
+	if backup:
+		ts = time.strftime('%Y%m%d-%H%M%S')
+		bak_path = db_path + f'.bak.{ts}'
+		shutil.copy2(db_path, bak_path)
+		print(f'Backup: {bak_path}')
+	# 20. Compact atomic write (no whitespace -- matches the rest of
+	#     the unified-DB infrastructure).
 	tmp_path = db_path + '.tmp'
 	try:
-		with open(tmp_path, 'w') as fh: fh.write(_fmt_db(db))
+		with open(tmp_path, 'w') as fh:
+			json.dump(db, fh, separators=(',', ':'))
 		os.replace(tmp_path, db_path)
-		# 16. Generate and embed BBDEP rotamer grid if this NCAA has
-		#     chi angles. All scanning logic is inlined here; the only
-		#     external helper called is `_energy()` (defined below in this
-		#     file). database.json is written a second time via _fmt_db
-		#     so the entry layout stays consistent.
-		if entry['Chi Angle Atoms']:
-			from pose import Pose
-			p = Pose()
-			p.Build('G' + unicode + 'G', chain='A', fmt='Protein')
-			res_idx = 1
-			n_chi = len(entry['Chi Angle Atoms'])
-			# Coordinate-descent chi minimizer per (phi, psi) grid cell.
-			COARSE, REFINE, HALF, MAX_PASS = 30.0, 2.0, 14.0, 4
-			coarse_a = np.arange(-180.0, 180.0, COARSE)
-			refine_a = np.arange(-HALF, HALF + REFINE, REFINE)
-			sin_gs = [np.zeros((36, 36), dtype=np.int16)
-				for _ in range(n_chi)]
-			cos_gs = [np.zeros((36, 36), dtype=np.int16)
-				for _ in range(n_chi)]
-			phis = np.arange(-180, 180, 10)
-			psis = np.arange(-180, 180, 10)
-			for gi, phi in enumerate(phis):
-				for gj, psi in enumerate(psis):
-					p.RotateDihedral(res_idx, float(phi), 'PHI')
-					p.RotateDihedral(res_idx, float(psi), 'PSI')
-					chis = [180.0] * n_chi
-					for ci in range(n_chi):
-						p.RotateDihedral(res_idx, 180.0, 'chi', ci + 1)
-					for _ in range(MAX_PASS):
-						changed = False
-						for ci in range(n_chi):
-							best_e, best_a = float('inf'), chis[ci]
-							for a in coarse_a:
-								p.RotateDihedral(res_idx, float(a),
-									'chi', ci + 1)
-								e = _energy(p)
-								if e < best_e:
-									best_e, best_a = e, float(a)
-							if abs(best_a - chis[ci]) > 1e-6:
-								changed = True
-							chis[ci] = best_a
-							p.RotateDihedral(res_idx, best_a, 'chi', ci + 1)
-						if not changed: break
-					for ci in range(n_chi):
-						best_e = _energy(p)
-						best_a = chis[ci]
-						base = chis[ci]
-						for d in refine_a:
-							a = base + float(d)
-							p.RotateDihedral(res_idx, a, 'chi', ci + 1)
-							e = _energy(p)
-							if e < best_e:
-								best_e, best_a = e, a
-						chis[ci] = best_a
-						p.RotateDihedral(res_idx, best_a, 'chi', ci + 1)
-					for ci, chi in enumerate(chis):
-						rad = math.radians(chi)
-						sin_gs[ci][gi, gj] = int(round(
-							math.sin(rad) * 10000))
-						cos_gs[ci][gi, gj] = int(round(
-							math.cos(rad) * 10000))
-			grids = []
-			for ci in range(n_chi):
-				grids.append(sin_gs[ci].tolist())
-				grids.append(cos_gs[ci].tolist())
-			entry['BBDEP'] = grids
-			_validate_db(db)
-			with open(tmp_path, 'w') as fh: fh.write(_fmt_db(db))
-			os.replace(tmp_path, db_path)
-			print(f'Added {tricode} as "{unicode}" to database.json '
-				'(with BBDEP)')
-		else:
-			print(f'Added {tricode} as "{unicode}" to database.json')
 	except BaseException:
-		if _rollback_bytes is not None:
-			with open(db_path, 'wb') as _fh: _fh.write(_rollback_bytes)
-		elif os.path.exists(db_path):
-			os.remove(db_path)
 		if os.path.exists(tmp_path):
 			os.remove(tmp_path)
 		raise
+	# 21. Invalidate the DBLoad cache so subsequently constructed Pose
+	#     / ForceField / Score / Rotamers instances see the new residue
+	#     without restart.
+	DBLoad.cache_clear()
+	print(f'Added {tricode} as "{unicode}" to database.json '
+		f'(Amino Acids + Rotamer Library)')
 
 def RMSD(pose1, pose2, alg='align', export=None):
 	'''
