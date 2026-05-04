@@ -12,7 +12,7 @@ A bare-metal Python library for building and manipulating protein and nucleic ac
 
 ## Video Tutorial
 
-**Watch the full walkthrough:** [Video Tutorial on YouTube](https://youtu.be/r0exhjDjUhs)
+**Watch the full walkthrough:** [Video Tutorial on YouTube](https://www.youtube.com/@SariSabban)
 
 ---
 
