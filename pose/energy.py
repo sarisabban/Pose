@@ -37,7 +37,7 @@ class ForceField():
 		self.Parameters = P
 		self._cache = None
 		self._cache_hash = None
-	def __call__(self, pose, grad=True, box=None):
+	def __call__(self, pose, grad=False, box=None):
 		'''
 		Calculates the total potential energy summed over configured terms
 		Arguments:
