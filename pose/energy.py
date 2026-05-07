@@ -47,7 +47,7 @@ class ForceField():
 			box:  None for no PBC; (3,) for orthorhombic; (3, 3) for triclinic
 		Returns:
 		--------
-			float: potential energy in kcal/mol  (when grad=False)
+			float: potential energy in kJ/mol  (when grad=False)
 			(float, ndarray): energy and (N, 3) forces  (when grad=True)
 		'''
 		h = self._topology_hash(pose)
@@ -319,7 +319,7 @@ class ForceField():
 			box:   None for no PBC; (3,) for orthorhombic; (3, 3) for triclinic
 		Returns:
 		--------
-			float: potential energy in kcal/mol  (when grad=False)
+			float: potential energy in kJ/mol  (when grad=False)
 			(float, ndarray): energy and (N, 3) forces  (when grad=True)
 		'''
 		n     = cache['n']
@@ -362,7 +362,7 @@ class ForceField():
 			box:   None for no PBC; (3,) for orthorhombic; (3, 3) for triclinic
 		Returns:
 		--------
-			float: potential energy in kcal/mol  (when grad=False)
+			float: potential energy in kJ/mol  (when grad=False)
 			(float, ndarray): energy and (N, 3) forces  (when grad=True)
 		'''
 		n        = cache['n']
@@ -408,7 +408,7 @@ class ForceField():
 			box:   None for no PBC; (3,) for orthorhombic; (3, 3) for triclinic
 		Returns:
 		--------
-			float: potential energy in kcal/mol  (when grad=False)
+			float: potential energy in kJ/mol  (when grad=False)
 			(float, ndarray): energy and (N, 3) forces  (when grad=True)
 		'''
 		n = cache['n']
@@ -453,7 +453,7 @@ class ForceField():
 			box:   None for no PBC; (3,) for orthorhombic; (3, 3) for triclinic
 		Returns:
 		--------
-			float: potential energy in kcal/mol  (when grad=False)
+			float: potential energy in kJ/mol  (when grad=False)
 			(float, ndarray): energy and (N, 3) forces  (when grad=True)
 		'''
 		n        = cache['n']
@@ -467,10 +467,10 @@ class ForceField():
 		np.fill_diagonal(r, 1.0)
 		epsilon_r = self.Parameters['electrostatic']['epsilon_r']
 		if alg == 'constant':
-			elec = (332.06 * qq) / (epsilon_r * r)
+			elec = (1389.35458 * qq) / (epsilon_r * r)
 			dU_dr = -elec / r
 		elif alg == 'ddd':
-			elec = (332.06 * qq) / (epsilon_r * r * r)
+			elec = (1389.35458 * qq) / (epsilon_r * r * r)
 			dU_dr = -2.0 * elec / r
 		else:
 			raise ValueError(
@@ -493,7 +493,7 @@ class ForceField():
 			box:   None for no PBC; (3,)  for orthorhombic; (3, 3) for triclinic
 		Returns:
 		--------
-			float: potential energy in kcal/mol  (when grad=False)
+			float: potential energy in kJ/mol  (when grad=False)
 			(float, ndarray): energy and (N, 3) forces  (when grad=True)
 		'''
 		n        = cache['n']
@@ -549,7 +549,7 @@ class ForceField():
 			box:   None for no PBC; (3,) for orthorhombic; (3, 3) for triclinic
 		Returns:
 		--------
-			float: potential energy in kcal/mol  (when grad=False)
+			float: potential energy in kJ/mol  (when grad=False)
 			(float, ndarray): energy and (N, 3) forces  (when grad=True)
 		'''
 		n         = cache['n']
@@ -608,7 +608,7 @@ class ForceField():
 			box:   None for no PBC; (3,) for orthorhombic; (3, 3) for triclinic
 		Returns:
 		--------
-			float: potential energy in kcal/mol  (when grad=False)
+			float: potential energy in kJ/mol  (when grad=False)
 			(float, ndarray): energy and (N, 3) forces  (when grad=True)
 		'''
 		n        = cache['n']
@@ -641,7 +641,7 @@ class ForceField():
 			box:   None for no PBC; (3,) for orthorhombic; (3, 3) for triclinic
 		Returns:
 		--------
-			float: potential energy in kcal/mol  (when grad=False)
+			float: potential energy in kJ/mol  (when grad=False)
 			(float, ndarray): energy and (N, 3) forces  (when grad=True)
 		'''
 		n      = cache['n']
@@ -654,9 +654,9 @@ class ForceField():
 		np.fill_diagonal(r, 1.0)
 		epsilon_r = self.Parameters['electrostatic']['epsilon_r']
 		if alg == 'constant':
-			coeff = 332.06 * q[None, :] / (epsilon_r * r**3)
+			coeff = 1389.35458 * q[None, :] / (epsilon_r * r**3)
 		elif alg == 'ddd':
-			coeff = 332.06 * q[None, :] / (epsilon_r * r**4)
+			coeff = 1389.35458 * q[None, :] / (epsilon_r * r**4)
 		else:
 			raise ValueError(
 				'Algorithm not supported, choose (constant or ddd)')
@@ -684,7 +684,7 @@ class ForceField():
 			box:   None for no PBC; (3,) for orthorhombic; (3, 3) for triclinic
 		Returns:
 		--------
-			float: potential energy in kcal/mol  (when grad=False)
+			float: potential energy in kJ/mol  (when grad=False)
 			(float, ndarray): energy and (N, 3) forces  (when grad=True)
 		'''
 		n      = cache['n']
@@ -895,7 +895,7 @@ class Score():
 			pose: Pose - molecule source pose
 		Returns:
 		--------
-			float: sum of ref_state[aa] over every residue, in kcal/mol
+			float: sum of ref_state[aa] over every residue, in kJ/mol
 		'''
 		aas = pose.data.get('Amino Acids')
 		if aas is None: return 0.0
@@ -952,14 +952,14 @@ class Score():
 			pose: Pose - molecule source pose
 		Returns:
 		--------
-			float: total rotamer-prior energy in kcal/mol summed over residues
+			float: total rotamer-prior energy in kJ/mol summed over residues
 		'''
 		aas = pose.data.get('Amino Acids')
 		if aas is None or not self._rotlib: return 0.0
-		kT      = 0.5961                  # RT at 300 K, kcal/mol
+		kT      = 2.494                  # RT at 300 K, kJ/mol
 		LOG_2PI = math.log(2.0 * math.pi)
-		SIG_MIN = 0.5                     # degrees, numerical floor
-		total = 0.0
+		SIG_MIN = 0.5                    # degrees, numerical floor
+		total   = 0.0
 		for r, info in aas.items():
 			c    = info[0]
 			aa_u = c.upper()
@@ -1026,7 +1026,7 @@ class Score():
 			cache: dict - ff topology cache providing excl_bool, lj_sigma
 		Returns:
 		--------
-			float: solvation free energy in kcal/mol
+			float: solvation free energy in kJ/mol
 		'''
 		dG  = self._lk_dG
 		lam = self._lk_lam
@@ -1055,7 +1055,7 @@ class Score():
 			cache: dict - ff topology cache providing nbrs adjacency
 		Returns:
 		--------
-			float: H-bond energy contribution in kcal/mol
+			float: H-bond energy contribution in kJ/mol
 		'''
 		atoms = pose.data['Atoms']
 		nbrs = cache['nbrs']
@@ -1101,7 +1101,7 @@ class Score():
 			cache: dict - ff topology cache providing mask_far
 		Returns:
 		--------
-			float: KBP energy contribution in kcal/mol
+			float: KBP energy contribution in kJ/mol
 		'''
 		t = self._kbp_types
 		table = self._kbp_table

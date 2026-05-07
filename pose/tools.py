@@ -1708,7 +1708,7 @@ def HydrogenBondMap(pose):
 			nm = float(np.linalg.norm(cdir))
 			if nm > 0.001:
 				H_pos[k] = co[idx['N']] + cdir / nm
-	# 5. For every (i, j) pair on the same chain with |i-j|>1, apply DSSP energy threshold E<-0.5.
+	# 5. For every (i, j) pair on the same chain with |i-j|>1, apply DSSP energy threshold E<-2.092.
 	for ki in range(N_res):
 		if H_pos[ki] is None: continue
 		Ni_idx = ai_of[res_idx[ki]].get('N', -1)
@@ -1725,7 +1725,7 @@ def HydrogenBondMap(pose):
 			r_OH = float(np.linalg.norm(Oj - Hi))
 			r_CN = float(np.linalg.norm(Cj - Ni))
 			if min(r_ON, r_CH, r_OH, r_CN) < 0.001: continue
-			if 0.084 * (1/r_ON + 1/r_CH - 1/r_OH - 1/r_CN) * 332 < -0.5:
+			if 0.084*(1/r_ON + 1/r_CH - 1/r_OH - 1/r_CN) * 1389.35458 < -2.092:
 				M[Ni_idx, Oj_idx] = 1
 				M[Oj_idx, Ni_idx] = 2
 	return M
@@ -1856,20 +1856,20 @@ def Minimise(pose, ff=None, max_steps=500, ftol=1.0, dt_fs=0.1,
 		pose:      Pose - molecule source protein, DNA, RNA, or Molecule
 		ff:        ForceField - reusable evaluator; created if None
 		max_steps: int - maximum number of FIRE2 iterations
-		ftol:      float - convergence on max|force| (L_inf) in kcal/mol/A
+		ftol:      float - convergence on max|force| (L_inf) in kJ/mol/A
 		dt_fs:     float - initial integrator step in femtoseconds
 		dt_max_fs: float - upper bound on the adaptive step in fs
 		step_max:  float - trust-region cap on |dt*v| per atom in Angstrom
-		etol:      float - energy-stall tolerance in kcal/mol
+		etol:      float - energy-stall tolerance in kJ/mol
 		stall_k:   int - consecutive stalled steps that trigger early stop
 		box:       None for no PBC; (3,) orthorhombic; (3, 3) triclinic
 	Returns:
 	--------
-		tuple: (float, dict) - final energy in kcal/mol and per-step log
+		tuple: (float, dict) - final energy in kJ/mol and per-step log
 	'''
 	if ff is None: ff = ForceField()
 	N_MIN, F_INC, F_DEC, A_START, F_ALPHA = 5, 1.1, 0.5, 0.1, 0.99
-	AKMA_FS = 48.88821291
+	AKMA_FS = 23.91888086
 	atoms = pose.data['Atoms']
 	m = np.array([pose.masses[atoms[i][1]] for i in sorted(atoms)],
 		dtype=np.float64)[:, None]
@@ -1958,12 +1958,11 @@ def Anneal(pose, ff=None, n_steps=10000, T_start=2000.0, T_end=10.0,
 	rng = np.random.default_rng(seed)
 	res_ids = np.array(sorted(pose.data['Amino Acids']), dtype=np.int64)
 	n_res = len(res_ids)
-	kB = 1.987204259e-3
+	kB = 8.31446262e-3
 	T_arr = T_start * (T_end / T_start) ** (
 		np.arange(n_steps) / max(n_steps - 1, 1))
 	res_arr   = res_ids[rng.integers(0, n_res, size=n_steps)]
-	kind_arr  = np.where(rng.integers(0, 2, size=n_steps) == 0,
-		'PHI', 'PSI')
+	kind_arr  = np.where(rng.integers(0, 2, size=n_steps) == 0, 'PHI', 'PSI')
 	shear_arr = rng.random(size=n_steps) < p_shear
 	large_arr = rng.random(size=n_steps) < p_large
 	noise_arr = rng.standard_normal(size=n_steps)
@@ -2068,7 +2067,7 @@ def Pack(pose, score=None, ff=None, n_steps=2000, T_start=10.0, T_end=0.1,
 		score:   Score - reusable; built from `ff` if None
 		ff:      ForceField - used only when `score` is None
 		n_steps: int - max number of SA proposals
-		T_start: float - initial temperature (in score units, typically kcal/mol)
+		T_start: float - initial temperature (in score units, typically kJ/mol)
 		T_end:   float - final temperature
 		patience:int - early-exit if no acceptance in this many consecutive steps
 		seed:    int or None - RNG seed for reproducibility
@@ -2229,8 +2228,8 @@ def MolecularDynamics(pose, ff=None, n_steps=1000, dt_fs=2.0, T=300.0,
 	m_col = m[:, None]
 	inv_m = 1.0 / m
 	inv_m_col = inv_m[:, None]
-	AKMA_FS = 48.88821291
-	kB = 1.987204259e-3
+	AKMA_FS = 23.91888086
+	kB = 8.31446262e-3
 	dt = float(dt_fs) / AKMA_FS
 	gamma = float(friction_ps) * AKMA_FS / 1000.0
 	c1 = math.exp(-gamma * dt)
