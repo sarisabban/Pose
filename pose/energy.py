@@ -3,6 +3,7 @@ import json
 import math
 import copy
 import base64
+import warnings
 import numpy as np
 from .pose import DBLoad
 
@@ -17,7 +18,7 @@ def SMIRKSMatch(pose, params):
 			LibraryCharges keys (typically ForceField.mol)
 	Returns:
 	--------
-		dict: keyed assignments consumed by ForceField._compile_mol:
+		dict: keyed assignments consumed by ForceField._compile:
 			'bonds':     {(i, j):       [length, k]} per pair
 			'angles':    {(i, j, k):    [angle, k]} per triplet
 			'propers':   {(i, j, k, l): [[period, phase, k, idivf], ...]}
@@ -25,7 +26,6 @@ def SMIRKSMatch(pose, params):
 			'vdw':       {i: [epsilon, sigma]} (rmin_half pre-converted)
 			'charges':   {i: charge or None} (None = needs Gasteiger fallback)
 	'''
-	# ============== molecule features (read once) ===============
 	Z_TABLE = {
 		'H':1,'He':2,'Li':3,'Be':4,'B':5,'C':6,'N':7,'O':8,'F':9,'Ne':10,
 		'Na':11,'Mg':12,'Al':13,'Si':14,'P':15,'S':16,'Cl':17,'Ar':18,
@@ -37,7 +37,6 @@ def SMIRKSMatch(pose, params):
 	bond_orders = pose.data.get('BondOrders', {}) or {}
 	formal_charges = getattr(pose, '_formal_charges', {}) or {}
 	sorted_ids = sorted(atoms.keys())
-	# canonical neighbour list (de-duplicate symmetric edges in Bonds)
 	nbr = {i: [] for i in sorted_ids}
 	for i in sorted_ids:
 		for j in bonds_dict.get(i, []):
@@ -49,7 +48,6 @@ def SMIRKSMatch(pose, params):
 			edges.add((min(i, j), max(i, j)))
 	edges = sorted(edges)
 	edge_set = set(edges)
-	# canonical bond-order lookup
 	bo = {}
 	for i in sorted_ids:
 		bos = bond_orders.get(i, [])
@@ -58,28 +56,16 @@ def SMIRKSMatch(pose, params):
 			if j not in atoms or j == i: continue
 			b = bos[k] if k < len(bos) else 1.0
 			bo[(min(i, j), max(i, j))] = float(b)
-	# atomic number, X (heavy+H connectivity), H count, formal charge
+	# Per-atom: atomic number, connectivity X, H count, formal charge
 	Z = {i: Z_TABLE.get(atoms[i][1].capitalize(), 0) for i in sorted_ids}
 	X = {i: len(nbr[i]) for i in sorted_ids}
 	Hc = {i: sum(1 for j in nbr[i] if atoms[j][1] == 'H')
 		for i in sorted_ids}
 	fc = {i: int(formal_charges.get(i, 0)) for i in sorted_ids}
-	# aromatic bond if its bond order is 1.5 OR the bond is part of a
-	# Kekulised aromatic ring. Many SDFs ship aromatic rings as
-	# alternating single/double bonds rather than 1.5 — without this
-	# perception, '[#6X3:1]:[#6X3:2]' (aromatic C-C, e.g. phenyl) would
-	# fail to match those bonds and the matcher would assign distinct
-	# Kekulé patterns to alternating ring bonds, producing wrong params.
-	# Heuristic (Hückel-style first pass, sufficient for our test set):
-	# any ring of size 5 or 6 in which every atom is sp2 AND the ring
-	# contains at least one in-ring double bond is aromatic; mark all
-	# its ring bonds as aromatic (bo == 1.5) for matching purposes.
+	# is_arom_bond initial state from raw bond orders; updated post-Kekulisation
 	is_arom_bond = {e: (abs(bo.get(e, 1.0) - 1.5) < 1e-6) for e in edges}
-	# (Aromaticity perception via the rings list is computed below, after
-	# find_rings(); we update is_arom_bond there.)
 	is_arom_atom = {i: any(is_arom_bond.get((min(i, j), max(i, j)), False)
 		for j in nbr[i]) for i in sorted_ids}
-	# ============== ring perception (SSSR via shortest cycles) ==
 	def find_rings():
 		'''
 		Smallest set of smallest rings via per-edge BFS shortest cycle
@@ -93,7 +79,6 @@ def SMIRKSMatch(pose, params):
 		rings_seen = set()
 		out = []
 		for u, v in edges:
-			# shortest path from u to v that does NOT use edge (u, v)
 			parent = {u: None}
 			q = [u]
 			while q:
@@ -110,14 +95,13 @@ def SMIRKSMatch(pose, params):
 					if not q: break
 				q = nq
 			if v not in parent: continue
-			# reconstruct path v <- ... <- u
 			path = [v]
 			cur = v
 			while parent[cur] is not None:
 				cur = parent[cur]
 				path.append(cur)
 			ring = tuple(path)
-			# canonicalise: rotate so smallest atom first, then orient
+			# Canonicalise: rotate so smallest atom is first, pick lex-min orientation
 			mn = min(ring)
 			i0 = ring.index(mn)
 			rotated = ring[i0:] + ring[:i0]
@@ -129,30 +113,148 @@ def SMIRKSMatch(pose, params):
 			out.append(canon)
 		return out
 	rings = find_rings()
-	# === aromaticity perception (Hückel-style first pass) ===
-	# For each SSSR ring of size 5 or 6 with all sp2 atoms and at least
-	# one in-ring double bond, mark all in-ring bonds as aromatic. This
-	# handles phenyl/phenol/imidazole/etc. where SDFs ship Kekulé form.
 	def hyb_of(rec): return rec[-1] if rec else 'sp3'
-	for r in rings:
-		L = len(r)
-		if L not in (5, 6): continue
-		if not all(hyb_of(atoms[a]) == 'sp2' for a in r): continue
-		ring_edges = [(min(r[k], r[(k+1) % L]),
-			max(r[k], r[(k+1) % L])) for k in range(L)]
-		has_double = any(abs(bo.get(e, 1.0) - 2.0) < 0.1 for e in ring_edges)
-		if not has_double: continue
-		for e in ring_edges:
-			bo[e] = 1.5
-			is_arom_bond[e] = True
-	# Recompute is_arom_atom now that bonds may have been re-flagged
+	def kekulise():
+		'''
+		Find a valid Kekulé assignment for all 1.5-order bonds via
+		constraint propagation and DFS backtracking. Operates per
+		connected-component of candidate bonds — solvable components
+		(amides, aromatic rings) get a chemically valid assignment;
+		unsolvable ones (carboxylate / guanidinium without explicit
+		formal charges) fall back to "non-ring 1.5 -> 1.0" heuristic
+		for that component only.
+		Arguments:
+		----------
+			No arguments taken (closes over bo, edges, nbr, atoms, fc)
+		Returns:
+		--------
+			None: bo is mutated in place
+		'''
+		VAL = {'C':4,'N':3,'O':2,'S':2,'P':5,'Se':2,
+			'F':1,'Cl':1,'Br':1,'I':1,'H':1,'B':3}
+		all_candidates = sorted(e for e in edges
+			if abs(bo.get(e, 1.0) - 1.5) < 1e-6)
+		if not all_candidates: return
+		all_cand_set = set(all_candidates)
+		# Group candidates into connected components (sharing atoms)
+		atom_to_cands = {}
+		for e in all_candidates:
+			atom_to_cands.setdefault(e[0], []).append(e)
+			atom_to_cands.setdefault(e[1], []).append(e)
+		seen_edges = set()
+		components = []
+		for start in all_candidates:
+			if start in seen_edges: continue
+			comp = []; queue = [start]; seen_edges.add(start)
+			while queue:
+				e = queue.pop()
+				comp.append(e)
+				for atom in (e[0], e[1]):
+					for nbr_e in atom_to_cands.get(atom, []):
+						if nbr_e in seen_edges: continue
+						seen_edges.add(nbr_e); queue.append(nbr_e)
+			components.append(sorted(comp))
+		# Mark in-ring candidates so the heuristic fallback knows what to skip
+		in_ring_cand = set()
+		for r in rings:
+			L = len(r)
+			for k in range(L):
+				a, b = r[k], r[(k + 1) % L]
+				e = (min(a, b), max(a, b))
+				if e in all_cand_set: in_ring_cand.add(e)
+		for comp in components:
+			cand_set = set(comp)
+			touched = set()
+			for (a, b) in comp:
+				touched.add(a); touched.add(b)
+			budget = {}
+			atom_cands = {a: [] for a in touched}
+			for ci, e in enumerate(comp):
+				atom_cands[e[0]].append(ci)
+				atom_cands[e[1]].append(ci)
+			ok = True
+			for a in touched:
+				elem = atoms[a][1]
+				if elem not in VAL: ok = False; break
+				v = VAL[elem] + fc.get(a, 0)
+				for j in nbr[a]:
+					e = (min(a, j), max(a, j))
+					if e in cand_set: continue
+					v -= bo.get(e, 1.0)
+				n_cands = len(atom_cands[a])
+				v -= n_cands
+				budget[a] = int(round(v))
+				if budget[a] < 0 or budget[a] > n_cands:
+					ok = False; break
+			if ok:
+				assn = [-1] * len(comp)
+				def doubles_seen(a, comp_assn):
+					return sum(1 for ci in atom_cands[a] if comp_assn[ci] == 2)
+				def remaining(a, comp_assn):
+					return [ci for ci in atom_cands[a] if comp_assn[ci] == -1]
+				def propagate(comp_assn):
+					changed = True
+					while changed:
+						changed = False
+						for a in touched:
+							rem = remaining(a, comp_assn)
+							need = budget[a] - doubles_seen(a, comp_assn)
+							if need < 0 or need > len(rem): return False
+							if need == 0 and rem:
+								for ci in rem: comp_assn[ci] = 1
+								changed = True
+							elif need == len(rem) and rem:
+								for ci in rem: comp_assn[ci] = 2
+								changed = True
+					return True
+				def dfs(comp_assn):
+					if not propagate(comp_assn): return False
+					una = [ci for ci in range(len(comp)) if comp_assn[ci] == -1]
+					if not una: return True
+					ci = una[0]
+					for v in (2, 1):
+						saved = list(comp_assn)
+						comp_assn[ci] = v
+						if dfs(comp_assn): return True
+						for k in range(len(comp_assn)): comp_assn[k] = saved[k]
+					return False
+				if dfs(assn):
+					for ci, e in enumerate(comp):
+						bo[e] = 2.0 if assn[ci] == 2 else 1.0
+					continue
+			# Fallback: non-ring 1.5 -> 1.0; ring 1.5 handled by aromatise_rings
+			for e in comp:
+				if e not in in_ring_cand:
+					bo[e] = 1.0
+	def aromatise_rings():
+		'''
+		Re-mark Kekulé aromatic ring bonds as bo=1.5 for SMIRKS ':' matching
+		Arguments:
+		----------
+			No arguments taken (closes over rings, atoms, bo)
+		Returns:
+		--------
+			None: bo is mutated in place
+		'''
+		for r in rings:
+			L = len(r)
+			if L not in (5, 6): continue
+			if not all(hyb_of(atoms[a]) == 'sp2' for a in r): continue
+			ring_edges = [(min(r[k], r[(k+1) % L]),
+				max(r[k], r[(k+1) % L])) for k in range(L)]
+			has_pi = any(abs(bo.get(e, 1.0) - 2.0) < 0.1
+				or abs(bo.get(e, 1.0) - 1.5) < 0.1 for e in ring_edges)
+			if not has_pi: continue
+			for e in ring_edges:
+				bo[e] = 1.5
+				is_arom_bond[e] = True
+	kekulise()
+	aromatise_rings()
+	# Resync after kekulise+aromatise (initial bo state is stale)
+	is_arom_bond = {e: (abs(bo.get(e, 1.0) - 1.5) < 1e-6) for e in edges}
 	is_arom_atom = {i: any(is_arom_bond.get((min(i, j), max(i, j)), False)
 		for j in nbr[i]) for i in sorted_ids}
-	# per-atom ring sizes set; per-bond in-ring flag; ring-connectivity x.
-	# Note on SMARTS 'r<n>' semantic: per Daylight/RDKit, '[*;r<n>]' matches
-	# only atoms whose SMALLEST ring has size n, not any atom in *some* ring
-	# of size n. We expose both: ring_sizes_at[i] (full set, used by 'R'
-	# and 'r' no-number) and min_ring_size[i] (used by 'r<n>').
+	# SMARTS r<n> is "smallest ring is size n"; R alone is "in any ring"
 	ring_sizes_at = {i: set() for i in sorted_ids}
 	for r in rings:
 		for a in r: ring_sizes_at[a].add(len(r))
@@ -164,10 +266,8 @@ def SMIRKSMatch(pose, params):
 		for k in range(L):
 			a, b = r[k], r[(k + 1) % L]
 			in_ring_bond.add((min(a, b), max(a, b)))
-	# x = number of ring-atom neighbours
 	x_count = {i: sum(1 for j in nbr[i] if ring_sizes_at[j])
 		for i in sorted_ids}
-	# ============== SMIRKS parser (tokenize + recursive descent) =
 	def parse(smirks):
 		'''
 		Parse a SMIRKS string into an internal pattern graph
@@ -191,8 +291,7 @@ def SMIRKSMatch(pose, params):
 			start = pos[0]
 			while pos[0] < len(s) and s[pos[0]].isdigit(): pos[0] += 1
 			return int(s[start:pos[0]]) if pos[0] > start else None
-		# atom-expr: parse until ']' (or ':' for tag)
-		# precedence (low->high): ';' , ',' , '&' (implicit too), '!'
+		# atom-expr (until ']' or ':'); precedence low->high: ';' ',' '&' '!'
 		def atom_expr():
 			# parse low-prec AND chain
 			left = atom_or()
@@ -269,8 +368,7 @@ def SMIRKSMatch(pose, params):
 					pos[0] += 1
 				sub = s[start:pos[0] - 1]
 				return ('recurse', sub)
-			# Plain element symbol (uppercase optionally followed by lowercase)
-			# Not used by Sage 2.3.0 SMIRKS but kept defensively.
+			# Plain element symbol (defensive; not used by Sage 2.3.0 SMIRKS)
 			if c.isupper():
 				name = c; pos[0] += 1
 				if peek().islower(): name += peek(); pos[0] += 1
@@ -295,9 +393,7 @@ def SMIRKSMatch(pose, params):
 			return left
 		def bond_and():
 			left = bond_neg()
-			# Explicit '&' AND, plus implicit AND when an adjacent bond
-			# primitive appears (e.g. '@-' = in-ring AND single-bond,
-			# '~!@' = any AND not-in-ring).
+			# Explicit '&' AND, plus implicit AND between adjacent bond primitives
 			while peek() in ('&', '-', '=', '#', ':', '~', '@', '!'):
 				if peek() == '&': pos[0] += 1
 				right = bond_neg()
@@ -325,8 +421,7 @@ def SMIRKSMatch(pose, params):
 		tags = {}
 		ring_open = {}  # closure_digit -> (atom_idx, bond_expr_or_None)
 		def parse_atom():
-			# Bare atom forms (used inside recursion sub-patterns):
-			#   '*' = wildcard; 'C'/'N'/'O'/'Cl'/... = element-only
+			# Bare atom forms inside recursion: '*' = wildcard; element symbols
 			c = peek()
 			if c != '[':
 				if c == '*':
@@ -382,8 +477,7 @@ def SMIRKSMatch(pose, params):
 					a_idx = parse_atom()
 					bond_list.append((prev_idx, a_idx, ('bo', 1.0)))
 					prev_idx = a_idx; continue
-				# Bare ring-closure digit immediately after an atom
-				# (e.g. '[*;r5:1]1...~1') — default bond '-'.
+				# Bare ring-closure digit after atom (e.g. '[*]1...~1'); default bond '-'
 				if c.isdigit() or c == '%':
 					if c == '%':
 						pos[0] += 1
@@ -462,10 +556,7 @@ def SMIRKSMatch(pose, params):
 		if k == 'or':     return eval_atom(expr[1], i) or  eval_atom(expr[2], i)
 		if k == 'not':    return not eval_atom(expr[1], i)
 		if k == 'recurse':
-			# the recursive sub-pattern is rooted at atom i; the matcher
-			# anchors tag :1 (or atom 0 if no tags) to i and checks for
-			# any extension. To avoid infinite recursion the cache below
-			# memoises (sub, i).
+			# Recursive sub-pattern rooted at i, anchored on tag :1; (sub, i) memoised
 			key = (expr[1], i)
 			if key in recurse_cache: return recurse_cache[key]
 			recurse_cache[key] = False  # tentative, in case of self-cycle
@@ -591,7 +682,7 @@ def SMIRKSMatch(pose, params):
 				used.discard(cand); mapping[p] = -1
 		go(0)
 		return results
-	# ============== assignment (last match wins) =================
+	# Assignment dict — last-match-wins per pattern
 	out = {'bonds': {}, 'angles': {}, 'propers': {}, 'impropers': [],
 		'vdw': {}, 'charges': {i: None for i in sorted_ids},
 		'constraints': set()}
@@ -599,11 +690,7 @@ def SMIRKSMatch(pose, params):
 	def get(smirks):
 		if smirks not in parsed: parsed[smirks] = parse(smirks)
 		return parsed[smirks]
-	# Constraints: each match becomes a (sorted) atom-pair flagged as
-	# rigid. Sage 2.3.0 constrains every X-H bond via the
-	# '[#1:1]-[*:2]' SMIRKS, which means those bonds contribute zero to
-	# the harmonic bond energy (they're rigid in MD via SHAKE/RATTLE).
-	# We collect them here for _compile_mol to zero their K_b.
+	# Constraints: rigid X-H bonds (SHAKE/RATTLE in MD; zero bond energy)
 	for sm, par in params.get('Constraints', {}).items():
 		try: pat = get(sm)
 		except Exception: continue
@@ -611,7 +698,6 @@ def SMIRKSMatch(pose, params):
 			if len(tup) >= 2:
 				a, b = int(tup[0]), int(tup[1])
 				out['constraints'].add((min(a, b), max(a, b)))
-	# Bonds: tag tuples (a, b)
 	for sm, par in params.get('Bonds', {}).items():
 		try: pat = get(sm)
 		except Exception: continue
@@ -620,7 +706,7 @@ def SMIRKSMatch(pose, params):
 			i, j = sorted(tup)
 			if (i, j) in edge_set:
 				out['bonds'][(i, j)] = [par['length'], par['k']]
-	# Angles: (a, b, c) where b is centre
+	# Angles: tag :2 is the centre atom
 	for sm, par in params.get('Angles', {}).items():
 		try: pat = get(sm)
 		except Exception: continue
@@ -631,7 +717,6 @@ def SMIRKSMatch(pose, params):
 				(min(j, k), max(j, k)) in edge_set:
 				ii, kk = (i, k) if i < k else (k, i)
 				out['angles'][(ii, j, kk)] = [par['angle'], par['k']]
-	# ProperTorsions: (a, b, c, d)
 	for sm, par in params.get('ProperTorsions', {}).items():
 		try: pat = get(sm)
 		except Exception: continue
@@ -646,30 +731,24 @@ def SMIRKSMatch(pose, params):
 				[c['periodicity'], c['phase'], c['k'],
 					c.get('idivf', 1.0)]
 				for c in par['components']]
-	# ImproperTorsions: tag :2 is the central atom; trefoil = 3 cyclic
-	# permutations of the outer atoms (a1, a3, a4).
-	# Storage convention: SMIRNOFF/OpenMM put the centre at position [0]
-	# and evaluate the 4-atom dihedral with axis = outer_a-outer_b.
-	# Hierarchy: SMIRNOFF impropers are LAST-MATCH-WINS per central atom
-	# (NOT additive). We track entries by central-atom index and let later
-	# patterns overwrite earlier ones.
+	# Impropers: tag :2 is centre; trefoil = 3 cyclic outer perms; centre stored at tup[0]
 	imp_by_centre = {}
 	for sm, par in params.get('ImproperTorsions', {}).items():
 		try: pat = get(sm)
 		except Exception: continue
 		for tup in match(pat):
 			if len(tup) != 4: continue
-			a1, a2, a3, a4 = tup  # tag order :1, :2, :3, :4 (a2 = centre)
+			a1, a2, a3, a4 = tup
 			perms = [(a1, a3, a4), (a3, a4, a1), (a4, a1, a3)]
 			entries = []
 			for o1, o2, o3 in perms:
 				for c in par['components']:
 					entries.append((a2, o1, o2, o3,
 						c['periodicity'], c['phase'], c['k'] / 3.0))
-			imp_by_centre[a2] = entries  # overwrite (last match wins)
+			imp_by_centre[a2] = entries
 	for entries in imp_by_centre.values():
 		out['impropers'].extend(entries)
-	# vdW: per-atom (eps, sigma); convert rmin_half to sigma
+	# vdW: per-atom (eps, sigma); convert rmin_half->sigma if rmin_half provided
 	rmin2sig = 2.0 / (2.0 ** (1.0 / 6.0))
 	for sm, par in params.get('vdW', {}).items():
 		try: pat = get(sm)
@@ -681,7 +760,6 @@ def SMIRKSMatch(pose, params):
 			if 'sigma' in par: sig = par['sigma']
 			else: sig = par['rmin_half'] * rmin2sig
 			out['vdw'][i] = [eps, sig]
-	# LibraryCharges: literal partial charges per tagged atom
 	for sm, par in params.get('LibraryCharges', {}).items():
 		try: pat = get(sm)
 		except Exception: continue
@@ -695,16 +773,20 @@ class ForceField():
 	'''
 	Configurable molecular mechanics force field assembled from energy terms
 	'''
-	def __init__(self, terms=None):
+	def __init__(self, terms=None, strict=False):
 		'''
 		Initialise the force field with a chosen set of energy terms
 		Arguments:
 		----------
-			terms: list of (method_name, kwargs) tuples; None uses the default
+			terms:  list of (method_name, kwargs) tuples; None uses the default
+			strict: if True, raise RuntimeError on any SMIRKS coverage gap
+				(unmatched bond/angle/torsion/improper centre/atom). If
+				False (default), warn but continue with K=0 fall-through.
 		Returns:
 		--------
 			None: instance is configured in-place
 		'''
+		self.strict = strict
 		self.DEFAULT_TERMS = [
 			('BondPotential',          {'alg': 'harmonic'}),
 			('AnglePotential',         {}),
@@ -725,22 +807,12 @@ class ForceField():
 		self._user_terms = terms
 		self.terms = terms if terms is not None else self.DEFAULT_TERMS
 		P = dict(DBLoad()['Energy Parameters'])
-		# Force-field parameters live at the top level of Energy Parameters
-		# (Constraints/Bonds/Angles/ProperTorsions/ImproperTorsions/vdW/
-		# Electrostatic — the last formerly LibraryCharges). All
-		# energy-dim values are stored in kJ/mol (pre-converted from the
-		# offxml's kcal/mol at extraction time by convert_offxml.py).
-		# Bonds and Angles still need a 0.5 absorption here: the FF's
-		# convention is E = (1/2)k(x-x0)^2 but Pose's evaluators use the
-		# no-1/2 form E = K(x-x0)^2.
-		# Mutates a *copy* so DBLoad's cache stays clean.
 		MOL_KEYS = ('Constraints', 'Bonds', 'Angles', 'ProperTorsions',
 			'ImproperTorsions', 'vdW', 'Electrostatic')
 		ff = {k: copy.deepcopy(P[k]) for k in MOL_KEYS if k in P}
-		# 'Electrostatic' is what 'LibraryCharges' was renamed to; SMIRKSMatch
-		# still expects key 'LibraryCharges' internally so alias here.
 		if 'Electrostatic' in ff:
 			ff['LibraryCharges'] = ff['Electrostatic']
+		# Absorb the upstream 1/2 factor (FF: E = 0.5 k (x-x0)^2; Pose: E = K (x-x0)^2)
 		for sm, par in ff.get('Bonds', {}).items():
 			par['k'] = par['k'] * 0.5
 		for sm, par in ff.get('Angles', {}).items():
@@ -783,10 +855,10 @@ class ForceField():
 		return (E, F) if grad else E
 	def _prepare(self, pose):
 		'''
-		Compile and store topology + parameter arrays for the given pose
+		Compile the topology+parameter cache and store its hash on self
 		Arguments:
 		----------
-			pose: Pose - molecule source protein, DNA, RNA, or Molecule pose
+			pose: Pose - any pose (Molecule, Protein, DNA, RNA)
 		Returns:
 		--------
 			None: cache and cache hash are stored on the instance
@@ -815,29 +887,17 @@ class ForceField():
 		return hash((bonds_key, atoms_key, aas_key))
 	def _compile(self, pose):
 		'''
-		Build the topology and parameter cache for any pose via SMIRKS
+		SMIRKS-driven topology + parameter cache for any pose
 		Arguments:
 		----------
-			pose: Pose - molecule source pose
+			pose: Pose - molecule, protein, DNA, or RNA pose
 		Returns:
 		--------
-			dict: cache of topology + parameter arrays consumed by every term
-		'''
-		return self._compile_mol(pose)
-	def _compile_mol(self, pose):
-		'''
-		SMIRKS-driven topology + parameter cache for Molecule poses
-		Arguments:
-		----------
-			pose: Pose - molecule pose (data['Type'] == 'Molecule')
-		Returns:
-		--------
-			dict: cache consumed by the MOL_TERMS subset of potentials
+			dict: cache consumed by every potential method
 		'''
 		atoms = pose.data['Atoms']
 		n = len(atoms)
 		cache = {'n': n}
-		# bond enumeration (same logic as legacy)
 		idx = np.array([(int(k), int(j))
 			for k, vs in pose.data['Bonds'].items()
 			for j in vs], dtype=np.int64).reshape(-1, 2)
@@ -880,14 +940,58 @@ class ForceField():
 			excl_14 = np.unique(
 				excl_14[excl_14[:, 0] != excl_14[:, 1]], axis=0)
 		cache['excl_14'] = excl_14
-		# SMIRKS-driven parameter assignment
 		assigns = SMIRKSMatch(pose, self.mol)
-		# Bond params: harmonic (length, k); fall back to zero if missing.
-		# Bonds matched by a Constraints SMIRKS (e.g. all X-H under Sage
-		# 2.3.0's '[#1:1]-[*:2]') get K_b = 0 because the FF treats them
-		# as rigid distance constraints (SHAKE/RATTLE in MD; zero bond
-		# energy contribution in single-point evaluation). This is what
-		# makes Pose match OpenMM's energies bit-exact.
+		# Coverage check: warn (or raise if strict) on any unmatched fragment
+		atoms_set = set(pose.data['Atoms'].keys())
+		bonds_dict = pose.data['Bonds']
+		nbr_local = {i: [j for j in bonds_dict.get(i, [])
+			if j in atoms_set and j != i] for i in atoms_set}
+		gaps = []
+		for i in atoms_set:
+			for j in nbr_local[i]:
+				if i >= j: continue
+				if (int(i), int(j)) not in assigns['bonds']:
+					gaps.append(f'bond ({i}, {j})')
+		matched_angles = {(min(t[0], t[2]), t[1], max(t[0], t[2]))
+			for t in assigns['angles']}
+		for j in atoms_set:
+			ns = nbr_local[j]
+			for x in range(len(ns)):
+				for y in range(x + 1, len(ns)):
+					i, k = ns[x], ns[y]
+					tup = (min(i, k), j, max(i, k))
+					if tup not in matched_angles:
+						gaps.append(f'angle ({i}, {j}, {k})')
+		matched_propers = set()
+		for tup in assigns['propers']:
+			ti, tj, tk, tl = tup
+			matched_propers.add((ti, tj, tk, tl) if tj < tk
+				else (tl, tk, tj, ti))
+		for i in atoms_set:
+			for j in nbr_local[i]:
+				if i >= j: continue
+				for x in nbr_local[i]:
+					if x == j: continue
+					for y in nbr_local[j]:
+						if y == i or y == x: continue
+						quad = (x, i, j, y) if i < j else (y, j, i, x)
+						if quad not in matched_propers:
+							gaps.append(f'torsion ({x}, {i}, {j}, {y})')
+		# OpenFF improper format: centre at tuple position 0
+		matched_centres = {tup[0] for tup in assigns['impropers']}
+		for c in atoms_set:
+			if len(nbr_local[c]) == 3 and c not in matched_centres:
+				gaps.append(f'improper centre {c}')
+		for i in atoms_set:
+			if assigns['vdw'].get(i) is None:
+				gaps.append(f'vdW atom {i}')
+		if gaps:
+			msg = (f'SMIRKS coverage gap: {len(gaps)} unmatched fragment(s) '
+				f'fall through to K = 0. First few: {gaps[:5]}')
+			if self.strict:
+				raise RuntimeError(msg)
+			warnings.warn(msg, RuntimeWarning, stacklevel=3)
+		# Bonds tagged Constraints (e.g. all X-H) get K_b = 0; rigid in MD via SHAKE
 		constraints = assigns.get('constraints', set())
 		bond_Kb = np.zeros(len(pairs)); bond_r0 = np.zeros(len(pairs))
 		for p, (a, b) in enumerate(pairs):
@@ -900,7 +1004,7 @@ class ForceField():
 		cache['bond_r0'] = bond_r0
 		cache['bond_De'] = np.zeros(len(pairs))
 		cache['bond_a']  = np.zeros(len(pairs))
-		# angle params: zero defaults if missing; UB zero (Sage has none)
+		# Angle params; UB defaults to zero (Sage has none)
 		triplets = cache['triplets']
 		angle_Kt = np.zeros(len(triplets))
 		angle_t0 = np.zeros(len(triplets))
@@ -914,7 +1018,7 @@ class ForceField():
 		cache['angle_theta0']  = np.deg2rad(angle_t0)
 		cache['ub_K_ub']       = np.zeros(len(triplets))
 		cache['ub_s0']         = np.zeros(len(triplets))
-		# proper torsion params (variable component count per quartet)
+		# Proper torsion params (variable component count per quartet)
 		comp_lists = []
 		for q in cache['quartets']:
 			i, j, k, l = (int(q[0]), int(q[1]), int(q[2]), int(q[3]))
@@ -937,7 +1041,7 @@ class ForceField():
 			if len(flat_p) else np.zeros(0))
 		cache['dihedral_idivf']  = (flat_p[:, 3] if len(flat_p)
 			else np.ones(0))
-		# improper torsions: pre-expanded trefoil list from SMIRKSMatch
+		# Improper torsions (trefoil-expanded by SMIRKSMatch)
 		imps = assigns['impropers']
 		imp_arr = (np.array([(t[0], t[1], t[2], t[3]) for t in imps],
 			dtype=np.int64).reshape(-1, 4) if imps
@@ -949,7 +1053,7 @@ class ForceField():
 			dtype=np.float64) if imps else np.zeros(0)
 		cache['imp_psi0'] = (np.deg2rad(np.array([t[5] for t in imps],
 			dtype=np.float64)) if imps else np.zeros(0))
-		# LJ per-atom; missing falls back to zeros (atom contributes nothing)
+		# LJ per-atom; missing falls back to zeros
 		sig = np.zeros(n); eps = np.zeros(n)
 		for i in range(n):
 			par = assigns['vdw'].get(i)
@@ -960,14 +1064,7 @@ class ForceField():
 		cache['lj_alpha']  = np.zeros(n)
 		cache['lj_sigma']  = 0.5 * (sig[:, None] + sig[None, :])
 		cache['lj_eps_ij'] = np.sqrt(eps[:, None] * eps[None, :])
-		# Charges. Priority:
-		#   1. LibraryCharges SMIRKS match (water, ions, Xe) -> literal.
-		#   2. NAGL AM1-BCC: NumPy reimpl of the AM1-BCC graph-NN model's
-		#      forward pass; weights live in database.json. Bit-equivalent
-		#      to NAGL float32 inference. Already enforces sum(q) = Q via
-		#      its electronegativity-equalisation step.
-		#   3. Bare Gasteiger (whatever was set during Import) — used only
-		#      if NAGL fails (e.g. weights missing from database).
+		# Charges priority: LibraryCharges -> NAGL AM1-BCC -> Gasteiger fallback
 		try: nagl_q = self.NAGLCharges(pose)
 		except Exception: nagl_q = None
 		q = np.zeros(n, dtype=np.float64)
@@ -985,7 +1082,7 @@ class ForceField():
 			if n > 0: q += (Q - float(q.sum())) / n
 		cache['charges'] = q
 		cache['qq']      = q[:, None] * q[None, :]
-		# exclusion masks (1-2, 1-3, 1-4 scaling)
+		# Exclusion masks (1-2, 1-3, 1-4 scaling)
 		excl = np.eye(n, dtype=bool)
 		if len(pairs):
 			excl[pairs[:, 0], pairs[:, 1]] = True
@@ -1028,7 +1125,6 @@ class ForceField():
 				elementary charge units, summing to the molecule's total
 				formal charge. Bit-equivalent to NAGL float32 inference.
 		'''
-		# === fetch model weights from database ===
 		nagl = (DBLoad()['Energy Parameters'].get('AM1BCC') or {})
 		if 'gcn_layers' not in nagl or 'readout' not in nagl:
 			raise RuntimeError(
@@ -1040,15 +1136,12 @@ class ForceField():
 		n = len(sorted_ids)
 		if n == 0:
 			return np.zeros(1, dtype=np.float64)
-		# === build neighbour list ===
 		nbr = {i: [] for i in sorted_ids}
 		for i in sorted_ids:
 			for j in bonds.get(i, []):
 				if j in atoms and j != i and j not in nbr[i]:
 					nbr[i].append(j)
-		# === ring perception (SSSR per-edge BFS shortest cycle) ===
-		# Duplicates SMIRKSMatch.find_rings to keep this function self-contained
-		# (per CLAUDE.md: no shared helpers across free functions).
+		# Duplicates SMIRKSMatch.find_rings (CLAUDE.md: no shared helpers)
 		def find_rings():
 			'''
 			SSSR via shortest cycle per edge
@@ -1087,43 +1180,30 @@ class ForceField():
 				seen.add(canon); out.append(canon)
 			return out
 		rings = find_rings()
-		# in_ring_sizes[i] = set of all ring sizes containing atom i. Note:
-		# NAGL uses RDKit's IsInRingSize(N) = "in ANY ring of size N", which
-		# is NOT the same as SMARTS [*;rN] = "smallest ring is size N". For
-		# atoms at fused ring junctions (e.g. caffeine's bicycle: atoms in
-		# both 5-ring and 6-ring) both r5 and r6 flags are set under NAGL.
+		# NAGL semantics: ANY-ring-of-size-N (fused atoms get multiple flags)
 		in_ring_sizes = {i: set() for i in sorted_ids}
 		for r in rings:
 			for a in r: in_ring_sizes[a].add(len(r))
-		# === featurise: (N, 22) ===
-		# Element index map MUST match NAGL's training-time order exactly:
-		# C, O, H, N, S, F, Br, Cl, I, P (verified-from NAGL 0.5.5
-		# atoms.py:86-93). Atoms outside this set get a zero feature vector.
+		# Element order MUST match NAGL 0.5.5 training-time order (atoms.py:86-93)
 		ELEM_IDX = {'C':0,'O':1,'H':2,'N':3,'S':4,'F':5,
 			'Br':6,'Cl':7,'I':8,'P':9}
 		fc_dict = getattr(pose, '_formal_charges', {}) or {}
 		h = np.zeros((n, 22), dtype=np.float32)
 		for k, i in enumerate(sorted_ids):
 			elem = atoms[i][1]
-			# Element one-hot (10 dims)
 			if elem in ELEM_IDX:
 				h[k, ELEM_IDX[elem]] = 1.0
-			# Connectivity one-hot (7 dims, indices 10..16)
 			deg = len(nbr[i])
 			if 0 <= deg <= 6:
 				h[k, 10 + deg] = 1.0
-			# Formal charge (1 dim, index 17). NAGL averages over RDKit
-			# resonance forms; we substitute the single input form.
+			# Single-form formal charge (NAGL trained on RDKit resonance averages)
 			h[k, 17] = float(fc_dict.get(i, 0))
-			# Ring membership by ANY-ring-of-size-N (4 dims, 18..21).
-			# Per NAGL/RDKit IsInRingSize semantic: a fused-ring junction
-			# atom can have multiple flags set simultaneously.
 			rs = in_ring_sizes[i]
 			if 3 in rs: h[k, 18] = 1.0
 			if 4 in rs: h[k, 19] = 1.0
 			if 5 in rs: h[k, 20] = 1.0
 			if 6 in rs: h[k, 21] = 1.0
-		# === build row-normalised mean adjacency: A_mean[i][j] = 1/deg(i) ===
+		# Row-normalised mean adjacency: A_mean[i][j] = 1/deg(i)
 		idx_of = {i: k for k, i in enumerate(sorted_ids)}
 		A_mean = np.zeros((n, n), dtype=np.float32)
 		for i in sorted_ids:
@@ -1132,10 +1212,7 @@ class ForceField():
 			inv = 1.0 / float(deg)
 			for j in nbr[i]:
 				A_mean[ki, idx_of[j]] = inv
-		# Weight tensors are stored as {"shape": [...], "data": "<base64>"}
-		# of raw float32 bytes. Decoder is bit-exact (raw IEEE 754 round-trip
-		# through tobytes/frombuffer/base64). Saves ~15 MB on database.json
-		# vs ASCII float lists; preserves NAGL float32 inference exactly.
+		# Tensors stored as {shape, base64(float32 bytes)}; bit-exact round-trip
 		def loadtensor(d):
 			'''
 			Decode a base64-encoded float32 tensor from database.json
@@ -1148,12 +1225,7 @@ class ForceField():
 			'''
 			raw = base64.b64decode(d['data'])
 			return np.frombuffer(raw, dtype=np.float32).reshape(d['shape'])
-		# === 6 SAGEConv layers ===
-		# Per layer: h_v^(k+1) = ReLU(W_self h_v + b_self + W_neigh mean(h_u))
-		# mean and linear commute, so we mean-aggregate first then transform.
-		# Apple-Silicon vecLib BLAS triggers spurious overflow/underflow
-		# warnings on these sparse-input matmuls; the numeric result is
-		# unaffected. Suppress for the duration of the forward pass.
+		# 6 SAGEConv layers; suppress vecLib BLAS spurious over/underflow on Apple-Silicon
 		with np.errstate(over='ignore', under='ignore', divide='ignore',
 				invalid='ignore'):
 			for layer in nagl['gcn_layers']:
@@ -1165,7 +1237,7 @@ class ForceField():
 				h_neigh_proj = h_avg @ W_neigh.T
 				h = h_self_proj + h_neigh_proj
 				np.maximum(h, 0, out=h)
-		# === readout MLP: Linear(512->128) -> Sigmoid -> Linear(128->3) ===
+		# Readout MLP: Linear(512->128) -> Sigmoid -> Linear(128->3)
 		W0 = loadtensor(nagl['readout']['linear_0_w'])
 		b0 = loadtensor(nagl['readout']['linear_0_b'])
 		W1 = loadtensor(nagl['readout']['linear_1_w'])
@@ -1175,10 +1247,7 @@ class ForceField():
 			z = h @ W0.T + b0
 			z = 1.0 / (1.0 + np.exp(-z))
 			pred = z @ W1.T + b1
-		# === charge equilibration (electronegativity-equalisation) ===
-		# pred columns: [charge_prior, electronegativity chi, hardness eta]
-		# q_final = q_prior - chi/eta - (1/eta)*(sum(q_prior) - Q_total
-		#                                      - sum(chi/eta)) / sum(1/eta)
+		# Electronegativity equalisation: q = q_prior - chi/eta - (1/eta)*phi/sum(1/eta)
 		q_prior = pred[:, 0].astype(np.float64)
 		chi     = pred[:, 1].astype(np.float64)
 		eta     = pred[:, 2].astype(np.float64)
