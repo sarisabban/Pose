@@ -67,8 +67,7 @@ def _validate_rot_entry(rot_entry, expected_tricode):
 	missing_rot = [k for k in REQUIRED_ROT if k not in rot]
 	if missing_rot:
 		raise ValueError(f'rotamers missing keys: {missing_rot}')
-	expect_cols = ([f'r{k+1}' for k in range(n_chi)]
-		+ ['count', 'prob']
+	expect_cols = (['count', 'prob']
 		+ [f'chi{k+1}' for k in range(n_chi)]
 		+ [f'sig{k+1}' for k in range(n_chi)])
 	if rot['columns'] != expect_cols:
@@ -106,7 +105,7 @@ def _clamp_sigmas(rot_entry, floor=0.5):
 		int : count of values clamped (informational only)
 	'''
 	n_chi = int(rot_entry['n_chi'])
-	sig_col0 = n_chi + 2 + n_chi
+	sig_col0 = 2 + n_chi
 	table = rot_entry['rotamers']['table']
 	n_clamped = 0
 	for row in table:
@@ -1838,9 +1837,9 @@ def Rotamers(index, pose):
 	rotlib = DBLoad().get('Rotamer Library')
 	n_chi, rows = _rotlib_lookup(rotlib, three, phi_q, psi_q)
 	if n_chi == 0 or not rows: return
-	# Find argmax_k by P_k.  Column layout: [r1..rN, count, prob, chi1..N, sig1..N]
-	prob_i = n_chi + 1
-	chi_i  = n_chi + 2
+	# Find argmax_k by P_k. Column layout: [count, prob, chi1..N, sig1..N]
+	prob_i = 1
+	chi_i  = 2
 	best   = max(rows, key=lambda row: row[prob_i])
 	for ci in range(n_chi):
 		mu = best[chi_i + ci]
@@ -2103,8 +2102,9 @@ def Pack(pose, score=None, ff=None, n_steps=2000, T_start=10.0, T_end=0.1,
 		psi_q = -psi if flip else psi
 		n_chi, rows = _rotlib_lookup(rotlib, three, phi_q, psi_q)
 		if n_chi == 0 or not rows: continue
-		prob_i = n_chi + 1
-		chi_i  = n_chi + 2
+		# Column layout: [count, prob, chi1..N, sig1..N]
+		prob_i = 1
+		chi_i  = 2
 		K = len(rows)
 		mus   = np.empty((K, n_chi), dtype=np.float64)
 		probs = np.empty(K,          dtype=np.float64)

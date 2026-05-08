@@ -24,7 +24,7 @@ Using this data structure, Pose can build and manipulate polypeptides and nuclei
 
 **Key features:**
 - Designed to be extremely stable bare-metal python: NumPy is the only dependency for the core `Pose` and `Molecule` classes
-- 26 amino acids supported by default (20 canonical + 6 non-canonical: LYX, MSE, PYL, SEC, TRF, TSO), can be extended to 100+
+- 26 amino acids supported by default (20 canonical + 6 non-canonical: ALY, MSE, TPO, SEC, TRF, PTR), can be extended to 100+
 - Support for both L-amino acids and D-amino acids (mixed sequences fully supported)
 - 5 DNA and RNA canonical nucleotides
 - Full bond graph with atom partial charges
@@ -35,7 +35,7 @@ Using this data structure, Pose can build and manipulate polypeptides and nuclei
 - Pythonic zero-based indexing throughout (unlike PDB's one-based convention)
 - Bundled bare-metal force field with analytic gradients, periodic-boundary support, and a hash-cached topology
 - Hybrid physics + statistical `Score()` for protein design — chirality-aware end to end across L-AA, D-AA, mixed L/D, and non-canonical residues
-- Four production protocols: minimisation, simulated annealing, rotamer sidechain packing, and molecular dynamics simulation
+- Three production protocols: minimisation, simulated annealing, and molecular dynamics simulation. (Rotamer sidechain packing is pending re-implementation alongside `Score()`.)
 
 ---
 
@@ -65,7 +65,6 @@ from pose import *
 # === Build a peptide (no external files needed) ===
 p = Pose()
 p.Build('MSLESNRGI', chain='A', fmt='Protein')   # Uppercase=L, lowercase=D
-p.Build('MSLESNRGI', chain='B', fmt='Protein')   # Add a second chain
 p.GetInfo()                                      # Print structured summary
 
 # === Inspect ===
@@ -83,21 +82,20 @@ p.Export('peptide.pdb')
 p_d = Pose()
 p_d.Build('MsLeSnRgI', chain='A', fmt='Protein') # mixed L/D — chirality-aware
 
-# === Energy, design score, and protocols ===
+# === Energy and protocols ===
 ff = ForceField()
-sf = Score()
 
-E, F        = ff(p)                              # potential energy + forces
-total       = sf(p)                              # design score (kJ/mol)
-total, term = sf(p, decompose=True)              # 8-term breakdown
+E           = ff(p)                              # potential energy (kJ/mol)
+E, F        = ff(p, grad=True)                   # also return per-atom forces
 
 E_min, log  = Minimise(p, ff)                    # FIRE2 relaxation
 E_md,  log  = MolecularDynamics(p, ff, n_steps=1000,
               dt_fs=2.0, T=300.0, thermostat='langevin')
-E_pk,  log  = Pack(p, score=sf)                  # rotamer packing ranked by Score
 ```
 
-> Uppercase sequence letters build L-amino acids (natural form), lowercase builds D-amino acids (mirror images), and mixed sequences (e.g. `'MsLeSnRgI'` above) are fully supported. `Score()` produces correct, chirality-aware values for them automatically — see the **Score** subsection in the API Reference for the per-term breakdown.
+> ⚠️ **`Score()` and `Pack()` are temporarily non-functional.** `Score.__init__` raises `NotImplementedError` because the database keys it consumed (`weights`, `ref_state`, `lk_solvation`, `hbond`, `kbp`, `rotamer`) were removed during the recent force-field refactor. `Pack()` depends on `Score()` and is therefore also broken. Both are pending migration to SMIRKS-driven score terms; the math and API surfaces below are preserved as developer reference.
+
+> Uppercase sequence letters build L-amino acids (natural form), lowercase builds D-amino acids (mirror images), and mixed sequences (e.g. `'MsLeSnRgI'` above) are fully supported.
 
 **Importing a PDB file:**
 ```python
@@ -248,7 +246,7 @@ Each class have similar methods and data structure, but with slight differences 
 
 ### Force Field &  Energy Score
 
-The `ForceField()` class evaluates the total potential energy and analytical per-atom forces of a `Pose`, summing nine bonded and non-bonded terms with a hash-cached topology so that repeated calls during minimisation, annealing, or MD only recompute the coordinate-dependent quantities.
+The `ForceField()` class evaluates the total potential energy and analytical per-atom forces of a `Pose`, summing six terms (Molecule poses, via `MOL_TERMS`) or nine terms (`Pose` proteins / DNA / RNA, via `DEFAULT_TERMS`) — dispatched automatically by `pose.data['Type']` — with a hash-cached topology so that repeated calls during minimisation, annealing, or MD only recompute the coordinate-dependent quantities.
 
 | Method                                                                          | Description |
 |---------------------------------------------------------------------------------|-------------|
@@ -258,14 +256,20 @@ The `ForceField()` class evaluates the total potential energy and analytical per
 | `ff.BondPotential(pose, cache, alg='harmonic', grad=True, box=None)`            | Bond-stretching term. `alg='harmonic'` uses `Σ K_b·(r − r₀)²`, `alg='morse'` uses `Σ D_e·(1 − e^(−a(r − r₀)))²` |
 | `ff.AnglePotential(pose, cache, grad=True, box=None)`                           | Harmonic three-atom angle term, `Σ K_θ·(θ − θ₀)²` over every bonded triplet |
 | `ff.UBPotential(pose, cache, grad=True, box=None)`                              | Urey-Bradley 1-3 stretching term, `Σ K_UB·(s − s₀)²` between the outer atoms of every bonded triplet |
-| `ff.DihedralPotential(pose, cache, grad=True, box=None)`                        | Proper dihedral (torsion) term, multi-component Fourier `Σ k_φ·(1 + cos(n·φ − φ₀))` over every i-j-k-l quartet |
-| `ff.ImproperPotential(pose, cache, alg='harmonic', grad=True, box=None)`        | Improper dihedral term over degree-3 atoms. `alg='harmonic'` uses `Σ k·(ψ − ψ₀)²`, `alg='fourier'` uses `Σ k·(1 + cos(n·ψ − ψ₀))` |
-| `ff.LJPotential(pose, cache, alg='12-6', grad=True, box=None)`                  | Lennard-Jones non-bonded term, with 1-4 scaling masks. `alg='12-6'` is the standard form, `alg='9-6'` is a softer variant |
+| `ff.ProperTorsionPotential(pose, cache, grad=True, box=None)`                   | Proper dihedral (torsion) term, multi-component Fourier `Σ k_φ·(1 + cos(n·φ − φ₀))` over every i-j-k-l quartet |
+| `ff.ImproperTorsionPotential(pose, cache, alg='harmonic', grad=True, box=None)` | Improper dihedral term over degree-3 atoms. `alg='harmonic'` uses `Σ k·(ψ − ψ₀)²`, `alg='fourier'` uses `Σ k·(1 + cos(n·ψ − ψ₀))` |
+| `ff.VDWPotential(pose, cache, alg='12-6', grad=True, box=None)`                 | Van der Waals (Lennard-Jones) non-bonded term, with 1-4 scaling masks. `alg='12-6'` is the standard form, `alg='9-6'` is a softer variant |
 | `ff.ElectrostaticPotential(pose, cache, alg='constant', grad=True, box=None)`   | Electrostatic non-bonded term. `alg='constant'` uses uniform εᵣ; `alg='ddd'` uses a distance-dependent dielectric `ε(r) = εᵣ·r` |
 | `ff.PolarisationPotential(pose, cache, alg='constant', grad=True, box=None)`    | Induced-dipole polarisation term, `−½·Σ α_i·\|E_i\|²` with the per-atom field built from neighbour charges |
 | `ff.CMAPPotential(pose, cache, grad=True, box=None)`                            | CMAP backbone (φ, ψ) cross-term correction over every interior protein residue, evaluated by bicubic Catmull-Rom interpolation on the per-residue 24×24 energy grids in `database.json['Energy Parameters']['cmap']` |
 
-The `Score()` class is a hybrid physics + statistical energy function for protein design. It sums eight terms (three reused from `ForceField`, five added) and returns a single design score in kJ/mol-equivalent units. All term weights, reference-state values, atom-type tables, CMAP grids, and force-field parameters are loaded once from `database.json['Energy Parameters']` at construction; the rotamer prior additionally reads `database.json['Rotamer Library']`. **Score is chirality-aware from line zero** — L-amino acids, D-amino acids, mixed L/D sequences, and non-canonical residues all score correctly with no extra arguments or special-cased call sites. **Missing parameters raise `KeyError` with the missing key named** for atom-type and reference-state lookups; the rotamer prior is the only intentional softening of this contract — non-canonical amino acids missing from the Rotamer Library are silently skipped (with a one-time warning) rather than aborting evaluation.
+> **Charge model & parameter assignment**: For `Molecule` poses, partial charges are computed by `ForceField.NAGLCharges(pose)` — a NumPy reimplementation of the [`openff-gnn-am1bcc-1.0.0`](https://github.com/openforcefield/openff-nagl-models) graph neural network released by the [Open Force Field Initiative](https://github.com/openforcefield). Output charges are bit-equivalent to upstream NAGL float32 inference, with the total constrained to the molecule's formal charge via electronegativity equalisation. Bonded and vdW parameters are assigned by `pose.energy.SMIRKSMatch(pose, params)`, a pure-NumPy SMIRKS pattern matcher that applies [Sage 2.3.0](https://github.com/openforcefield/openff-forcefields) patterns to the pose's bond graph. All energy parameters in `database.json` are stored in **kJ/mol** (lengths in Å, angles in degrees).
+
+> ⚠️ **`Score()` currently raises `NotImplementedError`** — the database keys it consumed (`weights`, `ref_state`, `lk_solvation`, `hbond`, `kbp`, `rotamer`) were removed during the recent force-field refactor. Score is pending migration to SMIRKS-driven score terms. The math, vectorisation, and chirality logic in this section are correct and preserved as developer reference for the re-implementation.
+
+The `Score()` class is a hybrid physics + statistical energy function for protein design. It sums eight terms (three reused from `ForceField`, five added) and returns a single design score in kJ/mol-equivalent units. **Score is chirality-aware from line zero** — L-amino acids, D-amino acids, mixed L/D sequences, and non-canonical residues all score correctly with no extra arguments or special-cased call sites.
+
+> The Score implementation below describes the **target design** for the score function. Once the missing `weights`, `ref_state`, `lk_solvation`, `hbond`, `kbp`, and `rotamer` blocks are re-introduced into `database.json` (in the SMIRKS-driven schema), `Score()` will be re-enabled. Until then, instantiating it raises `NotImplementedError`. The methods (`_lk_solvation`, `_hbond_geom`, `_kbp_score`, `_rotamer_prior`, `_reference_state`) still exist in the source for reference.
 
 | Method                                    | Description |
 |-------------------------------------------|-------------|
@@ -277,7 +281,7 @@ The eight terms (three reused from `ForceField`, five added). LJ, Electrostatic,
 
 | Term            | Source                       | Form |
 |-----------------|------------------------------|------|
-| `LJ`            | `ff.LJPotential`             | Lennard-Jones with 1-4 scaling |
+| `LJ`            | `ff.VDWPotential`            | Van der Waals (Lennard-Jones) with 1-4 scaling |
 | `Electrostatic` | `ff.ElectrostaticPotential`  | Coulomb with `ε_r` or distance-dependent dielectric |
 | `CMAP`          | `ff.CMAPPotential`           | Per-residue (φ, ψ) backbone correction grid; D-AA grids are mirrored from L-AA grids in `_compile` automatically |
 | `LK`            | Added                        | Lazaridis-Karplus EEF1 implicit solvation. Per-atom (ΔG_free, λ, V) parameters from `database.json['Energy Parameters']['lk_solvation']` |
@@ -288,7 +292,7 @@ The eight terms (three reused from `ForceField`, five added). LJ, Electrostatic,
 
 > `Score()` is the single API surface in this library that is chirality-aware end to end — it produces correct, comparable design scores for D-amino acids, mixed L/D sequences, mirror-image proteins, and non-canonical residues without any extra arguments. ML-based ranking proxies (AlphaFold pLDDT, ProteinMPNN log-likelihoods) do not work in this regime because they were trained on canonical-L PDB data only.
 
-> All numerical values currently in `database.json['Energy Parameters']` for the four added terms (`lk_solvation`, `hbond`, `kbp`, `ref_state`) and the term `weights` are placeholders. The math, vectorisation, and chirality logic are production-quality; replacing the placeholders with values fitted from your own PDB-derived dataset is the only remaining step before the score function is production-ready. The Rotamer Library values themselves are derived from Dunbrack BBDEP2010 (CC-BY-4.0) and are real; only the eight term weights and the four added-term parameter blocks are placeholder.
+> Numerical parameters for the four added terms (`lk_solvation`, `hbond`, `kbp`, `ref_state`) and the term `weights` are **not currently shipped** in `database.json` — they were removed during the recent force-field refactor and are pending re-fitting against a curated PDB-derived dataset. The math, vectorisation, and chirality logic are production-quality and preserved in source. The Rotamer Library values themselves are derived from Dunbrack BBDEP2010 (CC-BY-4.0) and are real and current.
 
 ### Tools
 
@@ -448,14 +452,14 @@ This `m.data` structure from the `Molecule()` class represents small organic mol
 
 ## database.json overview
 
-Pose ships a single `database.json` file (~54 MB) under `pose/` with **four** top-level keys:
+Pose ships a single `database.json` file (~63 MB) under `pose/` with **four** top-level keys:
 
 | Top-level key      | Purpose |
 |--------------------|---------|
 | `Amino Acids`      | Per-residue topology templates: backbone & sidechain atoms, vectors, bonds, χ angle atoms. Used by `Pose.Build`, `Pose.Mutate`, all dihedral routines |
 | `Nucleotides`      | Per-nucleotide topology templates for DNA and RNA |
 | `Rotamer Library`  | Backbone-dependent rotamer mixture data (Dunbrack BBDEP2010 derived) — multimodal `{P_k, μ_k_χ_c, σ_k_χ_c}` per residue type per 10° (φ, ψ) cell. Consumed by `Score._rotamer_prior`, `tools.Rotamers`, and `tools.Pack` |
-| `Energy Parameters`| All numerical force-field and score parameters: bond/angle/dihedral/improper constants, LJ, electrostatic, scaling_14, CMAP grids, Score weights, LK / Hbond / KBP / ref_state blocks |
+| `Energy Parameters`| All numerical force-field parameters. SMIRKS-keyed bonded + nonbonded parameters live under `Bonds`, `Angles`, `ProperTorsions`, `ImproperTorsions`, `vdW`, `Electrostatic`, `Constraints`, `Constants`. NAGL AM1-BCC neural-network weights live under `AM1BCC` as base64-encoded float32 tensors. CMAP placeholder grids under `cmap`. All energy values stored in kJ/mol. See "Description of energy parameters in database.json" below for the full schema and provenance |
 
 The whole file is loaded once per Python process via the cached module-level loader `pose.DBLoad()`:
 
@@ -500,7 +504,7 @@ This information resides in `database['Nucleotides'][NUCEOTIDE_TRICODE]`
 
 ## Description of the Rotamer Library in database.json:
 
-This information resides in `database['Rotamer Library']` and is consumed by `Score()`, `tools.Rotamers()`, and `tools.Pack()`. Derived from the Dunbrack BBDEP2010 rotamer library (Shapovalov & Dunbrack 2011, CC-BY-4.0). Currently covers 21 chi-bearing residue types: ARG, ASN, ASP, CYS, GLN, GLU, HIS, ILE, LEU, LYS, MET, MSE, PHE, PRO, SEC, SER, THR, TRF, TRP, TYR, VAL. Glycine and Alanine carry no χ angles and need no entry; LYX, PYL, TSO are not in the library and are silently skipped (with a one-time warning) by `_rotamer_prior` / `Rotamers()` / `Pack()`.
+This information resides in `database['Rotamer Library']` and is consumed by `Score()`, `tools.Rotamers()`, and `tools.Pack()`. Derived from the Dunbrack BBDEP2010 rotamer library (Shapovalov & Dunbrack 2011, CC-BY-4.0). Currently covers 24 chi-bearing residue types: ALY, ARG, ASN, ASP, CYS, GLN, GLU, HIS, ILE, LEU, LYS, MET, MSE, PHE, PRO, PTR, SEC, SER, THR, TPO, TRF, TRP, TYR, VAL. Glycine and Alanine carry no χ angles and need no entry.
 
 **Top-level shape:**
 
@@ -529,8 +533,8 @@ This information resides in `database['Rotamer Library']` and is consumed by `Sc
 
 | Key            | Value Type     | Description |
 |----------------|----------------|-------------|
-| `columns`      | List of strings| Column schema for each row of `table`, e.g. for VAL: `['r1', 'count', 'prob', 'chi1', 'sig1']`; for LEU (n_chi=2): `['r1', 'r2', 'count', 'prob', 'chi1', 'chi2', 'sig1', 'sig2']`; in general `[r1..rN, count, prob, chi1..chiN, sig1..sigN]` |
-| `table`        | List of rows   | Flat list of all rotamer rows across every (φ, ψ) cell. Each row matches `columns`: the integer rotamer state labels, the empirical observation `count`, the per-cell normalised probability `prob` (sums to 1 within a cell), the per-rotamer mean χ values in degrees, and the per-rotamer χ standard deviations in degrees |
+| `columns`      | List of strings| Column schema for each row of `table`, e.g. for VAL: `['count', 'prob', 'chi1', 'sig1']`; for LEU (n_chi=2): `['count', 'prob', 'chi1', 'chi2', 'sig1', 'sig2']`; in general `[count, prob, chi1..chiN, sig1..sigN]` |
+| `table`        | List of rows   | Flat list of all rotamer rows across every (φ, ψ) cell. Each row matches `columns`: the empirical observation `count`, the per-cell normalised probability `prob` (sums to 1 within a cell), the per-rotamer mean χ values in degrees, and the per-rotamer χ standard deviations in degrees |
 | `bin_offsets`  | List of ints   | CSR indexing — length `phi_n × psi_n + 1 = 1297` for the default 36×36 grid. Cell `(i_phi, i_psi)` is at `bin_idx = i_phi × psi_n + i_psi`, and its rotamer rows are `table[bin_offsets[bin_idx] : bin_offsets[bin_idx+1]]` |
 | `top_chi`      | List           | Optional precomputed (most-probable rotamer mean χ values per cell) lookup, currently unused by `Score._rotamer_prior` / `Rotamers` / `Pack` (which slice `table` directly) |
 
@@ -541,32 +545,27 @@ i_phi = int(math.floor((phi - phi_start) / phi_step)) % phi_n
 i_psi = int(math.floor((psi - psi_start) / psi_step)) % psi_n
 bidx  = i_phi * psi_n + i_psi
 rows  = table[bin_offsets[bidx] : bin_offsets[bidx + 1]]
-# each row is [r1..rN, count, prob, chi1..chiN, sig1..sigN]
+# each row is [count, prob, chi1..chiN, sig1..sigN]
 ```
 
 D-amino acid handling: the library is keyed on the L-form 3-letter code only. Consumers fetch the L cell at `(−φ, −ψ)` and negate the recovered μ values when applying them, exploiting the chi/Ramachandran mirror symmetry between enantiomers.
 
 ## Description of energy parameters in database.json:
 
-This information resides in `database['Energy Parameters']` and holds every numerical parameter consumed by both `ForceField()` and `Score()`, loaded once at each class's construction via the cached `DBLoad()`. Tuple-style force-field keys (bonds, angles, dihedrals, impropers) are stored as dash-joined strings (`"C-CA"`, `"CA-C-N"`, `"CA-C-N-CA"`) and converted back to tuples internally for parameter lookup. The score-side keys (`weights`, `ref_state`, `lk_solvation`, `hbond`, `kbp`) raise `KeyError` on missing entries — there is no silent default for these.
+This information resides in `database['Energy Parameters']` and holds every numerical parameter consumed by `ForceField()`. The bonded and non-bonded parameters used for `Molecule` poses are derived from **[OpenFF Sage 2.3.0](https://github.com/openforcefield/openff-forcefields)**, released by the [Open Force Field Initiative](https://github.com/openforcefield) under the MIT License. Bonded sections (`Bonds`, `Angles`, `ProperTorsions`, `ImproperTorsions`) and `vdW` use SMIRKS strings as keys (e.g. `[#6X4:1]-[#6X4:2]`, `[#6X3:1]:[#6X3:2]`); the SMIRKS pattern matcher in `pose.energy.SMIRKSMatch()` assigns the right parameter to each topology atom on `_compile`. Energy units throughout are **kJ/mol**; lengths are in **Å**, angles in **degrees**. The legacy Score-side blocks (`weights`, `ref_state`, `lk_solvation`, `hbond`, `kbp`) were removed during the recent force-field refactor and are pending re-implementation in the SMIRKS-driven schema.
 
-| Top-level Key   | Value Type     | Description of Values |
-|-----------------|----------------|-----------------------|
-| `bonds`         | Dict           | Per atom-type pair bond parameters. Key is a sorted dash-joined pair (e.g. `"C-CA"`); value is `[K_b, D_e, a, r₀]` — harmonic force constant in kJ/mol/Å², Morse well depth in kJ/mol, Morse alpha in 1/Å, equilibrium length in Å. The `default` key is the fallback for any pair not explicitly listed |
-| `angles`        | Dict           | Per atom-type triplet angle and Urey-Bradley parameters. Key is a dash-joined triplet (canonicalised so the outer atoms are sorted, e.g. `"C-CA-N"`); value is `[K_θ, θ₀, K_UB, S₀]` — angle force constant in kJ/mol/rad², equilibrium angle in degrees, Urey-Bradley 1-3 force constant in kJ/mol/Å², equilibrium 1-3 distance in Å |
-| `dihedrals`     | Dict           | Per atom-type quartet proper-dihedral Fourier components. Key is a dash-joined quartet canonicalised so it compares ≤ its reverse; value is a list of `[k_φ, n, φ₀]` triplets — barrier height in kJ/mol, periodicity (integer ≥ 1), phase in degrees. Multi-component dihedrals are encoded as multiple list entries |
-| `impropers`     | Dict           | Per atom-type quartet improper-dihedral parameters. Key is `"j-a-b-c"` where `j` is the central atom and `a,b,c` are the three peripheral atoms in sorted order; value is `[k, n, ψ₀]` — improper force constant, periodicity, equilibrium improper in degrees |
-| `lennard_jones` | Dict           | Per atom-type Lennard-Jones and polarisation parameters. Key is a single atom type (element or backbone label); value is `[σ, ε, α]` — Lennard-Jones σ in Å, ε well depth in kJ/mol, atomic polarisability α in Å³ |
-| `electrostatic` | Dict           | Global electrostatic parameters. `epsilon_r` is the relative dielectric constant used by `ElectrostaticPotential` and `PolarisationPotential` |
-| `scaling_14`    | Dict           | 1-4 non-bonded scaling factors. `f_lj` scales Lennard-Jones interactions between atoms separated by exactly three bonds; `f_elec` does the same for electrostatics |
-| `cmap`          | Dict           | Per-residue CMAP backbone correction grids. Key is a one-letter amino-acid code; value is a 24×24 list-of-lists of energies in kJ/mol over `(φ, ψ) ∈ [−π, π)²`. Every amino-acid code that appears in the pose must have a per-aa grid; missing keys raise `KeyError` (no silent default) |
-| `weights`       | Dict           | Per-term linear weights applied by `Score()`. Keys: the 8 term names `'LJ'`, `'Electrostatic'`, `'LK'`, `'Hbond'`, `'CMAP'`, `'Rotamer'`, `'Reference'`, `'KBP'`. Values are scalar floats. With every weight at 1.0 (the placeholder), the score is the unweighted sum of the 8 terms |
-| `ref_state`     | Dict           | Per-amino-acid unfolded-state baseline used by `Score()._reference_state`. Keys are one-letter aa codes; the file ships all 26 supported codes (20 canonical + B, J, O, U, X, Z). Missing keys raise `KeyError` |
-| `lk_solvation`  | Dict           | Lazaridis-Karplus EEF1 implicit-solvation parameters used by `Score()._lk_solvation`. Inner key `atom_types` maps a composite `"{PDB_name}-{element}"` or element-only key to `[ΔG_free, λ, V]` — solvation free energy in kJ/mol, correlation length in Å, atomic volume in Å³. Lookup falls back from composite to element; missing keys raise `KeyError` |
-| `hbond`         | Dict           | Kortemme-Baker geometric H-bond parameters used by `Score()._hbond_geom`. Scalars: `well_depth` in kJ/mol; `r_opt`, `r_sigma` (Å) define the radial Gaussian; `theta_DHA_opt_deg`, `theta_HAB_opt_deg` are the donor-H-acceptor and H-acceptor-base optimal angles |
-| `kbp`           | Dict           | Knowledge-based pair potential (DFIRE-style) used by `Score()._kbp_score`. `cutoff` is the maximum pair distance in Å; `bin_width` the histogram bin width; `atom_types` maps composite/element keys to integer type indices; `table` is a `(N_types, N_types, N_bins)` nested-list 3D array of pair energies in kJ/mol |
-
-> The numbers currently shipped in `database.json['Energy Parameters']` are placeholder values for the four added Score terms (`lk_solvation`, `hbond`, `kbp`, `ref_state`) and the term `weights`. They will be replaced later with values fitted against a curated PDB-derived dataset. The Rotamer Library numerical content is real (Dunbrack BBDEP2010, CC-BY-4.0); only the score-weight tunables are placeholder.
+| Top-level Key      | Value Type | Description of Values |
+|--------------------|------------|-----------------------|
+| `Constants`        | Dict       | Global constants. `epsilon_r` is the relative dielectric (default 1.0); `f_lj` and `f_elec` are the 1-4 non-bonded scaling factors (LJ = 0.5, electrostatics = 5/6) |
+| `Constraints`      | Dict       | SMIRKS-keyed bond constraints. Sage 2.3.0 declares every X–H bond as constrained (`[#1:1]-[*:2]`), making them rigid under SHAKE/RATTLE. `_compile_mol` zeros their bond-stretch energy; equilibrium length is preserved for MD constraint solving |
+| `Bonds`            | Dict       | SMIRKS-keyed harmonic bond parameters. Each value is `{id, length, k}` — equilibrium length in Å, force constant in kJ/mol/Å². Stored using the upstream `E = ½k(x − x₀)²` convention (the ½ factor is absorbed into `K` at compile time) |
+| `Angles`           | Dict       | SMIRKS-keyed harmonic angle parameters. Each value is `{id, angle, k}` — equilibrium angle in degrees, force constant in kJ/mol/rad². Same ½-factor convention as bonds |
+| `ProperTorsions`   | Dict       | SMIRKS-keyed proper-torsion Fourier components. Each value is `{id, components: [{periodicity, phase, k, idivf}, ...]}` — periodicity (int ≥ 1), phase in degrees, barrier height in kJ/mol, divisor factor (typically 1.0) |
+| `ImproperTorsions` | Dict       | SMIRKS-keyed improper torsions, trefoil-expanded into the three cyclic permutations of the outer atoms (each contributing `k/3`). Same component shape as `ProperTorsions` |
+| `vdW`              | Dict       | SMIRKS-keyed Lennard-Jones parameters. Each value is `{id, epsilon, rmin_half}` (or `sigma` for some entries) — well depth in kJ/mol, half-min-distance or σ in Å |
+| `Electrostatic`    | Dict       | Library charges (water, ions, Xe). SMIRKS-keyed; each value is `{id, charges: [...]}` — literal partial charges in elementary charge units, applied in preference to NAGL for the matched atoms |
+| `cmap`             | Dict       | Per-amino-acid backbone (φ, ψ) correction grids. Key is a one-letter aa code; value is a 24×24 list-of-lists. Currently populated with a placeholder sin/cos pattern (max ±0.1) reserved for the eventual biomolecule-SMIRKS port; not consumed for `Molecule` poses (set to empty arrays at compile) |
+| `AM1BCC`           | Dict       | NAGL graph neural network weights for AM1-BCC partial-charge prediction. `gcn_layers[0..5]` (each with `fc_neigh_w`, `fc_self_w`, `fc_self_b`) and `readout` (`linear_0_w/b`, `linear_1_w/b`). Each weight tensor is `{shape, data}` where `data` is base64-encoded float32 bytes — bit-exact NAGL inference, ~13 MB total |
 
 ---
 
