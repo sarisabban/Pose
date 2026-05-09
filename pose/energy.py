@@ -20,12 +20,14 @@ def SMIRKSMatch(pose, params):
 	Returns:
 	--------
 		dict: keyed assignments consumed by ForceField._compile:
-			'bonds':     {(i, j):       [length, k]} per pair
-			'angles':    {(i, j, k):    [angle, k]} per triplet
-			'propers':   {(i, j, k, l): [[period, phase, k, idivf], ...]}
-			'impropers': list of (i, j, k, l, period, phase, k_eff)
-			'vdw':       {i: [epsilon, sigma]} (rmin_half pre-converted)
-			'charges':   {i: charge or None} (None = needs Gasteiger fallback)
+			'bonds':         {(i, j):       [length, k]} per pair
+			'angles':        {(i, j, k):    [angle, k]} per triplet
+			'ub':            {(i, j, k):    [s0, k_ub]} per angle triplet
+			'propers':       {(i, j, k, l): [[period, phase, k, idivf], ...]}
+			'impropers':     list of (i, j, k, l, period, phase, k_eff)
+			'vdw':           {i: [epsilon, sigma]} (rmin_half pre-converted)
+			'polarisation':  {i: alpha} per atom
+			'charges':       {i: charge or None} (None = Gasteiger fallback)
 	'''
 	Z_TABLE = {
 		'H':1,'He':2,'Li':3,'Be':4,'B':5,'C':6,'N':7,'O':8,'F':9,'Ne':10,
@@ -684,8 +686,9 @@ def SMIRKSMatch(pose, params):
 		go(0)
 		return results
 	# Assignment dict — last-match-wins per pattern
-	out = {'bonds': {}, 'angles': {}, 'propers': {}, 'impropers': [],
-		'vdw': {}, 'charges': {i: None for i in sorted_ids},
+	out = {'bonds': {}, 'angles': {}, 'ub': {}, 'propers': {},
+		'impropers': [], 'vdw': {}, 'polarisation': {},
+		'charges': {i: None for i in sorted_ids},
 		'constraints': set()}
 	parsed = {}
 	def get(smirks):
@@ -718,6 +721,10 @@ def SMIRKSMatch(pose, params):
 				(min(j, k), max(j, k)) in edge_set:
 				ii, kk = (i, k) if i < k else (k, i)
 				out['angles'][(ii, j, kk)] = [par['angle'], par['k']]
+				# UB term co-located with the angle entry; defaults to 0
+				# for legacy DBs that don't carry the s0 / k_ub fields.
+				out['ub'][(ii, j, kk)] = [par.get('s0', 0.0),
+					par.get('k_ub', 0.0)]
 	for sm, par in params.get('ProperTorsions', {}).items():
 		try: pat = get(sm)
 		except Exception: continue
@@ -761,6 +768,9 @@ def SMIRKSMatch(pose, params):
 			if 'sigma' in par: sig = par['sigma']
 			else: sig = par['rmin_half'] * rmin2sig
 			out['vdw'][i] = [eps, sig]
+			# Atomic polarisability co-located with the vdW entry;
+			# defaults to 0 for legacy DBs that don't carry alpha.
+			out['polarisation'][i] = par.get('alpha', 0.0)
 	for sm, par in params.get('LibraryCharges', {}).items():
 		try: pat = get(sm)
 		except Exception: continue
@@ -1031,8 +1041,19 @@ class ForceField():
 				angle_t0[p] = par[0]; angle_Kt[p] = par[1]
 		cache['angle_K_theta'] = angle_Kt
 		cache['angle_theta0']  = np.deg2rad(angle_t0)
-		cache['ub_K_ub']       = np.zeros(len(triplets))
-		cache['ub_s0']         = np.zeros(len(triplets))
+		# UB term is co-keyed with Angles; SMIRKSMatch emits 'ub' alongside
+		# 'angles'. Empty for legacy DBs without s0/k_ub fields.
+		ub_assigns = assigns.get('ub', {})
+		ub_K_ub = np.zeros(len(triplets))
+		ub_s0   = np.zeros(len(triplets))
+		for p, (i, j, k) in enumerate(triplets):
+			canon = (min(int(i), int(k)), int(j), max(int(i), int(k)))
+			par = ub_assigns.get(canon)
+			if par is not None:
+				ub_s0[p]   = par[0]
+				ub_K_ub[p] = par[1]
+		cache['ub_K_ub'] = ub_K_ub
+		cache['ub_s0']   = ub_s0
 		# Proper torsion params (variable component count per quartet)
 		comp_lists = []
 		for q in cache['quartets']:
@@ -1076,7 +1097,15 @@ class ForceField():
 				eps[i], sig[i] = par[0], par[1]
 		cache['lj_sig']    = sig
 		cache['lj_eps']    = eps
-		cache['lj_alpha']  = np.zeros(n)
+		# Polarisability is co-keyed with vdW; SMIRKSMatch emits
+		# 'polarisation' alongside 'vdw'. Defaults to zeros for legacy DBs.
+		pol_assigns = assigns.get('polarisation', {})
+		alpha = np.zeros(n)
+		for i in range(n):
+			a = pol_assigns.get(i)
+			if a is not None:
+				alpha[i] = a
+		cache['lj_alpha']  = alpha
 		cache['lj_sigma']  = 0.5 * (sig[:, None] + sig[None, :])
 		cache['lj_eps_ij'] = np.sqrt(eps[:, None] * eps[None, :])
 		# Charges priority: LibraryCharges -> NAGL AM1-BCC -> Gasteiger fallback
