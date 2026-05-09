@@ -1,4 +1,5 @@
 import os
+import sys
 import json
 import math
 import copy
@@ -986,11 +987,25 @@ class ForceField():
 			if assigns['vdw'].get(i) is None:
 				gaps.append(f'vdW atom {i}')
 		if gaps:
-			msg = (f'SMIRKS coverage gap: {len(gaps)} unmatched fragment(s) '
-				f'fall through to K = 0. First few: {gaps[:5]}')
+			atoms = pose.data['Atoms']
+			n_h = sum(1 for i in atoms_set if atoms[i][1] == 'H')
+			if n_h == 0:
+				msg = (f'Force field is missing ~{len(gaps)} H bonded terms. '
+					f'Call ReBuild() after Import() to add hydrogens.')
+			else:
+				first_few = ', '.join(gaps[:5])
+				msg = (f'{len(gaps)} internal coordinate(s) not covered '
+					f'by the SMIRKS database; energy includes K=0 for '
+					f'these terms. First few: {first_few}.')
 			if self.strict:
 				raise RuntimeError(msg)
-			warnings.warn(msg, RuntimeWarning, stacklevel=3)
+			# Suppress duplicate prints for repeat ff(pose) calls on
+			# the same Pose object.
+			warned = getattr(pose, '_pose_coverage_warned', False)
+			if not warned:
+				print(f'[Pose] Note: {msg}', file=sys.stderr)
+				try: pose._pose_coverage_warned = True
+				except Exception: pass
 		# Bonds tagged Constraints (e.g. all X-H) get K_b = 0; rigid in MD via SHAKE
 		constraints = assigns.get('constraints', set())
 		bond_Kb = np.zeros(len(pairs)); bond_r0 = np.zeros(len(pairs))
