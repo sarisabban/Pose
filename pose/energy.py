@@ -22,7 +22,9 @@ def SMIRKSMatch(pose, params):
 		dict: keyed assignments consumed by ForceField._compile:
 			'bonds':         {(i, j):       [length, k]} per pair
 			'angles':        {(i, j, k):    [angle, k]} per triplet
+				(matched against the broad Sage Angles section)
 			'ub':            {(i, j, k):    [s0, k_ub]} per angle triplet
+				(matched against the separate, narrow UB section)
 			'propers':       {(i, j, k, l): [[period, phase, k, idivf], ...]}
 			'impropers':     list of (i, j, k, l, period, phase, k_eff)
 			'vdw':           {i: [epsilon, sigma]} (rmin_half pre-converted)
@@ -721,8 +723,16 @@ def SMIRKSMatch(pose, params):
 				(min(j, k), max(j, k)) in edge_set:
 				ii, kk = (i, k) if i < k else (k, i)
 				out['angles'][(ii, j, kk)] = [par['angle'], par['k']]
-				# UB term co-located with the angle entry; defaults to 0
-				# for legacy DBs that don't carry the s0 / k_ub fields.
+	# Dedicated UB section: 3-atom narrow SMIRKS (independent of Angles)
+	for sm, par in params.get('UB', {}).items():
+		try: pat = get(sm)
+		except Exception: continue
+		for tup in match(pat):
+			if len(tup) != 3: continue
+			i, j, k = tup
+			if (min(i, j), max(i, j)) in edge_set and \
+				(min(j, k), max(j, k)) in edge_set:
+				ii, kk = (i, k) if i < k else (k, i)
 				out['ub'][(ii, j, kk)] = [par.get('s0', 0.0),
 					par.get('k_ub', 0.0)]
 	for sm, par in params.get('ProperTorsions', {}).items():
@@ -1685,7 +1695,11 @@ class ForceField():
 		coeff = coeff * weight
 		E = np.einsum('ij,ijk->ik', coeff, dr)
 		E_sq = np.sum(E**2, axis=1)
-		energy = float(0.5 * np.sum(alpha * E_sq))
+		# Polarisation binding energy: U = -1/2 alpha |E|^2.  The field
+		# computed above carries an implicit Coulomb constant K=1389
+		# (kJ.A/mol/e^2) — divide by K so the final energy comes out in
+		# kJ/mol with alpha in A^3 and charges in e.
+		energy = float(-0.5 * np.sum(alpha * E_sq) / 1389.35458)
 		if not grad: return energy
 		p_pow = 3.0 if alg == 'constant' else 4.0
 		rhat = dr / r[:, :, None]
