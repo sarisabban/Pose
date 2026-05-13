@@ -1160,10 +1160,56 @@ class ForceField():
 			np.where(scal14, f_elec, 1.0))
 		cache['scal14_bool'] = scal14
 		cache['excl_bool']   = excl
-		# CMAP unused for Molecule
+		# CMAP backbone (phi, psi) cross-term cache.
+		# Default empty (used for Molecule poses, DNA, RNA).
 		cache['cmap_phi_q']  = np.empty((0, 4), dtype=np.int64)
 		cache['cmap_psi_q']  = np.empty((0, 4), dtype=np.int64)
 		cache['cmap_tables'] = np.empty((0, 24, 24), dtype=np.float64)
+		# For Protein poses, populate one (phi_q, psi_q, grid) per
+		# *internal* residue (one that has both a previous and next
+		# residue in the same chain).
+		if pose.data.get('Type') == 'Protein':
+			aas = pose.data.get('Amino Acids', {}) or {}
+			cmap_section = self.Parameters.get('cmap', {}) or {}
+			# Per-residue backbone atom indices keyed by atom name
+			bb_per_res = {}
+			for ri, rec in aas.items():
+				code, chain, bb = rec[0], rec[1], rec[2]
+				name_to_idx = {atoms[idx][0]: idx for idx in bb
+					if idx in atoms}
+				if not all(n in name_to_idx for n in ('N', 'CA', 'C')):
+					continue
+				bb_per_res[ri] = (chain, code,
+					name_to_idx['N'], name_to_idx['CA'],
+					name_to_idx['C'])
+			res_order = sorted(bb_per_res.keys())
+			phi_q_list = []; psi_q_list = []; grids = []
+			for n, ri in enumerate(res_order):
+				if n == 0 or n == len(res_order) - 1:
+					continue  # terminal residue
+				prev_ri = res_order[n - 1]
+				next_ri = res_order[n + 1]
+				chain  = bb_per_res[ri][0]
+				if (bb_per_res[prev_ri][0] != chain or
+					bb_per_res[next_ri][0] != chain):
+					continue  # chain boundary
+				code = bb_per_res[ri][1]
+				grid = cmap_section.get(code)
+				if grid is None: continue
+				g = np.asarray(grid, dtype=np.float64)
+				if g.shape != (24, 24): continue
+				_, _, Ni, CAi, Ci = bb_per_res[ri]
+				Cm1 = bb_per_res[prev_ri][4]  # C of previous
+				Np1 = bb_per_res[next_ri][2]  # N of next
+				phi_q_list.append((Cm1, Ni, CAi, Ci))
+				psi_q_list.append((Ni, CAi, Ci, Np1))
+				grids.append(g)
+			if phi_q_list:
+				cache['cmap_phi_q']  = np.asarray(phi_q_list,
+					dtype=np.int64)
+				cache['cmap_psi_q']  = np.asarray(psi_q_list,
+					dtype=np.int64)
+				cache['cmap_tables'] = np.stack(grids)
 		return cache
 	def NAGLCharges(self, pose):
 		'''
