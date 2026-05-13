@@ -828,8 +828,8 @@ class ForceField():
 		self._user_terms = terms
 		self.terms = terms if terms is not None else self.DEFAULT_TERMS
 		P = dict(DBLoad()['Energy Parameters'])
-		MOL_KEYS = ('Constraints', 'Bonds', 'Angles', 'ProperTorsions',
-			'ImproperTorsions', 'vdW', 'Electrostatic')
+		MOL_KEYS = ('Constraints', 'Bonds', 'Angles', 'UB',
+			'ProperTorsions', 'ImproperTorsions', 'vdW', 'Electrostatic')
 		ff = {k: copy.deepcopy(P[k]) for k in MOL_KEYS if k in P}
 		if 'Electrostatic' in ff:
 			ff['LibraryCharges'] = ff['Electrostatic']
