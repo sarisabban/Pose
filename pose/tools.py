@@ -2234,7 +2234,7 @@ def MolecularDynamics(pose, ff=None, n_steps=1000, dt_fs=2.0, T=300.0,
 	gamma = float(friction_ps) * AKMA_FS / 1000.0
 	c1 = math.exp(-gamma * dt)
 	c2 = np.sqrt((1.0 - c1 * c1) * kB * float(T) / m)[:, None]
-	if ff._cache is None or ff._cache_hash != ff._topology_hash(pose):
+	if ff._cache is None or ff._cache_hash != ff._topologyhash(pose):
 		ff._prepare(pose)
 	cache = ff._cache
 	is_h = np.array([atoms[i][1] == 'H' for i in sorted_ids], dtype=bool)
