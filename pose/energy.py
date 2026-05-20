@@ -803,7 +803,7 @@ class ForceField():
 				(e.g. 'Default', 'openFF'); matched case-insensitively
 				(e.g. 'default', 'OPENFF', 'oPeNfF' all resolve correctly).
 				Selects both the SMIRKS-keyed parameter sections and the
-				list of potential methods to evaluate (from `terms`
+				list of potential methods to evaluate (from `Terms`
 				sub-key)
 			strict: if True, raise RuntimeError on any SMIRKS coverage gap
 				(unmatched bond/angle/torsion/improper centre/atom). If
@@ -822,11 +822,11 @@ class ForceField():
 				% (name, sorted(EP)))
 		self.name = key_map[name_upper]
 		ff_db = copy.deepcopy(EP[self.name])
-		if 'terms' not in ff_db:
+		if 'Terms' not in ff_db:
 			raise ValueError(
-				"ForceField: '%s' is missing the 'terms' key in database.json"
+				"ForceField: '%s' is missing the 'Terms' key in database.json"
 				% (name,))
-		self.terms = [(t[0], dict(t[1])) for t in ff_db['terms']]
+		self.terms = [(t[0], dict(t[1])) for t in ff_db['Terms']]
 		self.DEFAULT_TERMS = self.terms
 		MOL_KEYS = ('Constraints', 'Bonds', 'Angles', 'UB',
 			'ProperTorsions', 'ImproperTorsions', 'vdW', 'Electrostatic')
@@ -1136,7 +1136,7 @@ class ForceField():
 			cache['cmap_tables'] = np.empty((0, 24, 24), dtype=np.float64)
 			if pose.data.get('Type') == 'Protein':
 				aas = pose.data.get('Amino Acids', {}) or {}
-				cmap_section = self.Parameters.get('cmap', {}) or {}
+				cmap_section = self.Parameters.get('CMAP', {}) or {}
 				bb_per_res = {}
 				for ri, rec in aas.items():
 					code, chain, bb = rec[0], rec[1], rec[2]
