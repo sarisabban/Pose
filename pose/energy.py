@@ -689,105 +689,378 @@ def SMIRKSMatch(pose, params):
 		return results
 	# Assignment dict — last-match-wins per pattern
 	out = {'bonds': {}, 'angles': {}, 'ub': {}, 'propers': {},
-		'impropers': [], 'vdw': {}, 'polarisation': {},
+		'impropers': [], 'vdw': {}, 'vdw14': {}, 'polarisation': {},
 		'charges': {i: None for i in sorted_ids},
-		'constraints': set()}
+		'constraints': set(), 'restri': {}}
 	parsed = {}
 	def get(smirks):
 		if smirks not in parsed: parsed[smirks] = parse(smirks)
 		return parsed[smirks]
-	# Constraints: rigid X-H bonds (SHAKE/RATTLE in MD; zero bond energy)
+	rmin2sig = 2.0 / (2.0 ** (1.0 / 6.0))
+	# ===============================================================
+	# Atom-typed force-field layer (AMBER ff19SB / CHARMM36)
+	# ---------------------------------------------------------------
+	# Atom-typed force fields smuggle a per-residue atom-class map under
+	# Constraints['<atomtype_map>'] and key their sections with the
+	# <at=c1,...> and <res=TRI><atom=NAME> tag prefixes in place of real
+	# SMIRKS. When no such map is present every helper below is inert
+	# and the SMIRKS path runs exactly as before, so OpenFF / Default
+	# energies stay byte-identical.
+	# ===============================================================
+	atomtype_map = params.get('Constraints', {}).get('<atomtype_map>')
+	improper_style = params.get('improper_style', 'smirnoff')
+	atom_name = {i: atoms[i][0] for i in sorted_ids}
+	atom_class = {i: None for i in sorted_ids}
+	atom_reskey = {i: None for i in sorted_ids}
+	atom_tname = dict(atom_name)
+	def assigntypes():
+		'''
+		Resolve every atom's residue key, template atom-name and atom
+		class from the smuggled <atomtype_map>, honouring N/C (protein)
+		and 5'/3' (nucleic acid) terminal variants, HIS protonation,
+		disulfide CYX retagging, and the N-terminal H -> H1 rename
+		Arguments:
+		----------
+			No arguments taken (closes over pose / atomtype_map / nbr)
+		Returns:
+		--------
+			None: fills atom_class / atom_reskey / atom_tname in place
+		'''
+		aas  = pose.data.get('Amino Acids') or {}
+		nucs = pose.data.get('Nucleotides') or {}
+		def resolve(reskeys, ratoms, aliases=None):
+			aliases = aliases or {}
+			for a in ratoms:
+				nm = atom_name.get(a)
+				for k in reskeys:
+					m = atomtype_map.get(k)
+					if not m: continue
+					tn = nm if nm in m else aliases.get(nm)
+					if tn is not None and tn in m:
+						atom_class[a]  = m[tn]
+						atom_reskey[a] = k
+						atom_tname[a]  = tn
+						break
+		prot = {}
+		for ri in sorted(aas):
+			prot.setdefault(aas[ri][1], []).append(ri)
+		ri_atoms = {ri: list(aas[ri][2]) + list(aas[ri][3])
+			for ri in aas}
+		sg_of = {a: ri for ri, ats in ri_atoms.items()
+			for a in ats if atom_name.get(a) == 'SG'}
+		ss_res = set()
+		for a in sg_of:
+			for b in nbr[a]:
+				if b in sg_of and sg_of[b] != sg_of[a]:
+					ss_res.add(sg_of[a]); ss_res.add(sg_of[b])
+		for chain, ris in prot.items():
+			last = len(ris) - 1
+			for pos, ri in enumerate(ris):
+				tri = str(aas[ri][5]).upper()
+				ats = ri_atoms[ri]
+				anames = {atom_name.get(a) for a in ats}
+				if tri in ('HIS', 'HID', 'HIE', 'HIP',
+						'HSD', 'HSE', 'HSP'):
+					hd1 = 'HD1' in anames
+					he2 = 'HE2' in anames
+					if hd1 and he2: cand = ('HIP', 'HSP')
+					elif hd1:       cand = ('HID', 'HSD')
+					else:           cand = ('HIE', 'HSE')
+					tri = next((v for v in cand if any(
+						(p + v) in atomtype_map
+						for p in ('', 'N', 'C'))), cand[0])
+				if tri == 'CYS' and ri in ss_res:
+					tri = 'CYX'
+				out['restri'][ri] = tri
+				keys = []
+				if pos == 0:    keys.append('N' + tri)
+				if pos == last: keys.append('C' + tri)
+				keys.append(tri)
+				# OpenMM names the first N-terminal proton 'H'; the
+				# AMBER NXXX templates call it 'H1'.
+				aliases = None
+				if pos == 0 and 'H' in anames and 'H1' not in anames:
+					aliases = {'H': 'H1'}
+				resolve(keys, ats, aliases)
+		nuc = {}
+		for ni in sorted(nucs):
+			nuc.setdefault(nucs[ni][1], []).append(ni)
+		for chain, nis in nuc.items():
+			last = len(nis) - 1
+			for pos, ni in enumerate(nis):
+				tri = str(nucs[ni][4]).upper()
+				ats = list(nucs[ni][2]) + list(nucs[ni][3])
+				keys = []
+				if pos == 0:    keys.append(tri + '5')
+				if pos == last: keys.append(tri + '3')
+				keys.append(tri)
+				keys.append(tri + 'N')
+				resolve(keys, ats)
+	if atomtype_map is not None:
+		assigntypes()
+	def tagparse(key):
+		'''
+		Split a leading <...> tag prefix off a force-field section key
+		Arguments:
+		----------
+			key: str - a force-field section key
+		Returns:
+		--------
+			tuple or None: ('map',) for <atomtype_map>; ('at', [classes])
+				for <at=...>; ('res', (tri, name)) for <res=><atom=>;
+				None when the key carries no tag (i.e. a real SMIRKS)
+		'''
+		if not key or key[0] != '<': return None
+		if key.startswith('<atomtype_map>'): return ('map',)
+		if key.startswith('<at='):
+			return ('at', key[4:key.index('>')].split(','))
+		if key.startswith('<res='):
+			tri  = key[5:key.index('>')]
+			rest = key[key.index('>') + 1:]
+			name = rest[rest.index('=') + 1:rest.index('>')]
+			return ('res', (tri, name))
+		return None
+	cls_of = atom_class.get
+	def clsmatch(spec, idxs):
+		'''
+		Test an atom-class spec (with '*' wildcards) against an atom tuple
+		Arguments:
+		----------
+			spec: list of str - class names; '*' matches any class
+			idxs: tuple of int - candidate atom indices, same length
+		Returns:
+		--------
+			bool: True iff every position matches
+		'''
+		for s, a in zip(spec, idxs):
+			if s != '*' and cls_of(a) != s: return False
+		return True
+	# Topology tuples reused by the atom-typed section loops
+	tri_list, quad_list = [], []
+	if atomtype_map is not None:
+		for j in sorted_ids:
+			ns = nbr[j]
+			for x in range(len(ns)):
+				for y in range(x + 1, len(ns)):
+					tri_list.append((ns[x], j, ns[y]))
+		for (j, k) in edges:
+			for i in nbr[j]:
+				if i == k: continue
+				for l in nbr[k]:
+					if l == j or l == i: continue
+					quad_list.append((i, j, k, l))
+	# ---- Constraints (rigid X-H bonds; SMIRKS force fields only) ----
 	for sm, par in params.get('Constraints', {}).items():
+		if tagparse(sm) is not None: continue
 		try: pat = get(sm)
 		except Exception: continue
 		for tup in match(pat):
 			if len(tup) >= 2:
 				a, b = int(tup[0]), int(tup[1])
 				out['constraints'].add((min(a, b), max(a, b)))
+	# ---- Bonds ------------------------------------------------------
 	for sm, par in params.get('Bonds', {}).items():
-		try: pat = get(sm)
-		except Exception: continue
-		for tup in match(pat):
-			if len(tup) != 2: continue
-			i, j = sorted(tup)
-			if (i, j) in edge_set:
-				out['bonds'][(i, j)] = [par['r_0'], par['K_b']]
-	# Angles: tag :2 is the centre atom
+		tg = tagparse(sm)
+		if tg is None:
+			try: pat = get(sm)
+			except Exception: continue
+			for tup in match(pat):
+				if len(tup) != 2: continue
+				i, j = sorted(tup)
+				if (i, j) in edge_set:
+					out['bonds'][(i, j)] = [par['r_0'], par['K_b']]
+		elif tg[0] == 'at':
+			spec = tg[1]
+			for (a, b) in edges:
+				if clsmatch(spec, (a, b)) or clsmatch(spec, (b, a)):
+					out['bonds'][(a, b)] = [par['r_0'], par['K_b']]
+	# ---- Angles (tag :2 is the centre atom) -------------------------
 	for sm, par in params.get('Angles', {}).items():
-		try: pat = get(sm)
-		except Exception: continue
-		for tup in match(pat):
-			if len(tup) != 3: continue
-			i, j, k = tup
-			if (min(i, j), max(i, j)) in edge_set and \
-				(min(j, k), max(j, k)) in edge_set:
-				ii, kk = (i, k) if i < k else (k, i)
-				out['angles'][(ii, j, kk)] = [par['theta_0'], par['K_theta']]
-	# Dedicated UB section: 3-atom narrow SMIRKS (independent of Angles)
+		tg = tagparse(sm)
+		if tg is None:
+			try: pat = get(sm)
+			except Exception: continue
+			for tup in match(pat):
+				if len(tup) != 3: continue
+				i, j, k = tup
+				if (min(i, j), max(i, j)) in edge_set and \
+					(min(j, k), max(j, k)) in edge_set:
+					ii, kk = (i, k) if i < k else (k, i)
+					out['angles'][(ii, j, kk)] = \
+						[par['theta_0'], par['K_theta']]
+		elif tg[0] == 'at':
+			spec = tg[1]
+			val = (par['theta_0'], par['K_theta'])
+			for (i, j, k) in tri_list:
+				if clsmatch(spec, (i, j, k)) or \
+					clsmatch(spec, (k, j, i)):
+					ii, kk = (i, k) if i < k else (k, i)
+					out['angles'][(ii, j, kk)] = list(val)
+	# ---- Urey-Bradley ----------------------------------------------
 	for sm, par in params.get('UB', {}).items():
-		try: pat = get(sm)
-		except Exception: continue
-		for tup in match(pat):
-			if len(tup) != 3: continue
-			i, j, k = tup
-			if (min(i, j), max(i, j)) in edge_set and \
-				(min(j, k), max(j, k)) in edge_set:
-				ii, kk = (i, k) if i < k else (k, i)
-				out['ub'][(ii, j, kk)] = [par.get('s_0', 0.0),
-					par.get('K_ub', 0.0)]
+		tg = tagparse(sm)
+		if tg is None:
+			try: pat = get(sm)
+			except Exception: continue
+			for tup in match(pat):
+				if len(tup) != 3: continue
+				i, j, k = tup
+				if (min(i, j), max(i, j)) in edge_set and \
+					(min(j, k), max(j, k)) in edge_set:
+					ii, kk = (i, k) if i < k else (k, i)
+					out['ub'][(ii, j, kk)] = [par.get('s_0', 0.0),
+						par.get('K_ub', 0.0)]
+		elif tg[0] == 'at':
+			spec = tg[1]
+			val = (par.get('s_0', 0.0), par.get('K_ub', 0.0))
+			for (i, j, k) in tri_list:
+				if clsmatch(spec, (i, j, k)) or \
+					clsmatch(spec, (k, j, i)):
+					ii, kk = (i, k) if i < k else (k, i)
+					out['ub'][(ii, j, kk)] = list(val)
+	# ---- Proper torsions -------------------------------------------
+	proper_best = {}
 	for sm, par in params.get('ProperTorsions', {}).items():
-		try: pat = get(sm)
-		except Exception: continue
-		for tup in match(pat):
-			if len(tup) != 4: continue
-			i, j, k, l = tup
-			if (min(i, j), max(i, j)) not in edge_set: continue
-			if (min(j, k), max(j, k)) not in edge_set: continue
-			if (min(k, l), max(k, l)) not in edge_set: continue
-			if (i, j, k, l) > (l, k, j, i): i, j, k, l = l, k, j, i
-			out['propers'][(i, j, k, l)] = [
-				[c['n'], c['phi_0'], c['K_phi'],
-					c.get('idivf', 1.0)]
-				for c in par['components']]
-	# Impropers: tag :2 is centre; trefoil = 3 cyclic outer perms; centre stored at tup[0]
-	imp_by_centre = {}
-	for sm, par in params.get('ImproperTorsions', {}).items():
-		try: pat = get(sm)
-		except Exception: continue
-		for tup in match(pat):
-			if len(tup) != 4: continue
-			a1, a2, a3, a4 = tup
-			perms = [(a1, a3, a4), (a3, a4, a1), (a4, a1, a3)]
-			entries = []
-			for o1, o2, o3 in perms:
-				for c in par['components']:
-					entries.append((a2, o1, o2, o3,
-						c['n'], c['phi_0'], c['K_phi'] / 3.0))
-			imp_by_centre[a2] = entries
-	for entries in imp_by_centre.values():
-		out['impropers'].extend(entries)
-	# vdW: per-atom (eps, sigma); convert rmin_half->sigma if rmin_half provided
-	rmin2sig = 2.0 / (2.0 ** (1.0 / 6.0))
+		tg = tagparse(sm)
+		if tg is None:
+			try: pat = get(sm)
+			except Exception: continue
+			for tup in match(pat):
+				if len(tup) != 4: continue
+				i, j, k, l = tup
+				if (min(i, j), max(i, j)) not in edge_set: continue
+				if (min(j, k), max(j, k)) not in edge_set: continue
+				if (min(k, l), max(k, l)) not in edge_set: continue
+				if (i, j, k, l) > (l, k, j, i):
+					i, j, k, l = l, k, j, i
+				out['propers'][(i, j, k, l)] = [
+					[c['n'], c['phi_0'], c['K_phi'],
+						c.get('idivf', 1.0)]
+					for c in par['components']]
+		elif tg[0] == 'at':
+			spec  = tg[1]
+			score = sum(1 for s in spec if s != '*')
+			comps = [[c['n'], c['phi_0'], c['K_phi'],
+				c.get('idivf', 1.0)] for c in par['components']]
+			for (i, j, k, l) in quad_list:
+				if not (clsmatch(spec, (i, j, k, l)) or
+					clsmatch(spec, (l, k, j, i))): continue
+				canon = (i, j, k, l) if (i, j, k, l) <= (l, k, j, i) \
+					else (l, k, j, i)
+				prev = proper_best.get(canon)
+				if prev is None or score >= prev[0]:
+					proper_best[canon] = (score, comps)
+	for canon, (score, comps) in proper_best.items():
+		out['propers'][canon] = [list(c) for c in comps]
+	# ---- Improper torsions -----------------------------------------
+	if improper_style in ('amber', 'charmm'):
+		# Class-typed impropers: AMBER stores the centre at tag :2 with
+		# a Y-shape, CHARMM at tag :1. The match tuple is laid out so
+		# ImproperTorsionPotential evaluates the dihedral as OpenMM does
+		# (AMBER: outer-outer-CENTRE-outer; CHARMM: CENTRE-t2-t3-t4),
+		# at full K with no trefoil expansion.
+		imp_best = {}
+		cpos = 1 if improper_style == 'amber' else 0
+		for sm, par in params.get('ImproperTorsions', {}).items():
+			tg = tagparse(sm)
+			if tg is None or tg[0] != 'at' or len(tg[1]) != 4:
+				continue
+			spec  = tg[1]
+			cspec = spec[cpos]
+			ospec = [spec[p] for p in range(4) if p != cpos]
+			score = sum(1 for s in spec if s != '*')
+			for c in sorted_ids:
+				if cspec != '*' and cls_of(c) != cspec: continue
+				ns = nbr[c]
+				if len(ns) < 3: continue
+				prev = imp_best.get(c)
+				if prev is not None and prev[0] > score: continue
+				trip = None
+				for x in range(len(ns)):
+					for y in range(len(ns)):
+						if y == x: continue
+						for z in range(len(ns)):
+							if z == x or z == y: continue
+							cand = (ns[x], ns[y], ns[z])
+							if clsmatch(ospec, cand):
+								trip = cand; break
+						if trip: break
+					if trip: break
+				if trip is None: continue
+				o1, o2, o3 = trip
+				ent = []
+				for cc in par['components']:
+					if improper_style == 'amber':
+						ent.append((o1, o2, c, o3, cc['n'],
+							cc['phi_0'], cc['K_phi']))
+					else:
+						ent.append((c, o1, o2, o3, cc['n'],
+							cc['phi_0'], cc['K_phi']))
+				imp_best[c] = (score, ent)
+		for score, ent in imp_best.values():
+			out['impropers'].extend(ent)
+	else:
+		# SMIRNOFF trefoil: centre at tag :2, 3 cyclic outer perms, K/3
+		imp_by_centre = {}
+		for sm, par in params.get('ImproperTorsions', {}).items():
+			if tagparse(sm) is not None: continue
+			try: pat = get(sm)
+			except Exception: continue
+			for tup in match(pat):
+				if len(tup) != 4: continue
+				a1, a2, a3, a4 = tup
+				perms = [(a1, a3, a4), (a3, a4, a1), (a4, a1, a3)]
+				entries = []
+				for o1, o2, o3 in perms:
+					for c in par['components']:
+						entries.append((a2, o1, o2, o3, c['n'],
+							c['phi_0'], c['K_phi'] / 3.0))
+				imp_by_centre[a2] = entries
+		for entries in imp_by_centre.values():
+			out['impropers'].extend(entries)
+	# ---- vdW (per-atom eps/sigma; optional separate 1-4 params) -----
 	for sm, par in params.get('vdW', {}).items():
-		try: pat = get(sm)
-		except Exception: continue
-		for tup in match(pat):
-			if len(tup) != 1: continue
-			i = tup[0]
-			eps = par['epsilon']
-			if 'sigma' in par: sig = par['sigma']
-			else: sig = par['r'] * rmin2sig
+		tg = tagparse(sm)
+		if tg is not None and tg[0] not in ('at',): continue
+		eps = par['epsilon']
+		sig = par['sigma'] if 'sigma' in par else par['r'] * rmin2sig
+		has14 = 'epsilon14' in par or 'sigma14' in par
+		if has14:
+			eps14 = par.get('epsilon14', eps)
+			if 'sigma14' in par: sig14 = par['sigma14']
+			elif 'r14' in par:   sig14 = par['r14'] * rmin2sig
+			else:                sig14 = sig
+		if tg is None:
+			try: pat = get(sm)
+			except Exception: continue
+			hits = [tup[0] for tup in match(pat) if len(tup) == 1]
+		else:
+			spec0 = tg[1][0]
+			hits = [i for i in sorted_ids
+				if spec0 == '*' or cls_of(i) == spec0]
+		for i in hits:
 			out['vdw'][i] = [eps, sig]
-			# Atomic polarisability co-located with the vdW entry;
-			# defaults to 0 for legacy DBs that don't carry alpha.
 			out['polarisation'][i] = par.get('alpha', 0.0)
+			if has14: out['vdw14'][i] = [eps14, sig14]
+	# ---- Electrostatic / library charges ---------------------------
 	for sm, par in params.get('LibraryCharges', {}).items():
-		try: pat = get(sm)
-		except Exception: continue
-		qs = par.get('q', [])
-		for tup in match(pat):
-			for k, idx in enumerate(tup):
-				if k < len(qs): out['charges'][idx] = float(qs[k])
+		tg = tagparse(sm)
+		if tg is None:
+			try: pat = get(sm)
+			except Exception: continue
+			qs = par.get('q', [])
+			for tup in match(pat):
+				for k, idx in enumerate(tup):
+					if k < len(qs): out['charges'][idx] = float(qs[k])
+		elif tg[0] == 'res':
+			tri, nm = tg[1]
+			qs = par.get('q', [])
+			if not qs: continue
+			q0 = float(qs[0])
+			for i in sorted_ids:
+				if atom_reskey.get(i) == tri and \
+					atom_tname.get(i) == nm:
+					out['charges'][i] = q0
 	return out
 
 class ForceField():
@@ -833,6 +1106,11 @@ class ForceField():
 		ff = {k: ff_db[k] for k in MOL_KEYS if k in ff_db}
 		if 'Electrostatic' in ff:
 			ff['LibraryCharges'] = ff['Electrostatic']
+		# Atom-typed force fields (AMBER/CHARMM) carry these flags so
+		# SMIRKSMatch knows the improper convention and torsion
+		# precedence; absent for SMIRKS force fields (OpenFF/Default).
+		for k in ('improper_style', 'proper_precedence'):
+			if k in ff_db: ff[k] = ff_db[k]
 		for sm, par in ff.get('Bonds', {}).items():
 			par['K_b'] = par['K_b'] * 0.5
 		for sm, par in ff.get('Angles', {}).items():
@@ -874,6 +1152,54 @@ class ForceField():
 		'''
 		self._cache = None
 		self(pose, grad=False)
+	def _repairbonds(self, pose):
+		'''
+		Complete an under-specified bond graph in place: bond every
+		orphan hydrogen to its nearest atom and every disulfide SG-SG
+		pair, using the (exact) imported coordinates. A no-op when the
+		graph is already complete, so it never disturbs poses built from
+		SDF files or from sequence.
+		Arguments:
+		----------
+			pose: Pose - the pose whose data['Bonds'] may be incomplete
+		Returns:
+		--------
+			int: number of bonds added (0 when nothing needed repair)
+		'''
+		atoms  = pose.data['Atoms']
+		bonds  = pose.data['Bonds']
+		orders = pose.data.setdefault('BondOrders', {})
+		coords = np.asarray(pose.data['Coordinates'], dtype=np.float64)
+		ids = sorted(atoms.keys())
+		deg = {i: len(bonds.get(i, [])) for i in ids}
+		bondset = set()
+		for i in ids:
+			for j in bonds.get(i, []):
+				bondset.add((min(i, j), max(i, j)))
+		def addbond(i, j):
+			bonds.setdefault(i, []).append(j)
+			bonds.setdefault(j, []).append(i)
+			orders.setdefault(i, []).append(1.0)
+			orders.setdefault(j, []).append(1.0)
+			bondset.add((min(i, j), max(i, j)))
+		added = 0
+		orphans = [i for i in ids
+			if deg[i] == 0 and atoms[i][1] == 'H']
+		for i in orphans:
+			d = np.linalg.norm(coords - coords[i], axis=1)
+			d[i] = 1e18
+			j = int(np.argmin(d))
+			if d[j] <= 1.3:
+				addbond(i, j); added += 1
+		if pose.data.get('Type') == 'Protein':
+			sg = [i for i in ids if atoms[i][0] == 'SG']
+			for a in range(len(sg)):
+				for b in range(a + 1, len(sg)):
+					i, j = sg[a], sg[b]
+					if (min(i, j), max(i, j)) in bondset: continue
+					if np.linalg.norm(coords[i] - coords[j]) <= 2.5:
+						addbond(i, j); added += 1
+		return added
 	def __call__(self, pose, grad=False, box=None):
 		'''
 		Calculates the total potential energy summed over configured terms
@@ -889,6 +1215,7 @@ class ForceField():
 		'''
 		if len(pose.data.get('Atoms', {})) == 0:
 			return (0.0, np.zeros((0, 3))) if grad else 0.0
+		self._repairbonds(pose)
 		bonds_key = tuple((int(k), tuple(sorted(int(j) for j in v)))
 			for k, v in sorted(pose.data['Bonds'].items()))
 		atoms_key = tuple((int(k), tuple(a))
@@ -980,10 +1307,19 @@ class ForceField():
 							quad = (x, i, j, y) if i < j else (y, j, i, x)
 							if quad not in matched_propers:
 								gaps.append(f'torsion ({x}, {i}, {j}, {y})')
-			matched_centres = {tup[0] for tup in assigns['impropers']}
-			for c in atoms_set:
-				if len(nbr_local[c]) == 3 and c not in matched_centres:
-					gaps.append(f'improper centre {c}')
+			# The "every 3-coordinate atom needs an improper" rule
+			# only holds for SMIRNOFF force fields; AMBER / CHARMM
+			# place impropers on selected centres only.
+			if self.Parameters.get('improper_style',
+				'smirnoff') == 'smirnoff':
+				matched_centres = {tup[0]
+					for tup in assigns['impropers']}
+				matched_centres |= {tup[2]
+					for tup in assigns['impropers']}
+				for c in atoms_set:
+					if (len(nbr_local[c]) == 3
+						and c not in matched_centres):
+						gaps.append(f'improper centre {c}')
 			for i in atoms_set:
 				if assigns['vdw'].get(i) is None:
 					gaps.append(f'vdW atom {i}')
@@ -1131,6 +1467,23 @@ class ForceField():
 				np.where(scal14, f_elec, 1.0))
 			cache['scal14_bool'] = scal14
 			cache['excl_bool']   = excl
+			# CHARMM-style separate 1-4 Lennard-Jones parameters:
+			# overwrite the mixed sigma/epsilon at 1-4 positions so
+			# VDWPotential's sum(lj[far]) + f_lj*sum(lj[14]) yields the
+			# 1-4-specific energy (CHARMM uses f_lj = 1.0).
+			vdw14 = assigns.get('vdw14', {})
+			if vdw14:
+				sig14 = sig.copy(); eps14 = eps.copy()
+				for i in range(n):
+					p14 = vdw14.get(i)
+					if p14 is not None:
+						eps14[i], sig14[i] = p14[0], p14[1]
+				ls14 = 0.5 * (sig14[:, None] + sig14[None, :])
+				le14 = np.sqrt(eps14[:, None] * eps14[None, :])
+				cache['lj_sigma']  = np.where(scal14, ls14,
+					cache['lj_sigma'])
+				cache['lj_eps_ij'] = np.where(scal14, le14,
+					cache['lj_eps_ij'])
 			cache['cmap_phi_q']  = np.empty((0, 4), dtype=np.int64)
 			cache['cmap_psi_q']  = np.empty((0, 4), dtype=np.int64)
 			cache['cmap_tables'] = np.empty((0, 24, 24), dtype=np.float64)
@@ -1158,8 +1511,13 @@ class ForceField():
 					if (bb_per_res[prev_ri][0] != chain or
 						bb_per_res[next_ri][0] != chain):
 						continue
-					code = bb_per_res[ri][1]
-					grid = cmap_section.get(code)
+					# Atom-typed force fields key CMAP by the resolved
+					# variant tricode (CYX vs CYS, HID/HIE/HIP, ...);
+					# SMIRKS force fields key by the 1-letter code.
+					restri = assigns.get('restri', {})
+					grid = (cmap_section.get(restri.get(ri))
+						or cmap_section.get(aas[ri][5])
+						or cmap_section.get(bb_per_res[ri][1]))
 					if grid is None: continue
 					g = np.asarray(grid, dtype=np.float64)
 					if g.shape != (24, 24): continue
@@ -1175,6 +1533,18 @@ class ForceField():
 					cache['cmap_psi_q']  = np.asarray(psi_q_list,
 						dtype=np.int64)
 					cache['cmap_tables'] = np.stack(grids)
+			# Periodic-cubic-spline derivative tables for the
+			# OpenMM-exact CMAP bicubic (CMAPPotential alg='openmm').
+			T  = cache['cmap_tables']
+			Ng = T.shape[1]
+			eye = np.eye(Ng)
+			Am = 4.0 * eye + np.roll(eye, 1, 0) + np.roll(eye, -1, 0)
+			Bm = np.roll(eye, -1, 0) - np.roll(eye, 1, 0)
+			D  = (3.0 * Ng / (2.0 * np.pi)) * np.linalg.solve(Am, Bm)
+			cache['cmap_d1']  = np.einsum('ab,mbc->mac', D, T)
+			cache['cmap_d2']  = np.einsum('mab,cb->mac', T, D)
+			cache['cmap_d12'] = np.einsum('mab,cb->mac',
+				cache['cmap_d1'], D)
 			self._cache = cache
 			self._cache_hash = h
 		n = self._cache['n']
@@ -1728,13 +2098,16 @@ class ForceField():
 		M = A[:, :, None] * G
 		forces = -np.sum(M, axis=1) + np.sum(M, axis=0)
 		return energy, forces
-	def CMAPPotential(self, pose, cache, grad=True, box=None):
+	def CMAPPotential(self, pose, cache, alg='catmullrom', grad=True, box=None):
 		'''
 		Calculates the CMAP backbone (phi, psi) cross-term correction energy
 		Arguments:
 		----------
 			pose:  Pose - molecule source protein, DNA, RNA, or Molecule pose
 			cache: dict - precomputed topology + parameter from _compile()
+			alg:   Str algorithm type, 'catmullrom' (centred-difference
+				bicubic) or 'openmm' (periodic-cubic-spline bicubic,
+				bit-exact to OpenMM's CMAPTorsionForce)
 			grad:  bool - if True, also return per-atom forces (N, 3) array
 			box:   None for no PBC; (3,) for orthorhombic; (3, 3) for triclinic
 		Returns:
@@ -1765,30 +2138,82 @@ class ForceField():
 		phi, psi = ang[:M], ang[M:]
 		N_grid = tables.shape[1]
 		H = 2.0 * np.pi / N_grid
-		x = (phi + np.pi) / H
-		y = (psi + np.pi) / H
-		gi = np.floor(x).astype(np.int64) % N_grid
-		gj = np.floor(y).astype(np.int64) % N_grid
-		u = x - np.floor(x)
-		v = y - np.floor(y)
-		off = np.array([-1, 0, 1, 2])
-		a_grid = (gi[:, None, None] + off[None, :, None]) % N_grid
-		b_grid = (gj[:, None, None] + off[None, None, :]) % N_grid
-		stencil = tables[np.arange(M)[:, None, None], a_grid, b_grid]
-		uw  = 0.5 * np.stack([-u + 2*u**2 - u**3, 2 - 5*u**2 + 3*u**3,
-			u + 4*u**2 - 3*u**3, -u**2 + u**3], axis=-1)
-		vw  = 0.5 * np.stack([-v + 2*v**2 - v**3, 2 - 5*v**2 + 3*v**3,
-			v + 4*v**2 - 3*v**3, -v**2 + v**3], axis=-1)
-		duw = 0.5 * np.stack([-1 + 4*u - 3*u**2, -10*u + 9*u**2,
-			1 + 8*u - 9*u**2, -2*u + 3*u**2], axis=-1)
-		dvw = 0.5 * np.stack([-1 + 4*v - 3*v**2, -10*v + 9*v**2,
-			1 + 8*v - 9*v**2, -2*v + 3*v**2], axis=-1)
-		E_per = np.einsum('ma,mab,mb->m', uw, stencil, vw)
-		dE_du = np.einsum('ma,mab,mb->m', duw, stencil, vw)
-		dE_dv = np.einsum('ma,mab,mb->m', uw, stencil, dvw)
-		dU_dphi = dE_du / H
-		dU_dpsi = dE_dv / H
-		energy = float(np.sum(E_per))
+		if alg == 'openmm':
+			# OpenMM's CMAPTorsionForce: the grid is indexed by the
+			# negated dihedrals, axis 0 from psi and axis 1 from phi,
+			# interpolated with a periodic-cubic-spline bicubic patch.
+			d1, d2, d12 = (cache['cmap_d1'], cache['cmap_d2'],
+				cache['cmap_d12'])
+			WT = np.array([
+				[1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+				[0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0],
+				[-3,0,0,3,0,0,0,0,-2,0,0,-1,0,0,0,0],
+				[2,0,0,-2,0,0,0,0,1,0,0,1,0,0,0,0],
+				[0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0],
+				[0,0,0,0,0,0,0,0,0,0,0,0,1,0,0,0],
+				[0,0,0,0,-3,0,0,3,0,0,0,0,-2,0,0,-1],
+				[0,0,0,0,2,0,0,-2,0,0,0,0,1,0,0,1],
+				[-3,3,0,0,-2,-1,0,0,0,0,0,0,0,0,0,0],
+				[0,0,0,0,0,0,0,0,-3,3,0,0,-2,-1,0,0],
+				[9,-9,9,-9,6,3,-3,-6,6,-6,-3,3,4,2,1,2],
+				[-6,6,-6,6,-4,-2,2,4,-3,3,3,-3,-2,-1,-1,-2],
+				[2,-2,0,0,1,1,0,0,0,0,0,0,0,0,0,0],
+				[0,0,0,0,0,0,0,0,2,-2,0,0,1,1,0,0],
+				[-6,6,-6,6,-3,-3,3,3,-4,4,2,-2,-2,-2,-1,-1],
+				[4,-4,4,-4,2,2,-2,-2,2,-2,-2,2,1,1,1,1]],
+				dtype=np.float64)
+			xa = np.mod(-psi, 2.0 * np.pi) / H
+			ya = np.mod(-phi, 2.0 * np.pi) / H
+			gi = np.floor(xa).astype(np.int64) % N_grid
+			gj = np.floor(ya).astype(np.int64) % N_grid
+			t  = xa - np.floor(xa)
+			u  = ya - np.floor(ya)
+			mm  = np.arange(M)[:, None]
+			ci  = np.stack([gi, (gi + 1) % N_grid,
+				(gi + 1) % N_grid, gi], axis=1)
+			cj  = np.stack([gj, gj, (gj + 1) % N_grid,
+				(gj + 1) % N_grid], axis=1)
+			f   = tables[mm, ci, cj]
+			fx  = d1[mm, ci, cj] * H
+			fy  = d2[mm, ci, cj] * H
+			fxy = d12[mm, ci, cj] * H * H
+			rhs = np.concatenate([f, fx, fy, fxy], axis=1)
+			c   = (rhs @ WT.T).reshape(M, 4, 4)
+			pu  = [((c[:, i, 3] * u + c[:, i, 2]) * u
+				+ c[:, i, 1]) * u + c[:, i, 0] for i in range(4)]
+			dpu = [(3 * c[:, i, 3] * u + 2 * c[:, i, 2]) * u
+				+ c[:, i, 1] for i in range(4)]
+			E_per = ((pu[3] * t + pu[2]) * t + pu[1]) * t + pu[0]
+			dE_dt = pu[1] + 2 * t * pu[2] + 3 * t * t * pu[3]
+			dE_du = ((dpu[3] * t + dpu[2]) * t + dpu[1]) * t + dpu[0]
+			dU_dpsi = -dE_dt / H
+			dU_dphi = -dE_du / H
+			energy = float(np.sum(E_per))
+		else:
+			x = (phi + np.pi) / H
+			y = (psi + np.pi) / H
+			gi = np.floor(x).astype(np.int64) % N_grid
+			gj = np.floor(y).astype(np.int64) % N_grid
+			u = x - np.floor(x)
+			v = y - np.floor(y)
+			off = np.array([-1, 0, 1, 2])
+			a_grid = (gi[:, None, None] + off[None, :, None]) % N_grid
+			b_grid = (gj[:, None, None] + off[None, None, :]) % N_grid
+			stencil = tables[np.arange(M)[:, None, None], a_grid, b_grid]
+			uw  = 0.5 * np.stack([-u + 2*u**2 - u**3, 2 - 5*u**2 + 3*u**3,
+				u + 4*u**2 - 3*u**3, -u**2 + u**3], axis=-1)
+			vw  = 0.5 * np.stack([-v + 2*v**2 - v**3, 2 - 5*v**2 + 3*v**3,
+				v + 4*v**2 - 3*v**3, -v**2 + v**3], axis=-1)
+			duw = 0.5 * np.stack([-1 + 4*u - 3*u**2, -10*u + 9*u**2,
+				1 + 8*u - 9*u**2, -2*u + 3*u**2], axis=-1)
+			dvw = 0.5 * np.stack([-1 + 4*v - 3*v**2, -10*v + 9*v**2,
+				1 + 8*v - 9*v**2, -2*v + 3*v**2], axis=-1)
+			E_per = np.einsum('ma,mab,mb->m', uw, stencil, vw)
+			dE_du = np.einsum('ma,mab,mb->m', duw, stencil, vw)
+			dE_dv = np.einsum('ma,mab,mb->m', uw, stencil, dvw)
+			dU_dphi = dE_du / H
+			dU_dpsi = dE_dv / H
+			energy = float(np.sum(E_per))
 		if not grad: return energy
 		dU_d = np.concatenate([dU_dphi, dU_dpsi])
 		n1_sq = np.maximum(np.einsum('ij,ij->i', n1, n1), self._EPS)

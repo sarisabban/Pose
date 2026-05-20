@@ -102,6 +102,8 @@ p.Import('1TQG.pdb', chain='A')   # Or '1BNA.pdb' for a DNA/RNA structure
 p.ReBuild()                       # Adds missing hydrogens
 ```
 
+> Note: Importing a PDB structure with added Hydrogens will disrupt the *Bond Graph* in `p.data['Bonds']`, the bond graph won't include the hydrogens. It is recmended to run p.ReBuild() to re-establish the correct bond graph to include hydrogens (but this will change the positions of the Hydrogens). A trick to overcome this is to import the pose `p = Pose(); p.Import('1YN3.pdb')` and then seperatly import and rebuild the pose `p2 = Pose(); p2.Import('1YN3.pdb'); p2.ReBuild()` then substiture the bond graph from `p2` to `p`: `p.data['Bonds'] = p2.data['Bonds']`. This would solve it
+
 You can run `p.ReBuild()` after `Import()` to add hydrogens to the structure. But understand that a new synthetic structure will be built, therefore you will lose the original occupancy and temperature-factor for each atom (replaced with 1.0 and 0.0).
 
 **Building DNA/RNA:**
