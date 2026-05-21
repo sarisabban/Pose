@@ -2502,6 +2502,71 @@ class Pose():
 			mutated/new residues and preserved dihedrals for the
 			rest; missing hydrogens are added
 		'''
+		def frame(p0, p1, p2):
+			'''
+			Build an orthonormal frame (rows) from three points
+			Arguments:
+			----------
+				p0: point used as the frame origin
+				p1: point defining the first basis direction
+				p2: point fixing the frame plane
+			Returns:
+			--------
+				ndarray (3, 3): rows are orthonormal basis vectors
+			'''
+			e1 = p1 - p0
+			m1 = np.linalg.norm(e1)
+			if m1 < 1e-9:
+				raise Exception('ReBuild: degenerate hydrogen frame')
+			e1 = e1 / m1
+			v = p2 - p0
+			e2 = v - np.dot(v, e1) * e1
+			m2 = np.linalg.norm(e2)
+			if m2 < 1e-9:
+				raise Exception('ReBuild: collinear hydrogen frame')
+			e2 = e2 / m2
+			return np.array([e1, e2, np.cross(e1, e2)])
+		def placehydrogens(new_h, tmpl):
+			'''
+			Place missing hydrogens from each parent's local frame
+			Arguments:
+			----------
+				new_h: list of atom indices of hydrogens to place
+				tmpl:  ndarray of idealised template coordinates
+			Returns:
+			--------
+				self.data['Coordinates'] updated in place: each
+				hydrogen set from template internal geometry
+				expressed in its parent atom's real local frame
+			'''
+			coords = self.data['Coordinates']
+			atoms = self.data['Atoms']
+			bonds = self.data['Bonds']
+			for h in new_h:
+				heavy = [j for j in bonds.get(h, [])
+					if atoms[j][1] != 'H']
+				if len(heavy) != 1:
+					raise Exception('ReBuild: hydrogen '
+						'%d lacks a unique heavy parent' % h)
+				p = heavy[0]
+				pn = sorted(j for j in bonds.get(p, [])
+					if atoms[j][1] != 'H' and j != h)
+				if len(pn) >= 2:
+					a1, a2 = pn[0], pn[1]
+				elif len(pn) == 1:
+					gn = sorted(j for j in bonds.get(pn[0], [])
+						if atoms[j][1] != 'H' and j != p)
+					if not gn:
+						raise Exception('ReBuild: cannot '
+							'resolve frame for hydrogen %d' % h)
+					a1, a2 = pn[0], gn[0]
+				else:
+					raise Exception('ReBuild: cannot resolve '
+						'frame for hydrogen %d' % h)
+				Ft = frame(tmpl[p], tmpl[a1], tmpl[a2])
+				Fr = frame(coords[p], coords[a1], coords[a2])
+				loc = Ft @ (tmpl[h] - tmpl[p])
+				coords[h] = coords[p] + Fr.T @ loc
 		mol = self.data['Type']
 		if mol == 'Protein':
 			AAs = self.data['Amino Acids']
@@ -2559,6 +2624,8 @@ class Pose():
 				self._buildprotein(sequence, ch0)
 			AAs2 = self.data['Amino Acids']
 			coords = self.data['Coordinates']
+			tmpl_coords = self.data['Coordinates'].copy()
+			new_h = []
 			for i in range(len(AAs2)):
 				has_orig = (
 					(i, 'N') in orig_coords
@@ -2601,9 +2668,12 @@ class Pose():
 						can_preserve = False
 					if can_preserve:
 						coords[ai] = orig_coords[(i, aname)]
+					elif self.data['Atoms'][ai][1] == 'H':
+						new_h.append(ai)
 					else:
 						local = F_new @ (coords[ai] - ori_new)
 						coords[ai] = on + F_orig_inv @ local
+			placehydrogens(new_h, tmpl_coords)
 			if mirror:
 				self.data['Coordinates'] *= [1, 1, -1]
 				N2 = len(self.data['Amino Acids'])
@@ -2700,6 +2770,9 @@ class Pose():
 					saved[aname] = F @ (pos - c4)
 				ring_local[i] = saved
 			orig_chains = sorted(set(v[1] for v in nts.values()))
+			orig_nt = {(i, self.data['Atoms'][a][0])
+				for i in range(N)
+				for a in nts[i][2] + nts[i][3]}
 			self.data = {
 				'Type': None, 'Energy': 0,
 				'Rg': 0, 'Mass': 0, 'Size': {},
@@ -2711,6 +2784,7 @@ class Pose():
 			self._buildnucleotide(seq_a, fmt, chains=orig_chains)
 			self.CalcCharge()
 			nts2 = self.data['Nucleotides']
+			tmpl_coords = self.data['Coordinates'].copy()
 			if _mutated is None:
 				new_syms = [nts2[i][0] for i in range(len(nts2))]
 				_mutated = {i for i in range(min(N, len(nts2)))
@@ -2882,6 +2956,11 @@ class Pose():
 					v = np.matmul(v, RM1)
 					coords[ai] = v + ori
 			self.data['Coordinates'] = coords
+			new_h = [a for i in range(len(nts2))
+				for a in nts2[i][2] + nts2[i][3]
+				if self.data['Atoms'][a][1] == 'H'
+				and (i, self.data['Atoms'][a][0]) not in orig_nt]
+			placehydrogens(new_h, tmpl_coords)
 		else:
 			raise Exception(
 				'No structure loaded. Call Import() first')
