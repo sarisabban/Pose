@@ -1846,10 +1846,15 @@ def Rotamers(index, pose):
 		if flip: mu = -mu
 		pose.RotateDihedral(index, float(mu), 'CHI', ci + 1)
 
-def Minimise(pose, ff=None, max_steps=500, ftol=1.0, dt_fs=0.1,
-		dt_max_fs=2.0, step_max=0.2, etol=1e-6, stall_k=10, box=None):
+def Minimise(pose, ff=None, max_steps=500, ftol=1.0, dt_fs=0.5,
+		dt_max_fs=1.0, step_max=0.2, etol=1e-6, stall_k=10, box=None):
 	'''
-	Relax pose coordinates with FIRE2 (Guenole et al. 2020) + trust region
+	Relax pose coordinates with FIRE2 (Guenole et al. 2020). A
+	trust-region cap bounds the per-atom displacement; a step that turns
+	non-finite or strongly uphill is rejected, dt shrunk and retried;
+	and the lowest-|force| frame ever seen is restored before returning,
+	so a force-field singularity (e.g. an uncovered atom with no bond)
+	can never fling atoms away or corrupt the returned structure
 	Arguments:
 	----------
 		pose:      Pose - molecule source protein, DNA, RNA, or Molecule
@@ -1858,54 +1863,57 @@ def Minimise(pose, ff=None, max_steps=500, ftol=1.0, dt_fs=0.1,
 		ftol:      float - convergence on max|force| (L_inf) in kJ/mol/A
 		dt_fs:     float - initial integrator step in femtoseconds
 		dt_max_fs: float - upper bound on the adaptive step in fs
-		step_max:  float - trust-region cap on |dt*v| per atom in Angstrom
+		step_max:  float - trust-region cap on per-atom displacement in A
 		etol:      float - energy-stall tolerance in kJ/mol
 		stall_k:   int - consecutive stalled steps that trigger early stop
 		box:       None for no PBC; (3,) orthorhombic; (3, 3) triclinic
 	Returns:
 	--------
-		tuple: (float, dict) - final energy in kJ/mol and per-step log
+		tuple: (float, dict) - energy of the best frame in kJ/mol and a
+		per-step log ('energies', 'fmax', 'max_step', 'converged',
+		'n_steps')
 	'''
 	if ff is None: ff = ForceField()
-	N_MIN, F_INC, F_DEC, A_START, F_ALPHA = 5, 1.1, 0.5, 0.1, 0.99
+	N_MIN, F_INC, F_DEC = 5, 1.1, 0.5
+	A_START, F_ALPHA = 0.1, 0.99
 	AKMA_FS = 23.91888086
 	atoms = pose.data['Atoms']
 	m = np.array([pose.masses[atoms[i][1]] for i in sorted(atoms)],
 		dtype=np.float64)[:, None]
 	v = np.zeros_like(pose.data['Coordinates'], dtype=np.float64)
-	dt = float(dt_fs) / AKMA_FS
+	dt     = float(dt_fs) / AKMA_FS
 	dt_max = float(dt_max_fs) / AKMA_FS
+	dt_min = dt * 1e-3
 	alpha, n_pos = float(A_START), 0
 	energies, fmaxes, max_steps_log = [], [], []
 	E, F = ff(pose, grad=True, box=box)
+	E = float(E)
+	best_fmax   = float(np.max(np.abs(F)))
+	best_coords = pose.data['Coordinates'].copy()
 	converged, steps_done, stall = False, 0, 0
-	E_prev = float(E)
 	for step in range(int(max_steps)):
 		fmax = float(np.max(np.abs(F)))
-		energies.append(float(E)); fmaxes.append(fmax)
+		energies.append(E); fmaxes.append(fmax)
 		steps_done = step + 1
-		if fmax < ftol:
+		# Remember the lowest-|force| frame; it is restored at the end.
+		if np.isfinite(fmax) and fmax < best_fmax:
+			best_fmax   = fmax
+			best_coords = pose.data['Coordinates'].copy()
+		if fmax < ftol or stall >= stall_k:
 			converged = True
 			break
-		stall = stall + 1 if abs(float(E) - E_prev) < etol else 0
-		E_prev = float(E)
-		if stall >= stall_k and step > 0:
-			converged = True
+		# Stop a clear divergence early (a FF singularity); the best
+		# frame is restored below, so the returned pose stays intact.
+		if (not np.isfinite(fmax)) or (fmax > 1e4
+				and fmax > 1e3 * best_fmax):
 			break
-		v += 0.5 * dt * F / m
-		step_vec = dt * v
-		nrm = np.linalg.norm(step_vec, axis=1, keepdims=True)
-		scale = np.minimum(1.0, step_max / np.maximum(nrm, 1e-12))
-		v *= scale
-		step_vec = dt * v
-		max_steps_log.append(float(np.max(np.abs(step_vec))))
-		pose.data['Coordinates'] = pose.data['Coordinates'] + step_vec
-		E, F = ff(pose, grad=True, box=box)
-		v += 0.5 * dt * F / m
+		# FIRE: mix the velocity toward the force when the power
+		# P = F . v is positive (downhill); zero it and shrink dt on
+		# an uphill power.
 		P = float(np.sum(F * v))
-		f_norm = float(np.linalg.norm(F))
-		v_norm = float(np.linalg.norm(v))
 		if P > 0.0:
+			f_norm = float(np.linalg.norm(F))
+			v_norm = float(np.linalg.norm(v))
 			mix = (alpha * v_norm / f_norm) if f_norm > 1e-12 else 0.0
 			v = (1.0 - alpha) * v + mix * F
 			n_pos += 1
@@ -1913,15 +1921,43 @@ def Minimise(pose, ff=None, max_steps=500, ftol=1.0, dt_fs=0.1,
 				dt = min(dt * F_INC, dt_max)
 				alpha *= F_ALPHA
 		else:
-			pose.data['Coordinates'] = pose.data['Coordinates'] - 0.5*dt*v
-			v.fill(0.0)
-			dt *= F_DEC
-			alpha = A_START
-			n_pos = 0
+			v = np.zeros_like(v)
+			dt = max(dt * F_DEC, dt_min)
+			alpha, n_pos = A_START, 0
+		# Semi-implicit Euler step; clamp the per-atom DISPLACEMENT
+		# (not the velocity, which carries FIRE's persistent momentum).
+		v = v + dt * F / m
+		dr = dt * v
+		nrm = np.linalg.norm(dr, axis=1, keepdims=True)
+		dr = dr * np.minimum(1.0, step_max / np.maximum(nrm, 1e-12))
+		max_steps_log.append(float(np.max(np.abs(dr))))
+		x_old = pose.data['Coordinates']
+		pose.data['Coordinates'] = x_old + dr
+		E_new, F_new = ff(pose, grad=True, box=box)
+		E_new = float(E_new)
+		fmax_new = float(np.max(np.abs(F_new)))
+		# Safeguard: undo a step that is non-finite, strongly uphill, or
+		# whose force explodes (a downhill run into a FF singularity);
+		# zero the velocity and shrink dt so the retry is smaller.
+		bad = (not np.isfinite(E_new)
+			or not np.isfinite(F_new).all()
+			or E_new > E + 1.0 + 0.05 * abs(E)
+			or (fmax_new > 1e3 and fmax_new > 100.0 * max(fmax, 1.0)))
+		if bad:
+			pose.data['Coordinates'] = x_old
+			v = np.zeros_like(v)
+			dt = max(dt * F_DEC, dt_min)
+			alpha, n_pos = A_START, 0
+			continue
+		stall = stall + 1 if abs(E_new - E) < etol else 0
+		E, F = E_new, F_new
+	# Restore the lowest-|force| frame and report its energy.
+	pose.data['Coordinates'] = best_coords
+	E, F = ff(pose, grad=True, box=box)
 	log = {
-		'energies':  np.asarray(energies,       dtype=np.float64),
-		'fmax':      np.asarray(fmaxes,         dtype=np.float64),
-		'max_step':  np.asarray(max_steps_log,  dtype=np.float64),
+		'energies':  np.asarray(energies,      dtype=np.float64),
+		'fmax':      np.asarray(fmaxes,        dtype=np.float64),
+		'max_step':  np.asarray(max_steps_log, dtype=np.float64),
 		'converged': bool(converged),
 		'n_steps':   int(steps_done)}
 	return float(E), log

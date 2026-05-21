@@ -700,47 +700,119 @@ def SMIRKSMatch(pose, params):
 	# ===============================================================
 	# Atom-typed force-field layer (AMBER ff19SB / CHARMM36)
 	# ---------------------------------------------------------------
-	# Atom-typed force fields smuggle a per-residue atom-class map under
-	# Constraints['<atomtype_map>'] and key their sections with the
-	# <at=c1,...> and <res=TRI><atom=NAME> tag prefixes in place of real
-	# SMIRKS. When no such map is present every helper below is inert
-	# and the SMIRKS path runs exactly as before, so OpenFF / Default
-	# energies stay byte-identical.
+	# Atom-typed force fields carry per-residue templates under
+	# Constraints['<residue_templates>'] (each atom's name / element /
+	# class / charge plus the intra-residue bond list) and key their
+	# sections with the <at=c1,...> tag prefix in place of real SMIRKS.
+	# Each pose residue is matched to its template by topology (see
+	# maptemplate), so the assignment is independent of the pose's
+	# atom-naming convention (Build/ReBuild vs an imported PDB). When no
+	# templates are present every helper below is inert and the SMIRKS
+	# path runs exactly as before, so OpenFF / Default energies stay
+	# byte-identical.
 	# ===============================================================
-	atomtype_map = params.get('Constraints', {}).get('<atomtype_map>')
+	residue_templates = (params.get('Constraints', {})
+		.get('<residue_templates>'))
 	improper_style = params.get('improper_style', 'smirnoff')
-	atom_name = {i: atoms[i][0] for i in sorted_ids}
-	atom_class = {i: None for i in sorted_ids}
+	atom_name   = {i: atoms[i][0] for i in sorted_ids}
+	atom_elem   = {i: atoms[i][1] for i in sorted_ids}
+	atom_class  = {i: None for i in sorted_ids}
+	atom_charge = {i: None for i in sorted_ids}
 	atom_reskey = {i: None for i in sorted_ids}
-	atom_tname = dict(atom_name)
-	def assigntypes():
+	atom_tname  = dict(atom_name)
+	HEAVY_ALIAS = {'CD1': 'CD'}
+	def v2v3(nm):
 		'''
-		Resolve every atom's residue key, template atom-name and atom
-		class from the smuggled <atomtype_map>, honouring N/C (protein)
-		and 5'/3' (nucleic acid) terminal variants, HIS protonation,
-		disulfide CYX retagging, and the N-terminal H -> H1 rename
+		Convert a PDB v2 atom name to v3 (leading digits move to end)
 		Arguments:
 		----------
-			No arguments taken (closes over pose / atomtype_map / nbr)
+			nm: str - an atom name, e.g. '1HB'
 		Returns:
 		--------
-			None: fills atom_class / atom_reskey / atom_tname in place
+			str: the v3 form, e.g. 'HB1' ('HA' is returned unchanged)
+		'''
+		i = 0
+		while i < len(nm) and nm[i].isdigit(): i += 1
+		return nm[i:] + nm[:i] if 0 < i < len(nm) else nm
+	def assigntypes():
+		'''
+		Resolve every atom's residue key, atom class and partial charge
+		by matching each pose residue to its force-field residue
+		template, honouring N/C (protein) and 5'/3' (nucleic acid)
+		terminal variants, HIS protonation and disulfide CYX retagging
+		Arguments:
+		----------
+			No arguments taken (closes over pose / residue_templates)
+		Returns:
+		--------
+			None: fills atom_class / atom_charge / atom_reskey /
+			atom_tname and out['restri'] in place
 		'''
 		aas  = pose.data.get('Amino Acids') or {}
 		nucs = pose.data.get('Nucleotides') or {}
-		def resolve(reskeys, ratoms, aliases=None):
+		def maptemplate(reskeys, ratoms, aliases=None):
+			'''
+			Match one residue's pose atoms to the first template present
+			among reskeys: exact name, then PDB v2<->v3 transform, then
+			parent-heavy-atom fallback
+			Arguments:
+			----------
+				reskeys: list of str - candidate variant keys
+				ratoms:  list of int - the residue's atom indices
+				aliases: dict or None - extra exact-name aliases
+			Returns:
+			--------
+				None: fills atom_class / atom_charge / atom_reskey /
+				atom_tname for every matched atom
+			'''
 			aliases = aliases or {}
+			tpl, chosen = None, None
+			for k in reskeys:
+				t = residue_templates.get(k)
+				if t is not None:
+					tpl, chosen = t, k
+					break
+			if tpl is None: return
+			tatoms = {a[0]: (a[1], a[2], a[3]) for a in tpl['atoms']}
+			tadj = {}
+			for x, y in tpl['bonds']:
+				tadj.setdefault(x, set()).add(y)
+				tadj.setdefault(y, set()).add(x)
+			rset = set(ratoms)
+			padj = {a: [b for b in nbr[a] if b in rset]
+				for a in ratoms}
+			hmap = {}
 			for a in ratoms:
-				nm = atom_name.get(a)
-				for k in reskeys:
-					m = atomtype_map.get(k)
-					if not m: continue
-					tn = nm if nm in m else aliases.get(nm)
-					if tn is not None and tn in m:
-						atom_class[a]  = m[tn]
-						atom_reskey[a] = k
-						atom_tname[a]  = tn
-						break
+				if atom_elem[a] == 'H': continue
+				nm = atom_name[a]
+				if nm in tatoms: hmap[a] = nm
+				elif HEAVY_ALIAS.get(nm) in tatoms:
+					hmap[a] = HEAVY_ALIAS[nm]
+			for a in ratoms:
+				nm, el = atom_name[a], atom_elem[a]
+				hit, tn = None, None
+				if nm in tatoms:
+					hit, tn = tatoms[nm], nm
+				elif aliases.get(nm) in tatoms:
+					tn = aliases[nm]; hit = tatoms[tn]
+				elif el != 'H' and HEAVY_ALIAS.get(nm) in tatoms:
+					tn = HEAVY_ALIAS[nm]; hit = tatoms[tn]
+				elif el == 'H' and v2v3(nm) in tatoms:
+					tn = v2v3(nm); hit = tatoms[tn]
+				else:
+					parents = [hmap[x] for x in padj[a]
+						if x in hmap]
+					for cn, val in tatoms.items():
+						if val[0] != el: continue
+						if any(p in tadj.get(cn, ())
+								for p in parents):
+							hit, tn = val, cn
+							break
+				if hit is not None:
+					atom_class[a]  = hit[1]
+					atom_charge[a] = hit[2]
+					atom_reskey[a] = chosen
+					atom_tname[a]  = tn
 		prot = {}
 		for ri in sorted(aas):
 			prot.setdefault(aas[ri][1], []).append(ri)
@@ -767,7 +839,7 @@ def SMIRKSMatch(pose, params):
 					elif hd1:       cand = ('HID', 'HSD')
 					else:           cand = ('HIE', 'HSE')
 					tri = next((v for v in cand if any(
-						(p + v) in atomtype_map
+						(p + v) in residue_templates
 						for p in ('', 'N', 'C'))), cand[0])
 				if tri == 'CYS' and ri in ss_res:
 					tri = 'CYX'
@@ -781,7 +853,7 @@ def SMIRKSMatch(pose, params):
 				aliases = None
 				if pos == 0 and 'H' in anames and 'H1' not in anames:
 					aliases = {'H': 'H1'}
-				resolve(keys, ats, aliases)
+				maptemplate(keys, ats, aliases)
 		nuc = {}
 		for ni in sorted(nucs):
 			nuc.setdefault(nucs[ni][1], []).append(ni)
@@ -795,9 +867,12 @@ def SMIRKSMatch(pose, params):
 				if pos == last: keys.append(tri + '3')
 				keys.append(tri)
 				keys.append(tri + 'N')
-				resolve(keys, ats)
-	if atomtype_map is not None:
+				maptemplate(keys, ats)
+	if residue_templates is not None:
 		assigntypes()
+		for i in sorted_ids:
+			if atom_charge[i] is not None:
+				out['charges'][i] = atom_charge[i]
 	def tagparse(key):
 		'''
 		Split a leading <...> tag prefix off a force-field section key
@@ -806,12 +881,13 @@ def SMIRKSMatch(pose, params):
 			key: str - a force-field section key
 		Returns:
 		--------
-			tuple or None: ('map',) for <atomtype_map>; ('at', [classes])
-				for <at=...>; ('res', (tri, name)) for <res=><atom=>;
-				None when the key carries no tag (i.e. a real SMIRKS)
+			tuple or None: ('map',) for <residue_templates>;
+				('at', [classes]) for <at=...>; ('res', (tri, name)) for
+				<res=><atom=>; None when the key carries no tag (a real
+				SMIRKS)
 		'''
 		if not key or key[0] != '<': return None
-		if key.startswith('<atomtype_map>'): return ('map',)
+		if key.startswith('<residue_templates>'): return ('map',)
 		if key.startswith('<at='):
 			return ('at', key[4:key.index('>')].split(','))
 		if key.startswith('<res='):
@@ -837,7 +913,7 @@ def SMIRKSMatch(pose, params):
 		return True
 	# Topology tuples reused by the atom-typed section loops
 	tri_list, quad_list = [], []
-	if atomtype_map is not None:
+	if residue_templates is not None:
 		for j in sorted_ids:
 			ns = nbr[j]
 			for x in range(len(ns)):
@@ -1549,13 +1625,20 @@ class ForceField():
 			self._cache_hash = h
 		n = self._cache['n']
 		E, F = 0.0, np.zeros((n, 3))
-		for method_name, kwargs in self.terms:
-			fn = getattr(self, method_name)
-			if grad:
-				e, f = fn(pose, cache=self._cache, grad=True, box=box, **kwargs)
-				E += e; F += f
-			else:
-				E += fn(pose, cache=self._cache, grad=False, box=box, **kwargs)
+		# Sticky CPU FP-exception flags (e.g. from a 1/r or r**12 in one
+		# term) are otherwise reported spuriously by a later term's
+		# matmul; energies stay finite, so the flags are suppressed here.
+		with np.errstate(over='ignore', invalid='ignore',
+			divide='ignore'):
+			for method_name, kwargs in self.terms:
+				fn = getattr(self, method_name)
+				if grad:
+					e, f = fn(pose, cache=self._cache, grad=True,
+						box=box, **kwargs)
+					E += e; F += f
+				else:
+					E += fn(pose, cache=self._cache, grad=False,
+						box=box, **kwargs)
 		return (E, F) if grad else E
 	def NAGLCharges(self, pose):
 		'''
