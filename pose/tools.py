@@ -2668,7 +2668,7 @@ def Port(name='openff'):
 			],
 		}
 		if nagl is not None: block['AM1BCC'] = nagl
-		ep.pop('openFF', None)
+		ep.pop('OpenFF', None)
 		db_key  = 'OpenFF'
 		suffix  = '.sdf'
 		targets = {'CFF': -526.798, 'AMX': 288.644, 'SUR': 617.480,

@@ -1149,7 +1149,7 @@ class ForceField():
 		Arguments:
 		----------
 			name:   str - key into database.json['Energy Parameters']
-				(e.g. 'Default', 'openFF'); matched case-insensitively
+				(e.g. 'Default', 'OpenFF'); matched case-insensitively
 				(e.g. 'default', 'OPENFF', 'oPeNfF' all resolve correctly).
 				Selects both the SMIRKS-keyed parameter sections and the
 				list of potential methods to evaluate (from `Terms`
