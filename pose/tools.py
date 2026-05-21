@@ -2380,7 +2380,8 @@ def Port(name='openff'):
 			succeeded; False if any benchmark deviates by > 1e-3 relative
 	'''
 	key     = str(name).upper()
-	db_path = './database.json'
+	here    = os.path.dirname(os.path.abspath(__file__))
+	db_path = os.path.join(here, 'database.json')
 	def download(url):
 		'''
 		Fetch the text of a pinned GitHub raw URL
