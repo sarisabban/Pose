@@ -7,6 +7,8 @@ import time
 import shutil
 import itertools
 import numpy as np
+import urllib.request
+import xml.etree.ElementTree as ET
 from .pose import DBLoad
 from .energy import ForceField
 from collections import defaultdict, deque
@@ -2362,3 +2364,595 @@ def MolecularDynamics(pose, ff=None, n_steps=1000, dt_fs=2.0, T=300.0,
 		'n_constraints': int(K),
 		'dof':           int(dof)}
 	return float(E), log
+
+def Port(name='openff'):
+	'''
+	Port one force field into database.json and optionally verify it
+	Arguments:
+	----------
+		name:   str - which force field to port; 'openff', 'ff19SB' or
+			'charmm36', matched case-insensitively
+		verify: bool - if True, re-import the force field's benchmark
+			structures and compare each energy against its reference
+	Returns:
+	--------
+		bool: True if the port (and verification, when requested)
+			succeeded; False if any benchmark deviates by > 1e-3 relative
+	'''
+	key     = str(name).upper()
+	db_path = './database.json'
+	def download(url):
+		'''
+		Fetch the text of a pinned GitHub raw URL
+		Arguments:
+		----------
+			url: str - a raw.githubusercontent.com URL on a fixed commit
+		Returns:
+		--------
+			str: the decoded file contents
+		'''
+		print(f'[port] downloading {url}', file=sys.stderr)
+		try:
+			with urllib.request.urlopen(url, timeout=120) as resp:
+				return resp.read().decode('utf-8')
+		except Exception as err:
+			raise RuntimeError(f'port: could not download {url}: {err}')
+	def cidof(rec, i):
+		'''
+		Read the namespaced atom identifier at slot i of a bonded record
+		Arguments:
+		----------
+			rec: dict - the XML element's attributes
+			i:   int  - 1-based slot index
+		Returns:
+		--------
+			str: the class/type identifier, '' for an unset wildcard slot
+		'''
+		v = rec.get('class%d' % i)
+		if v is None: v = rec.get('type%d' % i)
+		return v if v is not None else ''
+	def qval(qstr, target):
+		'''
+		Convert a SMIRNOFF quantity string to a target unit
+		Arguments:
+		----------
+			qstr:   str - a quantity, e.g. '1.5 * angstrom ** 1'
+			target: str - the desired unit expression, e.g.
+				'kilojoule_per_mole * angstrom ** -2'
+		Returns:
+		--------
+			float: the magnitude of qstr expressed in the target unit
+		'''
+		units = {
+			'angstrom':             (1.0,           {'L': 1}),
+			'nanometer':            (10.0,          {'L': 1}),
+			'degree':               (1.0,           {'A': 1}),
+			'radian':               (180.0/math.pi, {'A': 1}),
+			'mole':                 (1.0,           {'N': 1}),
+			'kilojoule':            (1.0,           {'E': 1}),
+			'kilocalorie':          (4.184,         {'E': 1}),
+			'kilojoule_per_mole':   (1.0,           {'E': 1, 'N': -1}),
+			'kilocalorie_per_mole': (4.184,         {'E': 1, 'N': -1}),
+			'elementary_charge':    (1.0,           {'Q': 1})}
+		def reduce(text):
+			'''Reduce a unit expression to (factor, {dimension: power}).'''
+			factor, dims = 1.0, {}
+			for tok in text.strip().replace('**', '^').split('*'):
+				tok = tok.strip()
+				if not tok: continue
+				if '^' in tok:
+					nm, _, ex = tok.partition('^')
+					nm, ex = nm.strip(), int(ex.strip())
+				else:
+					nm, ex = tok, 1
+				try:
+					factor *= float(nm) ** ex
+					continue
+				except ValueError:
+					pass
+				if nm not in units:
+					raise ValueError(
+						f'port: unknown unit {nm!r} in {text!r}')
+				f, d = units[nm]
+				factor *= f ** ex
+				for k, v in d.items():
+					dims[k] = dims.get(k, 0) + v * ex
+			return factor, {k: v for k, v in dims.items() if v}
+		fq, dq = reduce(qstr)
+		ft, dt = reduce(target)
+		if dq != dt:
+			raise ValueError(
+				f'port: cannot convert {qstr!r} to {target!r} '
+				f'(dimension mismatch)')
+		return fq / ft
+	def converttorsions(section):
+		'''
+		Convert a SMIRNOFF torsion section to Pose's component schema
+		Arguments:
+		----------
+			section: xml.etree Element - a <ProperTorsions> or
+				<ImproperTorsions> SMIRNOFF section
+		Returns:
+		--------
+			dict: {SMIRKS: {id, components: [{n, phi_0, K_phi, idivf}]}}
+		'''
+		out = {}
+		for p in section:
+			a = p.attrib
+			comps, i = [], 1
+			while ('k%d' % i) in a:
+				idivf = a.get('idivf%d' % i)
+				comps.append({
+					'n':     int(a['periodicity%d' % i]),
+					'phi_0': qval(a['phase%d' % i], 'degree'),
+					'K_phi': qval(a['k%d' % i], 'kilojoule_per_mole'),
+					'idivf': float(idivf) if idivf is not None else 1.0})
+				i += 1
+			out[a['smirks']] = {'id': a.get('id'), 'components': comps}
+		return out
+	def charmmtypes(root):
+		'''
+		Rebuild per-residue templates (atom name / element / class /
+		charge plus the intra-residue bond list), with the N/C-terminal
+		and disulfide variants, from charmm36.xml Residues + Patches --
+		a pure-stdlib replacement for the OpenMM template/patch engine
+		Arguments:
+		----------
+			root: xml.etree Element - the parsed charmm36.xml root
+		Returns:
+		--------
+			dict: {variant: {atoms: [[name, element, class, charge]],
+				bonds: [[name, name]]}}
+		'''
+		at_elem = {t.attrib['name']: t.attrib.get('element', '')
+			for t in root.find('AtomTypes')}
+		res = {}
+		for rr in root.find('Residues'):
+			atoms, bonds = {}, []
+			for c in rr:
+				if c.tag == 'Atom':
+					atoms[c.attrib['name']] = [c.attrib['type'],
+						float(c.attrib['charge'])]
+				elif c.tag == 'Bond':
+					bonds.append((c.attrib['atomName1'],
+						c.attrib['atomName2']))
+			res[rr.attrib['name']] = (atoms, bonds)
+		patch = {}
+		for pp in root.find('Patches'):
+			d = {'change': {}, 'add': {}, 'remove': [],
+				'addbond': [], 'rmbond': []}
+			for c in pp:
+				a = c.attrib
+				if   c.tag == 'ChangeAtom':
+					d['change'][a['name']] = [a['type'],
+						float(a['charge'])]
+				elif c.tag == 'AddAtom':
+					d['add'][a['name']] = [a['type'],
+						float(a['charge'])]
+				elif c.tag == 'RemoveAtom':
+					d['remove'].append(a['name'])
+				elif c.tag == 'AddBond':
+					d['addbond'].append((a['atomName1'],
+						a['atomName2']))
+				elif c.tag == 'RemoveBond':
+					d['rmbond'].append((a['atomName1'],
+						a['atomName2']))
+			patch[pp.attrib['name']] = d
+		def patchside(nm):
+			'''Strip a 2-residue patch prefix: "1:CB" -> ("1", "CB").'''
+			if len(nm) > 2 and nm[1] == ':': return nm[0], nm[2:]
+			return None, nm
+		def applypatch(base, pname):
+			'''Apply one patch (residue-1 side) to a (atoms, bonds) pair.'''
+			atoms = {k: list(v) for k, v in base[0].items()}
+			bonds = list(base[1])
+			d = patch[pname]
+			def keep(nm):
+				s, real = patchside(nm)
+				return real if s in (None, '1') else None
+			for nm, v in d['change'].items():
+				real = keep(nm)
+				if real is not None and real in atoms:
+					atoms[real] = list(v)
+			for nm, v in d['add'].items():
+				real = keep(nm)
+				if real is not None: atoms[real] = list(v)
+			rem = {keep(nm) for nm in d['remove']} - {None}
+			atoms = {k: v for k, v in atoms.items() if k not in rem}
+			bonds = [b for b in bonds
+				if b[0] not in rem and b[1] not in rem]
+			rmb = set()
+			for x, y in d['rmbond']:
+				rx, ry = keep(x), keep(y)
+				if rx is not None and ry is not None:
+					rmb.add(frozenset((rx, ry)))
+			bonds = [b for b in bonds if frozenset(b) not in rmb]
+			for x, y in d['addbond']:
+				rx, ry = keep(x), keep(y)
+				if rx is not None and ry is not None:
+					bonds.append((rx, ry))
+			return (atoms, bonds)
+		npatch = {'GLY': 'GLYP', 'PRO': 'PROP'}
+		protein = ['ALA', 'ARG', 'ASN', 'ASP', 'CYS', 'GLN', 'GLU',
+			'GLY', 'HSD', 'HSE', 'HSP', 'ILE', 'LEU', 'LYS', 'MET',
+			'PHE', 'PRO', 'SER', 'THR', 'TRP', 'TYR', 'VAL']
+		variants = {}
+		for rn in protein:
+			if rn not in res: continue
+			variants[rn]       = res[rn]
+			variants['N' + rn] = applypatch(res[rn],
+				npatch.get(rn, 'NTER'))
+			variants['C' + rn] = applypatch(res[rn], 'CTER')
+		if 'CYS' in res:
+			cyx = applypatch(res['CYS'], 'DISU')
+			variants['CYX']  = cyx
+			variants['NCYX'] = applypatch(cyx, 'NTER')
+			variants['CCYX'] = applypatch(cyx, 'CTER')
+		templates = {}
+		for vn, (atoms, bonds) in variants.items():
+			templates[vn] = {
+				'atoms': [[nm, at_elem.get(cls, ''), cls, chg]
+					for nm, (cls, chg) in atoms.items()],
+				'bonds': [[a, b] for a, b in bonds]}
+		return templates
+	with open(db_path) as f: db = json.load(f)
+	ep = db.setdefault('Energy Parameters', {})
+	# ============================================================
+	# OpenFF Sage 2.3.0
+	# ============================================================
+	if key == 'OPENFF':
+		commit = 'edd7724103a558328c358a9e35462334c4a45b6f'
+		url = ('https://raw.githubusercontent.com/openforcefield/'
+			'openff-forcefields/' + commit
+			+ '/openforcefields/offxml/openff-2.3.0.offxml')
+		root = ET.fromstring(download(url))
+		rmin_factor = 2.0 / (2.0 ** (1.0 / 6.0))
+		bonds = {}
+		for p in root.find('Bonds'):
+			a = p.attrib
+			bonds[a['smirks']] = {'id': a.get('id'),
+				'r_0': qval(a['length'], 'angstrom'),
+				'K_b': qval(a['k'],
+					'kilojoule_per_mole * angstrom ** -2')}
+		angles = {}
+		for p in root.find('Angles'):
+			a = p.attrib
+			angles[a['smirks']] = {'id': a.get('id'),
+				'theta_0': qval(a['angle'], 'degree'),
+				'K_theta': qval(a['k'],
+					'kilojoule_per_mole * radian ** -2')}
+		propers   = converttorsions(root.find('ProperTorsions'))
+		impropers = converttorsions(root.find('ImproperTorsions'))
+		vdw = {}
+		for p in root.find('vdW'):
+			a = p.attrib
+			if 'sigma' in a:
+				r = qval(a['sigma'], 'angstrom') / rmin_factor
+			else:
+				r = qval(a['rmin_half'], 'angstrom')
+			vdw[a['smirks']] = {'id': a.get('id'),
+				'epsilon': qval(a['epsilon'], 'kilojoule_per_mole'),
+				'r': r, 'alpha': 0.0}
+		charges = {}
+		for p in root.find('LibraryCharges'):
+			a = p.attrib
+			qs, i = [], 1
+			while ('charge%d' % i) in a:
+				qs.append(qval(a['charge%d' % i], 'elementary_charge'))
+				i += 1
+			charges[a['smirks']] = {'id': a.get('id'), 'q': qs}
+		constraints = {}
+		for p in root.find('Constraints'):
+			constraints[p.attrib['smirks']] = {'id': p.attrib.get('id')}
+		prev = ep.get('OpenFF') or ep.get('openFF') or {}
+		nagl = prev.get('AM1BCC') or ep.get('AM1BCC')
+		block = {
+			'Constants': {'epsilon_r': 1.0, 'f_lj': 0.5,
+				'f_elec': 5.0 / 6.0},
+			'Constraints':      constraints,
+			'Bonds':            bonds,
+			'Angles':           angles,
+			'UB':               prev.get('UB', {}),
+			'ProperTorsions':   propers,
+			'ImproperTorsions': impropers,
+			'vdW':              vdw,
+			'Electrostatic':    charges,
+			'CMAP':             prev.get('CMAP', prev.get('cmap', {})),
+			'Terms': [
+				['BondPotential',            {'alg': 'harmonic'}],
+				['AnglePotential',           {}],
+				['ProperTorsionPotential',   {}],
+				['ImproperTorsionPotential', {'alg': 'fourier'}],
+				['VDWPotential',             {'alg': '12-6'}],
+				['ElectrostaticPotential',   {'alg': 'constant'}],
+			],
+		}
+		if nagl is not None: block['AM1BCC'] = nagl
+		ep.pop('openFF', None)
+		db_key  = 'OpenFF'
+		suffix  = '.sdf'
+		targets = {'CFF': -526.798, 'AMX': 288.644, 'SUR': 617.480,
+			'GLU': 240.001, 'PEN': 165.780}
+	# ============================================================
+	# AMBER ff19SB  (proteins + DNA OL15 + RNA OL3)
+	# ============================================================
+	elif key == 'FF19SB':
+		commit = 'f7fa0c27c1f8d943c339d67b3bf22f026d0bd8b5'
+		base = ('https://raw.githubusercontent.com/openmm/openmm/'
+			+ commit + '/wrappers/python/openmm/app/data/')
+		xml_urls = [base + 'amber19/protein.ff19SB.xml',
+			base + 'amber14/DNA.OL15.xml',
+			base + 'amber14/RNA.OL3.xml']
+		bonds, angles, propers, impropers = {}, {}, {}, {}
+		vdw, templates, cmap = {}, {}, {}
+		for url in xml_urls:
+			root = ET.fromstring(download(url))
+			type2class, type2elem = {}, {}
+			at = root.find('AtomTypes')
+			if at is not None:
+				for t in at:
+					type2class[t.attrib['name']] = \
+						t.attrib.get('class', t.attrib['name'])
+					type2elem[t.attrib['name']] = \
+						t.attrib.get('element', '')
+			hbf = root.find('HarmonicBondForce')
+			by_class = (hbf is not None and len(hbf) > 0
+				and 'class1' in hbf[0].attrib)
+			res = root.find('Residues')
+			if res is not None:
+				for r in res:
+					ratoms, rbonds = [], []
+					for c in r:
+						if c.tag == 'Atom':
+							tp = c.attrib['type']
+							tid = (type2class.get(tp, tp)
+								if by_class else tp)
+							ratoms.append([c.attrib['name'],
+								type2elem.get(tp, ''), tid,
+								float(c.attrib.get('charge', 0.0))])
+						elif c.tag == 'Bond':
+							rbonds.append([c.attrib['atomName1'],
+								c.attrib['atomName2']])
+					templates[r.attrib['name']] = {
+						'atoms': ratoms, 'bonds': rbonds}
+			if hbf is not None:
+				for b in hbf:
+					c1, c2 = cidof(b, 1), cidof(b, 2)
+					bonds[f'<at={c1},{c2}>[*:1]~[*:2]'] = {
+						'r_0': float(b.attrib['length']) * 10.0,
+						'K_b': float(b.attrib['k']) * 0.01}
+			haf = root.find('HarmonicAngleForce')
+			if haf is not None:
+				for a in haf:
+					c1, c2, c3 = (cidof(a, 1), cidof(a, 2), cidof(a, 3))
+					angles[f'<at={c1},{c2},{c3}>[*:1]~[*:2]~[*:3]'] = {
+						'theta_0': math.degrees(
+							float(a.attrib['angle'])),
+						'K_theta': float(a.attrib['k'])}
+			ptf = root.find('PeriodicTorsionForce')
+			if ptf is not None:
+				for t in ptf:
+					cs = [cidof(t, i) for i in (1, 2, 3, 4)]
+					comps, k = [], 1
+					while ('k%d' % k) in t.attrib:
+						comps.append({
+							'n': int(t.attrib['periodicity%d' % k]),
+							'phi_0': -math.degrees(
+								float(t.attrib['phase%d' % k])),
+							'K_phi': float(t.attrib['k%d' % k]),
+							'idivf': 1.0})
+						k += 1
+					if t.tag == 'Improper':
+						ro = [cs[1], cs[0], cs[2], cs[3]]
+						tag = ','.join('*' if x == '' else x
+							for x in ro)
+						impropers[f'<at={tag}>'
+							'[*:1]~[*:2](~[*:3])~[*:4]'] = {
+							'components': comps}
+					else:
+						tag = ','.join('*' if x == '' else x
+							for x in cs)
+						propers[f'<at={tag}>[*:1]~[*:2]~[*:3]~[*:4]'] = \
+							{'components': comps}
+			nbf = root.find('NonbondedForce')
+			if nbf is not None:
+				for a in nbf:
+					if a.tag != 'Atom': continue
+					tid = a.attrib.get('class') or a.attrib.get('type')
+					vdw[f'<at={tid}>[*:1]'] = {
+						'epsilon': float(a.attrib.get('epsilon', 0.0)),
+						'sigma': float(a.attrib.get('sigma', 0.0)) * 10.0,
+						'alpha': 0.0}
+			cmf = root.find('CMAPTorsionForce')
+			if cmf is not None:
+				maps, ctors = [], []
+				for c in cmf:
+					if c.tag == 'Map':
+						g = [float(x) for x in c.text.split()]
+						m = int(round(len(g) ** 0.5))
+						maps.append(np.asarray(g,
+							dtype=np.float64).reshape(m, m))
+					elif c.tag == 'Torsion':
+						ctors.append(c.attrib)
+				for tr in ctors:
+					idx = int(tr.get('map', 0))
+					if idx >= len(maps): continue
+					parts = (tr.get('type3', '') or '').split('-')
+					if len(parts) >= 2 and parts[0] == 'cmap':
+						cmap[parts[1]] = maps[idx].tolist()
+		block = {
+			'Constants': {'epsilon_r': 1.0, 'f_lj': 0.5,
+				'f_elec': 0.8333333333333334},
+			'improper_style':    'amber',
+			'proper_precedence': 'openmm',
+			'Constraints':      {'<residue_templates>': templates},
+			'Bonds':            bonds,
+			'Angles':           angles,
+			'UB':               {},
+			'ProperTorsions':   propers,
+			'ImproperTorsions': impropers,
+			'vdW':              vdw,
+			'Electrostatic':    {},
+			'CMAP':             cmap,
+			'Terms': [
+				['BondPotential',            {'alg': 'harmonic'}],
+				['AnglePotential',           {}],
+				['ProperTorsionPotential',   {}],
+				['ImproperTorsionPotential', {'alg': 'fourier'}],
+				['VDWPotential',             {'alg': '12-6'}],
+				['ElectrostaticPotential',   {'alg': 'constant'}],
+				['CMAPPotential',            {'alg': 'openmm'}],
+			],
+		}
+		ep.pop('AMBER ff19SB', None)
+		db_key  = 'ff19SB'
+		suffix  = '.pdb'
+		targets = {'1YN3': -3749.609, '1UBQ': -7251.245,
+			'1L2Y': -1680.192, '1CRN': -4169.046, '2GB1': -103.132,
+			'1BNA': 5927.131, '1RNA': 19196.876}
+	# ============================================================
+	# CHARMM36  (proteins)
+	# ============================================================
+	elif key == 'CHARMM36':
+		commit = 'f7fa0c27c1f8d943c339d67b3bf22f026d0bd8b5'
+		xml_url = ('https://raw.githubusercontent.com/openmm/openmm/'
+			+ commit + '/wrappers/python/openmm/app/data/charmm36.xml')
+		root = ET.fromstring(download(xml_url))
+		bonds = {}
+		hbf = root.find('HarmonicBondForce')
+		if hbf is not None:
+			for b in hbf:
+				c1, c2 = cidof(b, 1), cidof(b, 2)
+				bonds[f'<at={c1},{c2}>[*:1]~[*:2]'] = {
+					'r_0': float(b.attrib['length']) * 10.0,
+					'K_b': float(b.attrib['k']) * 0.01}
+		angles = {}
+		haf = root.find('HarmonicAngleForce')
+		if haf is not None:
+			for a in haf:
+				c1, c2, c3 = cidof(a, 1), cidof(a, 2), cidof(a, 3)
+				angles[f'<at={c1},{c2},{c3}>[*:1]~[*:2]~[*:3]'] = {
+					'theta_0': math.degrees(float(a.attrib['angle'])),
+					'K_theta': float(a.attrib['k'])}
+		ub = {}
+		ubf = root.find('AmoebaUreyBradleyForce')
+		if ubf is not None:
+			for u in ubf:
+				c1, c2, c3 = cidof(u, 1), cidof(u, 2), cidof(u, 3)
+				ub[f'<at={c1},{c2},{c3}>[*:1]~[*:2]~[*:3]'] = {
+					's_0':  float(u.attrib['d']) * 10.0,
+					'K_ub': float(u.attrib['k']) * 0.01}
+		propers = {}
+		ptf = root.find('PeriodicTorsionForce')
+		if ptf is not None:
+			for t in ptf:
+				if t.tag != 'Proper': continue
+				cs = [cidof(t, i) for i in (1, 2, 3, 4)]
+				comps, k = [], 1
+				while ('k%d' % k) in t.attrib:
+					comps.append({
+						'n': int(t.attrib['periodicity%d' % k]),
+						'phi_0': -math.degrees(
+							float(t.attrib['phase%d' % k])),
+						'K_phi': float(t.attrib['k%d' % k]),
+						'idivf': 1.0})
+					k += 1
+				tag = ','.join('*' if x == '' else x for x in cs)
+				sm = f'<at={tag}>[*:1]~[*:2]~[*:3]~[*:4]'
+				if sm not in propers: propers[sm] = {'components': comps}
+		impropers = {}
+		ctf = root.find('CustomTorsionForce')
+		if ctf is not None:
+			for t in ctf:
+				if t.tag != 'Improper': continue
+				cs = [cidof(t, i) for i in (1, 2, 3, 4)]
+				tag = ','.join('*' if x == '' else x for x in cs)
+				sm = f'<at={tag}>[*:1](~[*:2])(~[*:3])~[*:4]'
+				if sm in impropers: continue
+				impropers[sm] = {'components': [{
+					'n': 2,
+					'phi_0': -math.degrees(
+						float(t.attrib.get('theta0', 0.0))),
+					'K_phi': float(t.attrib.get('k', 0.0)),
+					'idivf': 1.0}]}
+		vdw = {}
+		ljf = root.find('LennardJonesForce')
+		if ljf is not None:
+			for a in ljf:
+				if a.tag != 'Atom': continue
+				tid = a.attrib.get('type') or a.attrib.get('class')
+				sig = float(a.attrib.get('sigma', 0.0)) * 10.0
+				eps = float(a.attrib.get('epsilon', 0.0))
+				s14 = (float(a.attrib['sigma14']) * 10.0
+					if 'sigma14' in a.attrib else sig)
+				e14 = (float(a.attrib['epsilon14'])
+					if 'epsilon14' in a.attrib else eps)
+				vdw[f'<at={tid}>[*:1]'] = {'epsilon': eps, 'sigma': sig,
+					'epsilon14': e14, 'sigma14': s14, 'alpha': 0.0}
+		cmap = {}
+		cmf = root.find('CMAPTorsionForce')
+		if cmf is not None:
+			maps, ctors = [], []
+			for c in cmf:
+				if c.tag == 'Map':
+					g = [float(x) for x in c.text.split()]
+					m = int(round(len(g) ** 0.5))
+					maps.append(np.asarray(g,
+						dtype=np.float64).reshape(m, m))
+				elif c.tag == 'Torsion':
+					ctors.append(c.attrib)
+			standard = list('ARNDCQEHILKMFSTWYV')
+			for tr in ctors:
+				if (tr.get('type5', '') or '') == 'N': continue
+				idx = int(tr.get('map', 0))
+				if idx >= len(maps): continue
+				t2, t3 = tr.get('type2', ''), tr.get('type3', '')
+				if   t3 == 'CT1' and t2 == 'NH1': letters = standard
+				elif t3 == 'CT2' and t2 == 'NH1': letters = ['G']
+				elif t3 == 'CP1' and t2 == 'N':   letters = ['P']
+				else: continue
+				grid = maps[idx].tolist()
+				for one in letters: cmap[one] = grid
+		templates = charmmtypes(root)
+		block = {
+			'Constants': {'epsilon_r': 1.0, 'f_lj': 1.0,
+				'f_elec': 1.0},
+			'improper_style':    'charmm',
+			'proper_precedence': 'openmm',
+			'Constraints':      {'<residue_templates>': templates},
+			'Bonds':            bonds,
+			'Angles':           angles,
+			'UB':               ub,
+			'ProperTorsions':   propers,
+			'ImproperTorsions': impropers,
+			'vdW':              vdw,
+			'Electrostatic':    {},
+			'CMAP':             cmap,
+			'Terms': [
+				['BondPotential',            {'alg': 'harmonic'}],
+				['AnglePotential',           {}],
+				['UBPotential',              {}],
+				['ProperTorsionPotential',   {}],
+				['ImproperTorsionPotential', {'alg': 'harmonic'}],
+				['VDWPotential',             {'alg': '12-6'}],
+				['ElectrostaticPotential',   {'alg': 'constant'}],
+				['CMAPPotential',            {'alg': 'openmm'}],
+			],
+		}
+		db_key  = 'CHARMM36'
+		suffix  = '.pdb'
+		targets = {'1YN3': 4104.856, '1UBQ': -2687.538,
+			'1L2Y': 140.922, '1CRN': -401.309, '2GB1': 4225.107}
+	else:
+		raise ValueError(
+			"port: name must be 'openff', 'ff19SB' or 'charmm36' "
+			f'(got {name!r})')
+	ep[db_key] = block
+	with open(db_path, 'w') as f:
+		json.dump(db, f, separators=(',', ':'))
+	print(f'[port] wrote {db_key} block: {len(block.get("Bonds", {}))} '
+		f'bonds, {len(block.get("Angles", {}))} angles, '
+		f'{len(block.get("ProperTorsions", {}))} propers, '
+		f'{len(block.get("ImproperTorsions", {}))} impropers, '
+		f'{len(block.get("vdW", {}))} vdW', file=sys.stderr)
+	return True
