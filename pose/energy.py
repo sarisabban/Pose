@@ -2222,9 +2222,6 @@ class ForceField():
 		N_grid = tables.shape[1]
 		H = 2.0 * np.pi / N_grid
 		if alg == 'openmm':
-			# OpenMM's CMAPTorsionForce: the grid is indexed by the
-			# negated dihedrals, axis 0 from psi and axis 1 from phi,
-			# interpolated with a periodic-cubic-spline bicubic patch.
 			d1, d2, d12 = (cache['cmap_d1'], cache['cmap_d2'],
 				cache['cmap_d12'])
 			WT = np.array([
@@ -2315,373 +2312,3570 @@ class ForceField():
 		np.add.at(forces, l_idx, Fl)
 		return energy, forces
 
+def PatternSearch(pose, params, ligand=None,
+		xs_override=None, nrot_override=None):
+	'''
+	Classify atoms and build pair lists for a Score function
+	Arguments:
+	----------
+		pose:          Pose or Molecule - receptor / source structure
+		params:        dict - the active ['Score Parameters'][NAME] block
+		ligand:        Molecule or None - optional ligand for docking
+		xs_override:   dict or None - validation hook; maps combined
+			receptor+ligand atom index to an XS type name, bypassing
+			derived typing
+		nrot_override: int or None - validation hook; explicit Nrot
+	Returns:
+	--------
+		dict: keys 'xs_types' (int array), 'xs_radii_arr',
+		'xs_is_hydrophobic_arr', 'xs_is_donor_arr',
+		'xs_is_acceptor_arr', 'coords', 'inter_pairs',
+		'intra_ligand_pairs', 'nrot', 'n_r' (receptor atom count)
+	'''
+	if 'Atom_types' in params and 'Residue_types' in params:
+		out = _ref15atomcache(pose, params)
+		n_atoms = int(len(out['coords']))
+		out.setdefault('inter_pairs',
+			np.empty((0, 2), dtype=np.int64))
+		out.setdefault('intra_ligand_pairs',
+			np.empty((0, 2), dtype=np.int64))
+		out.setdefault('nrot', 0)
+		out.setdefault('xs_types',
+			np.full(n_atoms, -1, dtype=np.int64))
+		out.setdefault('xs_radii_arr', np.zeros(0))
+		out.setdefault('xs_is_hydrophobic_arr',
+			np.zeros(0, dtype=bool))
+		out.setdefault('xs_is_donor_arr', np.zeros(0, dtype=bool))
+		out.setdefault('xs_is_acceptor_arr', np.zeros(0, dtype=bool))
+		return out
+	if 'XS_atom_types' in params:
+		return _patternsearchvina(pose, params, ligand,
+			xs_override, nrot_override)
+	raise Exception(
+		'PatternSearch: unsupported params (no recognised typing system)')
+
+def _patternsearchvina(pose, params, ligand, xs_override, nrot_override):
+	'''
+	XS atom typing + pair lists for the AutoDock Vina score function
+	Arguments:
+	----------
+		pose:          Pose or Molecule - receptor
+		params:        dict - the AutoDock Vina param block
+		ligand:        Molecule or None - the ligand (None for non-docking)
+		xs_override:   dict or None - {combined_index: 'XS_TYPE_NAME', ...}
+		nrot_override: int or None - explicit Nrot
+	Returns:
+	--------
+		dict: see PatternSearch
+	'''
+	r_atoms = pose.data['Atoms']
+	r_bonds = pose.data['Bonds']
+	r_coords = np.asarray(pose.data['Coordinates'], dtype=np.float64)
+	n_r = len(r_atoms)
+	if ligand is not None:
+		l_atoms = ligand.data['Atoms']
+		l_bonds = ligand.data['Bonds']
+		l_coords = np.asarray(ligand.data['Coordinates'], dtype=np.float64)
+		n_l = len(l_atoms)
+	else:
+		l_atoms = {}; l_bonds = {}; l_coords = np.empty((0, 3))
+		n_l = 0
+	n = n_r + n_l
+	coords = np.vstack([r_coords, l_coords]) if n_l else r_coords.copy()
+	xs_types_db = params['XS_atom_types']
+	xs_names_sorted = sorted(xs_types_db.keys())
+	name_to_idx = {nm: i for i, nm in enumerate(xs_names_sorted)}
+	xs_radii_arr = np.array(
+		[xs_types_db[nm]['radius'] for nm in xs_names_sorted],
+		dtype=np.float64)
+	xs_is_hphob = np.array(
+		[xs_types_db[nm]['hydrophobic'] for nm in xs_names_sorted],
+		dtype=bool)
+	xs_is_donor = np.array(
+		[xs_types_db[nm]['donor'] for nm in xs_names_sorted],
+		dtype=bool)
+	xs_is_accep = np.array(
+		[xs_types_db[nm]['acceptor'] for nm in xs_names_sorted],
+		dtype=bool)
+	HALOGEN = {'F': 'F_H', 'Cl': 'Cl_H', 'Br': 'Br_H', 'I': 'I_H'}
+	METALS = {'Mg', 'Mn', 'Zn', 'Ca', 'Fe', 'Cu', 'Co',
+		'Na', 'K', 'Hg', 'Cd', 'Ni'}
+	def atomel(gi):
+		'''
+		Element of atom at combined index gi
+		Arguments:
+			gi: int - combined index (0..n_r + receptor; n_r..n ligand)
+		Returns:
+			str: element symbol
+		'''
+		rec = r_atoms[gi] if gi < n_r else l_atoms[gi - n_r]
+		return rec[1]
+	def atomnbrs(gi):
+		'''
+		Combined-index neighbour list of atom at combined index gi
+		Arguments:
+			gi: int - combined index
+		Returns:
+			list of int: bonded atoms in combined indexing
+		'''
+		if gi < n_r: return list(r_bonds.get(gi, []))
+		return [n_r + j for j in l_bonds.get(gi - n_r, [])]
+	xs = np.full(n, -1, dtype=np.int64)
+	# Protein receptor donor/acceptor lookup. Pose's protein PDB
+	# import drops polar Hs that share atom name (pdbqt files name
+	# all polar Hs "H" so most collide). We type protein residues by
+	# (tricode, atom_name) directly; this matches what AutoDock Vina
+	# determines via AD4 type + HD presence in the pdbqt.
+	_AA20 = ('ALA','ARG','ASN','ASP','CYS','GLN','GLU','GLY','HIS',
+		'HIS_D','ILE','LEU','LYS','MET','PHE','PRO','SER','THR',
+		'TRP','TYR','VAL')
+	PROT_XS = {}
+	for t in _AA20:
+		# Backbone O is always an acceptor; backbone OXT too (C-term).
+		PROT_XS[(t, 'O')]   = 'O_A'
+		PROT_XS[(t, 'OXT')] = 'O_A'
+		# Backbone N is donor for all standard AAs except PRO (no H).
+		if t != 'PRO':
+			PROT_XS[(t, 'N')] = 'N_D'
+	PROT_XS.update({
+		('ARG','NE'):'N_D', ('ARG','NH1'):'N_D', ('ARG','NH2'):'N_D',
+		('LYS','NZ'):'N_D',
+		('TRP','NE1'):'N_D',
+		('ASN','ND2'):'N_D', ('ASN','OD1'):'O_A',
+		('GLN','NE2'):'N_D', ('GLN','OE1'):'O_A',
+		('HIS','ND1'):'N_A', ('HIS','NE2'):'N_D',
+		('HIS_D','ND1'):'N_D', ('HIS_D','NE2'):'N_A',
+		('SER','OG'):'O_DA',
+		('THR','OG1'):'O_DA',
+		('TYR','OH'):'O_DA',
+		('ASP','OD1'):'O_A', ('ASP','OD2'):'O_A',
+		('GLU','OE1'):'O_A', ('GLU','OE2'):'O_A',
+	})
+	# Build per-atom (tri, name) map for receptor protein atoms.
+	r_atom_to_tri = {}
+	aas = pose.data.get('Amino Acids') or {}
+	for ri, info in aas.items():
+		if not info or len(info) < 6: continue
+		tri = info[5]
+		# info[2] = BB atom indices, info[3] = SC atom indices
+		for ai in (info[2] if len(info) > 2 else []):
+			r_atom_to_tri[int(ai)] = tri
+		for ai in (info[3] if len(info) > 3 else []):
+			r_atom_to_tri[int(ai)] = tri
+	# Polar H atoms attached to N/O are needed for donor typing when
+	# the lookup misses (ligand or non-standard residues). Spatial
+	# fallback: any H within 1.3 A.
+	H_coords_r = [coords[i] for i in range(n_r)
+		if atomel(i) == 'H']
+	H_coords_r = (np.asarray(H_coords_r, dtype=np.float64)
+		if H_coords_r else np.zeros((0, 3)))
+	def has_polar_h(gi):
+		for j in atomnbrs(gi):
+			if atomel(j) == 'H': return True
+		if gi < n_r and len(H_coords_r):
+			d = np.linalg.norm(H_coords_r - coords[gi], axis=1)
+			if (d < 1.3).any(): return True
+		return False
+	def protein_xs(gi):
+		tri = r_atom_to_tri.get(gi)
+		if tri is None: return None
+		nm = r_atoms[gi][0] if r_atoms.get(gi) else None
+		if nm is None: return None
+		return PROT_XS.get((tri, nm))
+	if xs_override is not None:
+		for gi, nm in xs_override.items():
+			if nm in name_to_idx:
+				xs[int(gi)] = name_to_idx[nm]
+	else:
+		for gi in range(n):
+			el = atomel(gi)
+			if el == 'H': continue
+			if el == 'C':
+				cp = any(atomel(j) not in ('C', 'H')
+					for j in atomnbrs(gi))
+				xs[gi] = name_to_idx['C_P' if cp else 'C_H']
+			elif el == 'N':
+				ov = protein_xs(gi) if gi < n_r else None
+				if ov in ('N_D', 'N_A', 'N_DA'):
+					xs[gi] = name_to_idx[ov]
+				else:
+					has_h = has_polar_h(gi)
+					xs[gi] = name_to_idx['N_D' if has_h else 'N_A']
+			elif el == 'O':
+				ov = protein_xs(gi) if gi < n_r else None
+				if ov in ('O_A', 'O_D', 'O_DA'):
+					xs[gi] = name_to_idx[ov]
+				else:
+					has_h = has_polar_h(gi)
+					xs[gi] = name_to_idx['O_DA' if has_h else 'O_A']
+			elif el == 'S':
+				xs[gi] = name_to_idx['S_P']
+			elif el == 'P':
+				xs[gi] = name_to_idx['P_P']
+			elif el in HALOGEN:
+				xs[gi] = name_to_idx[HALOGEN[el]]
+			elif el in METALS:
+				xs[gi] = name_to_idx['Met_D']
+	cutoff = float(params['Constants'].get('cutoff', 8.0))
+	inter_pairs_list = []
+	intra_pairs_list = []
+	if n_l > 0:
+		r_typed = np.array([i for i in range(n_r) if xs[i] >= 0],
+			dtype=np.int64)
+		l_typed = np.array([n_r + i for i in range(n_l)
+			if xs[n_r + i] >= 0], dtype=np.int64)
+		if len(r_typed) and len(l_typed):
+			diff = coords[r_typed][:, None, :] \
+				- coords[l_typed][None, :, :]
+			d = np.linalg.norm(diff, axis=2)
+			ix, iy = np.where(d < cutoff)
+			inter_pairs_list = list(
+				zip(r_typed[ix].tolist(), l_typed[iy].tolist()))
+		l_adj = {i: set(int(j) for j in l_bonds.get(i, []))
+			for i in range(n_l)}
+		excluded = {i: _bfswithin(l_adj, i, 3) for i in range(n_l)}
+		for i in range(n_l):
+			if xs[n_r + i] < 0: continue
+			for j in range(i + 1, n_l):
+				if j in excluded[i]: continue
+				if xs[n_r + j] < 0: continue
+				dij = np.linalg.norm(
+					coords[n_r + i] - coords[n_r + j])
+				if dij < cutoff:
+					intra_pairs_list.append((n_r + i, n_r + j))
+	if nrot_override is not None:
+		nrot = float(nrot_override)
+	elif ligand is not None:
+		# Vina's affinity denominator uses num_tors (sum 0.5 per side
+		# of each rotatable bond with > 1 heavy neighbour), not the
+		# integer Nrot. Equal to Nrot for fully-substituted rotations
+		# but smaller (by 0.5 per side) for terminal -OH / -NH2 etc.
+		nrot = _countnumtors(ligand)
+	else:
+		nrot = 0
+	inter_pairs = (np.array(inter_pairs_list, dtype=np.int64)
+		if inter_pairs_list else np.empty((0, 2), dtype=np.int64))
+	intra_pairs = (np.array(intra_pairs_list, dtype=np.int64)
+		if intra_pairs_list else np.empty((0, 2), dtype=np.int64))
+	return {
+		'xs_types': xs,
+		'xs_radii_arr': xs_radii_arr,
+		'xs_is_hydrophobic_arr': xs_is_hphob,
+		'xs_is_donor_arr': xs_is_donor,
+		'xs_is_acceptor_arr': xs_is_accep,
+		'coords': coords,
+		'inter_pairs': inter_pairs,
+		'intra_ligand_pairs': intra_pairs,
+		'nrot': nrot,
+		'n_r': n_r}
+
+def _ref15atomcache(pose, params):
+	'''
+	Atom typing + pair lists for the score function
+	Arguments:
+	----------
+		pose:   Pose - protein structure (with hydrogens added)
+		params: dict - the param block under Score Parameters
+	Returns:
+	--------
+		dict: per-atom type / LJ / LK / charge arrays + a
+		flat pair list with distances and connectivity weights
+	'''
+	atoms = pose.data['Atoms']
+	bonds = pose.data['Bonds']
+	coords = np.asarray(pose.data['Coordinates'], dtype=np.float64)
+	aas = pose.data.get('Amino Acids') or {}
+	n = len(atoms)
+	atom_types_db = params['Atom_types']
+	residue_types_db = params['Residue_types']
+	N_TERM_H = {'H1':'H','H2':'H','H3':'H','1H':'H','2H':'H','3H':'H',
+		'HN':'H','HT1':'H','HT2':'H','HT3':'H'}
+	def lookuptype(tricode, atom_name):
+		'''
+		Resolve a (tricode, atom_name) pair to atom type and
+		charge, honouring standard aliases and terminal H names
+		'''
+		res = residue_types_db.get(tricode)
+		if res is None: return None, 0.0
+		aliases = res.get('aliases', {}) or {}
+		direct = res['atoms'].get(atom_name)
+		if direct is not None:
+			return direct['type'], float(direct.get('charge', 0.0))
+		al = aliases.get(atom_name)
+		if al is not None:
+			e = res['atoms'].get(al)
+			if e is not None:
+				return e['type'], float(e.get('charge', 0.0))
+		swap = None
+		if atom_name and atom_name[0].isdigit():
+			swap = atom_name[1:] + atom_name[0]
+		elif atom_name and atom_name[-1].isdigit() and len(atom_name) > 1:
+			swap = atom_name[-1] + atom_name[:-1]
+		if swap is not None:
+			e = res['atoms'].get(swap)
+			if e is not None:
+				return e['type'], float(e.get('charge', 0.0))
+		tgt = N_TERM_H.get(atom_name)
+		if tgt is not None:
+			e = res['atoms'].get(tgt)
+			if e is not None:
+				return e['type'], float(e.get('charge', 0.0))
+		return None, 0.0
+	atom_res = np.full(n, -1, dtype=np.int64)
+	for r, info in aas.items():
+		for ai in info[2] + info[3]:
+			if 0 <= int(ai) < n:
+				atom_res[int(ai)] = int(r)
+	ros_types = [None] * n
+	q_arr = np.zeros(n, dtype=np.float64)
+	for ri, info in aas.items():
+		tri = info[5] if len(info) >= 6 else None
+		if tri is None: continue
+		if tri.startswith('D') and len(tri) == 3:
+			tri = tri
+		if tri == 'HIS':
+			res_atom_names = {atoms[int(ai)][0]
+				for ai in (info[2] + info[3])
+				if 0 <= int(ai) < n}
+			has_hd1 = 'HD1' in res_atom_names
+			has_he2 = 'HE2' in res_atom_names
+			if has_hd1 and not has_he2:
+				tri = 'HIS_D'
+		for ai in info[2] + info[3]:
+			ai = int(ai)
+			if not (0 <= ai < n): continue
+			nm = atoms[ai][0]
+			t, q = lookuptype(tri, nm)
+			ros_types[ai] = t
+			q_arr[ai] = q
+	ljR = np.zeros(n); ljW = np.zeros(n)
+	lkdG = np.zeros(n); lkLam = np.ones(n) * 3.5
+	lkVol = np.zeros(n)
+	is_donor = np.zeros(n, dtype=bool)
+	is_accep = np.zeros(n, dtype=bool)
+	is_polar_h = np.zeros(n, dtype=bool)
+	is_H = np.zeros(n, dtype=bool)
+	is_oh_donor = np.zeros(n, dtype=bool)
+	has_score = np.zeros(n, dtype=bool)
+	for i in range(n):
+		t = ros_types[i]
+		if t is None or t not in atom_types_db: continue
+		info = atom_types_db[t]
+		ljR[i]  = info['LJ_RADIUS']
+		ljW[i]  = info['LJ_WDEPTH']
+		lkdG[i] = info['LK_DGFREE']
+		lkLam[i]= info['LK_LAMBDA']
+		lkVol[i]= info['LK_VOLUME']
+		is_donor[i]   = bool(info.get('donor', False))
+		is_accep[i]   = bool(info.get('acceptor', False))
+		is_polar_h[i] = bool(info.get('polar_h', False))
+		is_H[i]       = info.get('element') in ('H',) or t == 'HOH'
+		is_oh_donor[i] = is_donor[i] and (t.startswith('OH')
+			or t.startswith('OW') or t == 'Oet3')
+		has_score[i] = True
+	if aas:
+		by_chain = {}
+		for ri, info in aas.items():
+			ch = info[1] if len(info) > 1 else ''
+			by_chain.setdefault(ch, []).append(int(ri))
+		n_term_res = set()
+		c_term_res = set()
+		for ch, ris in by_chain.items():
+			ris.sort()
+			if ris:
+				n_term_res.add(ris[0])
+				c_term_res.add(ris[-1])
+		NTERM_H_NAMES = {'H', 'H1', 'H2', 'H3', '1H', '2H', '3H',
+			'HN', 'HT1', 'HT2', 'HT3'}
+		def applyatom(ai, new_type, new_charge):
+			'''Patch one atom in place'''
+			ros_types[ai] = new_type
+			q_arr[ai] = new_charge
+			if new_type in atom_types_db:
+				info = atom_types_db[new_type]
+				ljR[ai]   = info['LJ_RADIUS']
+				ljW[ai]   = info['LJ_WDEPTH']
+				lkdG[ai]  = info['LK_DGFREE']
+				lkLam[ai] = info['LK_LAMBDA']
+				lkVol[ai] = info['LK_VOLUME']
+				is_donor[ai] = bool(info.get('donor', False))
+				is_accep[ai] = bool(info.get('acceptor', False))
+				is_polar_h[ai] = bool(info.get('polar_h', False))
+				is_H[ai] = info.get('element') in ('H',) \
+					or new_type == 'HOH'
+				has_score[ai] = True
+		for ri in n_term_res:
+			info = aas.get(ri)
+			if info is None: continue
+			tri = info[5] if len(info) >= 6 else None
+			if tri == 'PRO':
+				for ai in info[2] + info[3]:
+					ai = int(ai)
+					nm = atoms[ai][0]
+					if nm in ('1H', '2H', 'H1', 'H2',
+						'HN', 'HT1', 'HT2'):
+						applyatom(ai, 'Hpol', 0.2142)
+					elif nm == 'N':
+						applyatom(ai, 'Nlys', -0.0285)
+				continue
+			if tri == 'GLY':
+				for ai in info[2] + info[3]:
+					ai = int(ai)
+					nm = atoms[ai][0]
+					if nm == 'N':
+						applyatom(ai, 'Nlys', -0.2039)
+					elif nm in NTERM_H_NAMES:
+						applyatom(ai, 'Hpol', 0.2894)
+					elif nm == 'CA':
+						q_arr[ai] = 0.1328
+					elif nm in ('HA', '1HA', '2HA',
+						'HA1', 'HA2', 'HA3'):
+						q_arr[ai] = 0.1015
+				continue
+			for ai in info[2] + info[3]:
+				ai = int(ai)
+				nm = atoms[ai][0]
+				if nm == 'N':
+					applyatom(ai, 'Nlys', -0.1987)
+				elif nm in NTERM_H_NAMES:
+					applyatom(ai, 'Hpol', 0.2946)
+				elif nm == 'CA':
+					q_arr[ai] = 0.2006
+				elif nm == 'HA':
+					q_arr[ai] = 0.1144
+		NT_H_DIH = {
+			'H': 180.0, 'H1': 180.0, '1H': 180.0,
+			'HN': 180.0, 'HT1': 180.0,
+			'H2': 60.0, '2H': 60.0, 'HT2': 60.0,
+			'H3': -60.0, '3H': -60.0, 'HT3': -60.0}
+		def idealize_nterm_h(ri):
+			'''
+			Override H positions for the N-term residue ri's NH3+
+			protons in-place on `coords`.
+			Arguments:
+			----------
+				ri: residue index (key into aas)
+			Returns:
+			--------
+				No return; modifies `coords` rows for matched H atoms
+			'''
+			info = aas.get(ri)
+			if info is None: return
+			tri = info[5] if len(info) >= 6 else None
+			if tri == 'PRO': return
+			N_ai = CA_ai = C_ai = None
+			h_atoms = []
+			for ai in info[2] + info[3]:
+				ai = int(ai)
+				nm = atoms[ai][0]
+				if nm == 'N': N_ai = ai
+				elif nm == 'CA': CA_ai = ai
+				elif nm == 'C': C_ai = ai
+				elif nm in NT_H_DIH: h_atoms.append((ai, nm))
+			if N_ai is None or CA_ai is None or C_ai is None: return
+			if not h_atoms: return
+			N_xyz = coords[N_ai]
+			CA_xyz = coords[CA_ai]
+			C_xyz = coords[C_ai]
+			v_NCA = CA_xyz - N_xyz
+			n_NCA = np.linalg.norm(v_NCA)
+			if n_NCA < 1e-6: return
+			unit_NCA = v_NCA / n_NCA
+			v_NC = C_xyz - N_xyz
+			v_NC_perp = v_NC - np.dot(v_NC, unit_NCA) * unit_NCA
+			n_perp = np.linalg.norm(v_NC_perp)
+			if n_perp < 1e-6: return
+			unit_py = v_NC_perp / n_perp
+			unit_pz = np.cross(unit_NCA, unit_py)
+			BOND = 1.0
+			ANGLE = math.radians(109.47)
+			cos_a = math.cos(ANGLE)
+			sin_a = math.sin(ANGLE)
+			for ai, nm in h_atoms:
+				dih = math.radians(NT_H_DIH[nm])
+				H_dir = (cos_a * unit_NCA
+					+ sin_a * (math.cos(dih) * unit_py
+						+ math.sin(dih) * unit_pz))
+				coords[ai] = N_xyz + BOND * H_dir
+		for ri in n_term_res:
+			idealize_nterm_h(ri)
+		for ri in c_term_res:
+			info = aas.get(ri)
+			if info is None: continue
+			c_ai = None; o_ai = None; oxt_ai = None
+			for ai in info[2] + info[3]:
+				ai = int(ai)
+				nm = atoms[ai][0]
+				if nm == 'C': c_ai = ai
+				elif nm == 'O': o_ai = ai
+				elif nm in ('OXT', 'OT1', 'OT2', "O''"): oxt_ai = ai
+			if c_ai is not None:
+				applyatom(c_ai, 'COO', 0.2158)
+			if o_ai is not None:
+				applyatom(o_ai, 'OOC', -0.6079)
+			if oxt_ai is not None:
+				applyatom(oxt_ai, 'OOC', -0.6079)
+		sg_idx = [i for i in range(n)
+			if atoms[i][1] == 'S' and ros_types[i] == 'SH1']
+		X_arr = np.asarray(coords, dtype=np.float64)
+		for ii in sg_idx:
+			for jj in sg_idx:
+				if ii >= jj: continue
+				d = float(
+					np.linalg.norm(X_arr[ii] - X_arr[jj]))
+				if d < 2.5:
+					q_arr[ii] = -0.24639810621738434
+					q_arr[jj] = -0.24639810621738434
+	adj = {int(k): set(int(j) for j in v) for k, v in bonds.items()}
+	for i in range(n):
+		adj.setdefault(i, set())
+	X_arr = np.asarray(coords, dtype=np.float64)
+	heavy_mask = np.array([atoms[k][1] != 'H' for k in range(n)])
+	for i in range(n):
+		if atoms[i][1] != 'H': continue
+		dij = np.linalg.norm(X_arr - X_arr[i], axis=1)
+		dij[i] = np.inf
+		dij = np.where(heavy_mask, dij, np.inf)
+		j = int(np.argmin(dij))
+		if dij[j] < 1.3:
+			adj[i].add(j); adj[j].add(i)
+	s_idx = [i for i in range(n) if atoms[i][1] == 'S']
+	for ii in s_idx:
+		for jj in s_idx:
+			if ii >= jj: continue
+			d = float(np.linalg.norm(X_arr[ii] - X_arr[jj]))
+			if d < 2.5:
+				adj[ii].add(jj); adj[jj].add(ii)
+	def bfsdists(start, max_depth=4):
+		'''
+		Return dict {atom: bond_distance} for distances 1..max_depth
+		'''
+		out = {}
+		frontier = {start}
+		dist = 0
+		seen = {start}
+		while frontier and dist < max_depth:
+			dist += 1
+			nxt = set()
+			for x in frontier:
+				for y in adj.get(x, ()):
+					if y in seen: continue
+					seen.add(y); nxt.add(y)
+					out[y] = dist
+			frontier = nxt
+		return out
+	CP_REP_MAP_BY_AA = {
+		'ALA': {'N': 'H', 'C': 'O'},
+		'ARG': {'N': 'H', 'C': 'O', 'NE': 'HE'},
+		'ASN': {'N': 'H', 'C': 'O', 'CG': 'OD1', 'ND2': 'HD21'},
+		'ASP': {'N': 'H', 'C': 'O', 'CG': 'OD1'},
+		'CYS': {'N': 'H', 'C': 'O'},
+		'GLN': {'N': 'H', 'C': 'O', 'CD': 'OE1', 'NE2': 'HE21'},
+		'GLU': {'N': 'H', 'C': 'O', 'CD': 'OE1'},
+		'GLY': {'N': 'H', 'C': 'O'},
+		'HIS': {'N': 'H', 'C': 'O', 'NE2': 'HE2'},
+		'HIS_D': {'N': 'H', 'C': 'O', 'ND1': 'HD1'},
+		'ILE': {'N': 'H', 'C': 'O'},
+		'LEU': {'N': 'H', 'C': 'O'},
+		'LYS': {'N': 'H', 'C': 'O', 'NZ': 'HZ1'},
+		'MET': {'N': 'H', 'C': 'O'},
+		'PHE': {'N': 'H', 'C': 'O'},
+		'PRO': {'C': 'O'},
+		'SER': {'N': 'H', 'C': 'O', 'OG': 'HG'},
+		'THR': {'N': 'H', 'C': 'O', 'OG1': 'HG1'},
+		'TRP': {'N': 'H', 'C': 'O', 'NE1': 'HE1'},
+		'TYR': {'N': 'H', 'C': 'O', 'OH': 'HH'},
+		'VAL': {'N': 'H', 'C': 'O'},
+	}
+	rep_atom_idx = np.arange(n, dtype=np.int64)
+	if aas:
+		for ri, info in aas.items():
+			tri = info[5] if len(info) >= 6 else None
+			rep_map = CP_REP_MAP_BY_AA.get(tri)
+			if rep_map is None: continue
+			res_atoms = {}
+			for ai in info[2] + info[3]:
+				ai = int(ai)
+				if 0 <= ai < n:
+					res_atoms[atoms[ai][0]] = ai
+			is_nterm = ri in n_term_res
+			for src_nm, tgt_nm in rep_map.items():
+				if is_nterm and src_nm == 'N': continue
+				src_ai = res_atoms.get(src_nm)
+				tgt_ai = res_atoms.get(tgt_nm)
+				if src_ai is not None and tgt_ai is not None:
+					rep_atom_idx[src_ai] = tgt_ai
+	res_bonded = set()
+	res_polymer_bonded = set()
+	for ai, neighbors in adj.items():
+		ra = atom_res[ai] if 0 <= ai < n else -1
+		if ra < 0: continue
+		nm_a = atoms[ai][0]
+		for bi in neighbors:
+			rb = atom_res[bi] if 0 <= bi < n else -1
+			if rb < 0 or rb == ra: continue
+			nm_b = atoms[bi][0]
+			pair = (min(ra, rb), max(ra, rb))
+			res_bonded.add(pair)
+			if ((nm_a == 'C' and nm_b == 'N')
+					or (nm_a == 'N' and nm_b == 'C')):
+				res_polymer_bonded.add(pair)
+	c0 = float(params['Constants'].get('fa_max_dis', 6.0))
+	pairs_i = []; pairs_j = []; pair_d = []
+	pair_w = []; pair_same_res = []; pair_path = []
+	pair_cp_path = []; pair_is_poly = []
+	bfs_cache = {}
+	def get_bfs(atom_idx):
+		if atom_idx not in bfs_cache:
+			bfs_cache[atom_idx] = bfsdists(int(atom_idx), max_depth=4)
+		return bfs_cache[atom_idx]
+	typed_idx = np.where(has_score)[0]
+	X = coords
+	for ii in typed_idx:
+		dists_from_ii = get_bfs(int(ii))
+		dd = np.linalg.norm(X - X[ii], axis=1)
+		mask = (dd < c0) & has_score
+		mask[ii] = False
+		ri = atom_res[ii]
+		for jj in np.where(mask)[0]:
+			if jj < ii: continue
+			rj = atom_res[jj]
+			rpair = (min(ri,rj), max(ri,rj))
+			same_or_adj = (ri == rj or rpair in res_bonded)
+			is_poly = (ri == rj) or (rpair in res_polymer_bonded)
+			if same_or_adj:
+				bd = dists_from_ii.get(int(jj), 5)
+			else:
+				bd = 5
+			if is_poly:
+				if bd <= 3: w = 0.0
+				elif bd == 4: w = 0.2
+				else: w = 1.0
+			else:
+				if bd <= 2: w = 0.0
+				elif bd == 3: w = 0.2
+				else: w = 1.0
+			rep_i = int(rep_atom_idx[ii])
+			rep_j = int(rep_atom_idx[jj])
+			if not same_or_adj:
+				cp_bd = 5
+			elif rep_i == rep_j:
+				cp_bd = 0
+			elif rep_i == int(ii) and rep_j == int(jj):
+				cp_bd = bd
+			else:
+				rep_bfs = get_bfs(rep_i)
+				cp_bd = rep_bfs.get(rep_j, 5)
+			pairs_i.append(int(ii))
+			pairs_j.append(int(jj))
+			pair_d.append(float(dd[jj]))
+			pair_w.append(w)
+			pair_same_res.append(ri == rj and ri >= 0)
+			pair_path.append(bd)
+			pair_cp_path.append(cp_bd)
+	pairs_i = np.array(pairs_i, dtype=np.int64)
+	pairs_j = np.array(pairs_j, dtype=np.int64)
+	pair_d = np.array(pair_d, dtype=np.float64)
+	pair_w = np.array(pair_w, dtype=np.float64)
+	pair_same_res = np.array(pair_same_res, dtype=bool)
+	pair_path = np.array(pair_path, dtype=np.int64)
+	pair_cp_path = np.array(pair_cp_path, dtype=np.int64)
+	LKB_WTS = {
+		'NH2O': (-0.462, 1.075),
+		'Narg': (-0.444, 1.111),
+		'Nhis': (-0.254, 0.746),
+		'Nlys': (-0.367, 0.633),
+		'Ntrp': (-0.231, 0.769),
+		'OCbb': (-0.329, 0.671),
+		'OH':   (-0.401, 0.599),
+		'ONH2': (-0.329, 0.671),
+		'OOC':  (-0.306, 0.694)}
+	LK_RAMP_W2 = 3.9
+	H2O_R = 1.4
+	lkb_w_iso = np.zeros(n, dtype=np.float64)
+	lkb_w_ball = np.zeros(n, dtype=np.float64)
+	lkb_d2_low = np.zeros(n, dtype=np.float64)
+	for i in range(n):
+		t = ros_types[i]
+		if t in LKB_WTS:
+			lkb_w_iso[i], lkb_w_ball[i] = LKB_WTS[t]
+		if t is not None and t in atom_types_db:
+			ljr = atom_types_db[t]['LJ_RADIUS']
+			d2h = (H2O_R + ljr) * (H2O_R + ljr)
+			lkb_d2_low[i] = max(0.0, d2h - LK_RAMP_W2)
+	etb = DBLoad().get('EtablePairParams')
+	if etb is not None:
+		et_names = list(etb['atom_types'])
+		NT = int(etb['n_types'])
+		et_pairs = etb['pairs']
+		et_name_to_eidx = {t: i for i, t in enumerate(et_names)}
+		et_close_start = np.zeros((NT, NT), dtype=np.float64)
+		et_close_end   = np.zeros((NT, NT), dtype=np.float64)
+		et_close_flat  = np.zeros((NT, NT), dtype=np.float64)
+		et_close_poly  = np.zeros((NT, NT, 4), dtype=np.float64)
+		et_far_poly    = np.zeros((NT, NT, 4), dtype=np.float64)
+		et_lk_coeff    = np.zeros((NT, NT), dtype=np.float64)
+		et_lambda_self = np.ones((NT, NT), dtype=np.float64) * 3.5
+		et_R_self      = np.zeros((NT, NT), dtype=np.float64)
+		et_final_w     = np.ones((NT, NT), dtype=np.float64)
+		et_close_flat_comb = np.zeros((NT, NT), dtype=np.float64)
+		et_close_poly_comb = np.zeros((NT, NT, 4), dtype=np.float64)
+		et_far_poly_comb   = np.zeros((NT, NT, 4), dtype=np.float64)
+		et_lj_minimum            = np.zeros((NT, NT), dtype=np.float64)
+		et_lj_r12_coeff          = np.zeros((NT, NT), dtype=np.float64)
+		et_lj_r6_coeff           = np.zeros((NT, NT), dtype=np.float64)
+		et_lj_switch_intercept   = np.zeros((NT, NT), dtype=np.float64)
+		et_lj_switch_slope       = np.zeros((NT, NT), dtype=np.float64)
+		et_lj_val_at_minimum     = np.zeros((NT, NT), dtype=np.float64)
+		et_ljatr_cubic_poly      = np.zeros((NT, NT, 4), dtype=np.float64)
+		et_ljatr_cp_xhi          = np.zeros((NT, NT), dtype=np.float64)
+		et_ljatr_cp_xlo          = np.zeros((NT, NT), dtype=np.float64)
+		et_ljatr_final_weight    = np.ones((NT, NT), dtype=np.float64)
+		et_ljrep_linear_ramp_d2  = np.zeros((NT, NT), dtype=np.float64)
+		et_ljrep_from_negcrossing = np.zeros((NT, NT), dtype=bool)
+		et_hydrogen_interaction  = np.zeros((NT, NT), dtype=bool)
+		et_ljrep_xr_xlo   = np.zeros((NT, NT), dtype=np.float64)
+		et_ljrep_xr_xhi   = np.zeros((NT, NT), dtype=np.float64)
+		et_ljrep_xr_slope = np.zeros((NT, NT), dtype=np.float64)
+		et_ljrep_xr_extrap_slope = np.zeros((NT, NT), dtype=np.float64)
+		et_ljrep_xr_ylo   = np.zeros((NT, NT), dtype=np.float64)
+		et_has         = np.zeros((NT, NT), dtype=bool)
+		for is_ in range(NT):
+			for io_ in range(NT):
+				c = et_pairs[is_ * NT + io_]
+				if c is None: continue
+				et_close_start[is_, io_] = c['close_start']
+				et_close_end[is_, io_]   = c['close_end']
+				et_close_flat[is_, io_]  = c['close_flat']
+				et_close_poly[is_, io_]  = c['close_poly']
+				et_far_poly[is_, io_]    = c['far_poly']
+				et_lk_coeff[is_, io_]    = c['lk_coeff']
+				et_lambda_self[is_, io_] = c['lambda_self']
+				et_R_self[is_, io_]      = c['R_self']
+				et_final_w[is_, io_]     = c['final_weight']
+				if 'close_flat_comb' in c:
+					et_close_flat_comb[is_, io_] = c['close_flat_comb']
+					et_close_poly_comb[is_, io_] = c['close_poly_comb']
+					et_far_poly_comb[is_, io_]   = c['far_poly_comb']
+				if 'lj_minimum' in c:
+					et_lj_minimum[is_, io_]          = c['lj_minimum']
+					et_lj_r12_coeff[is_, io_]        = c['lj_r12_coeff']
+					et_lj_r6_coeff[is_, io_]         = c['lj_r6_coeff']
+					et_lj_switch_intercept[is_, io_] = c['lj_switch_intercept']
+					et_lj_switch_slope[is_, io_]     = c['lj_switch_slope']
+					et_lj_val_at_minimum[is_, io_]   = c['lj_val_at_minimum']
+					et_ljatr_cubic_poly[is_, io_]    = c['ljatr_cubic_poly']
+					et_ljatr_cp_xhi[is_, io_]        = c['ljatr_cubic_poly_xhi']
+					et_ljatr_cp_xlo[is_, io_]        = c['ljatr_cubic_poly_xlo']
+					et_ljatr_final_weight[is_, io_]  = c['ljatr_final_weight']
+					et_ljrep_linear_ramp_d2[is_, io_] = c['ljrep_linear_ramp_d2_cutoff']
+					et_ljrep_from_negcrossing[is_, io_] = c['ljrep_from_negcrossing']
+					et_hydrogen_interaction[is_, io_] = c['hydrogen_interaction']
+					et_ljrep_xr_xlo[is_, io_]   = c['ljrep_xr_xlo']
+					et_ljrep_xr_xhi[is_, io_]   = c['ljrep_xr_xhi']
+					et_ljrep_xr_slope[is_, io_] = c['ljrep_xr_slope']
+					et_ljrep_xr_extrap_slope[is_, io_] = c['ljrep_xr_extrapolated_slope']
+					et_ljrep_xr_ylo[is_, io_]   = c['ljrep_xr_ylo']
+				et_has[is_, io_] = True
+		at_e_idx = np.full(n, -1, dtype=np.int64)
+		for i in range(n):
+			t = ros_types[i]
+			if t in et_name_to_eidx:
+				at_e_idx[i] = et_name_to_eidx[t]
+	else:
+		NT = 0
+		at_e_idx = np.full(n, -1, dtype=np.int64)
+		et_close_start = et_close_end = et_close_flat = None
+		et_close_poly = et_far_poly = et_lk_coeff = None
+		et_lambda_self = et_R_self = et_final_w = et_has = None
+	opt_dist = 2.65
+	ang_sp2 = math.radians(60.0)   # 180 - 120
+	ang_sp3 = math.radians(71.0)   # 180 - 109
+	dih_sp2 = (0.0, math.radians(180.0))
+	dih_sp3 = (math.radians(120.0), math.radians(240.0))
+	water_xyz = []
+	water_atom = []
+	water_off = np.full(n, -1, dtype=np.int64)
+	water_cnt = np.zeros(n, dtype=np.int64)
+	def unit(v):
+		'''Return unit vector of v; zero if v is null'''
+		nv = float(np.linalg.norm(v))
+		return v / nv if nv > 1e-9 else v
+	for i in range(n):
+		t = ros_types[i]
+		if t not in LKB_WTS: continue
+		info = atom_types_db.get(t, {})
+		is_d = bool(info.get('donor', False))
+		is_a = bool(info.get('acceptor', False))
+		is_sp2 = bool(info.get('sp2', False))
+		is_sp3 = bool(info.get('sp3', False))
+		is_ring = bool(info.get('ring', False))
+		i_xyz = X[i]
+		i_waters = []
+		nbrs = adj.get(i, set())
+		heavy_nbrs = [j for j in nbrs if not is_H[j]]
+		polar_h_nbrs = [j for j in nbrs if is_polar_h[j]]
+		if is_d:
+			elem = info.get('element', '')
+			NTERM_H_NAMES_SET = {'H1', 'H2', 'H3',
+				'1H', '2H', '3H', 'HN', 'HT1', 'HT2', 'HT3'}
+			for h in polar_h_nbrs:
+				h_nm = atoms[h][0]
+				if elem == 'O':
+					ideal_bond = 0.96
+				elif t == 'NH2O':
+					ideal_bond = 1.00
+				elif h_nm in NTERM_H_NAMES_SET:
+					ideal_bond = 1.00
+				else:
+					ideal_bond = 1.01
+				offset = opt_dist - ideal_bond
+				h_xyz = X[h]
+				dirvec = unit(h_xyz - i_xyz)
+				w = h_xyz + offset * dirvec
+				i_waters.append(w)
+		if is_a:
+			if is_ring and len(heavy_nbrs) >= 2:
+				c1, c2 = heavy_nbrs[0], heavy_nbrs[1]
+				mid = 0.5 * (X[c1] + X[c2])
+				w = i_xyz + opt_dist * unit(i_xyz - mid)
+				i_waters.append(w)
+			elif is_sp3 and len(heavy_nbrs) >= 1 and \
+					len(polar_h_nbrs) >= 1:
+				c = heavy_nbrs[0]; h = polar_h_nbrs[0]
+				x_hat = unit(i_xyz - X[c])
+				v_OH = X[h] - i_xyz
+				y_dir = v_OH - np.dot(v_OH, x_hat) * x_hat
+				y_hat = unit(y_dir)
+				z_hat = np.cross(x_hat, y_hat)
+				cos_a = math.cos(ang_sp3)
+				sin_a = math.sin(ang_sp3)
+				for d in dih_sp3:
+					v_off = (cos_a * x_hat
+						+ sin_a * (math.cos(d) * y_hat
+							+ math.sin(d) * z_hat))
+					i_waters.append(i_xyz + opt_dist * v_off)
+			elif is_sp2 and len(heavy_nbrs) >= 1:
+				c = heavy_nbrs[0]
+				c_heavy_nbrs = [k for k in adj.get(c, set())
+					if k != i and not is_H[k]]
+				if not c_heavy_nbrs: continue
+				my_res = atom_res[i]
+				same_res_nbrs = sorted(
+					k for k in c_heavy_nbrs if atom_res[k] == my_res)
+				if same_res_nbrs:
+					b2 = same_res_nbrs[0]
+				else:
+					b2 = sorted(c_heavy_nbrs)[0]
+				x_hat = unit(i_xyz - X[c])
+				v_b2 = X[b2] - i_xyz
+				y_dir = v_b2 - np.dot(v_b2, x_hat) * x_hat
+				y_hat = unit(y_dir)
+				z_hat = np.cross(x_hat, y_hat)
+				cos_a = math.cos(ang_sp2)
+				sin_a = math.sin(ang_sp2)
+				for d in dih_sp2:
+					v_off = (cos_a * x_hat
+						+ sin_a * (math.cos(d) * y_hat
+							+ math.sin(d) * z_hat))
+					i_waters.append(i_xyz + opt_dist * v_off)
+		if i_waters:
+			water_off[i] = len(water_xyz)
+			water_cnt[i] = len(i_waters)
+			for w in i_waters:
+				water_xyz.append(np.asarray(w, dtype=np.float64))
+				water_atom.append(i)
+	if water_xyz:
+		water_xyz_arr = np.stack(water_xyz, axis=0)
+	else:
+		water_xyz_arr = np.empty((0, 3), dtype=np.float64)
+	water_atom = np.array(water_atom, dtype=np.int64)
+	return {
+		'ros_types': ros_types,
+		'has_score': has_score,
+		'charges':   q_arr,
+		'lj_R':      ljR,
+		'lj_W':      ljW,
+		'lk_dG':     lkdG,
+		'lk_lambda': lkLam,
+		'lk_volume': lkVol,
+		'is_donor':  is_donor,
+		'is_accep':  is_accep,
+		'is_polar_h':is_polar_h,
+		'is_H':      is_H,
+		'is_oh_donor': is_oh_donor,
+		'coords':    X,
+		'atom_res':  atom_res,
+		'pairs_i':   pairs_i,
+		'pairs_j':   pairs_j,
+		'pair_d':    pair_d,
+		'pair_w':    pair_w,
+		'pair_same_res': pair_same_res,
+		'pair_path': pair_path,
+		'pair_cp_path': pair_cp_path,
+		'rep_atom_idx': rep_atom_idx,
+		'lkb_w_iso':   lkb_w_iso,
+		'lkb_w_ball':  lkb_w_ball,
+		'lkb_d2_low':  lkb_d2_low,
+		'lkb_water_xyz': water_xyz_arr,
+		'lkb_water_off': water_off,
+		'lkb_water_cnt': water_cnt,
+		'lkb_ramp_w2': LK_RAMP_W2,
+		'at_e_idx':      at_e_idx,
+		'et_close_start':et_close_start,
+		'et_close_end':  et_close_end,
+		'et_close_flat': et_close_flat,
+		'et_close_poly': et_close_poly,
+		'et_far_poly':   et_far_poly,
+		'et_lk_coeff':   et_lk_coeff,
+		'et_lambda_self':et_lambda_self,
+		'et_R_self':     et_R_self,
+		'et_final_w':    et_final_w,
+		'et_close_flat_comb': et_close_flat_comb,
+		'et_close_poly_comb': et_close_poly_comb,
+		'et_far_poly_comb':   et_far_poly_comb,
+		'et_lj_minimum':          et_lj_minimum,
+		'et_lj_r12_coeff':        et_lj_r12_coeff,
+		'et_lj_r6_coeff':         et_lj_r6_coeff,
+		'et_lj_switch_intercept': et_lj_switch_intercept,
+		'et_lj_switch_slope':     et_lj_switch_slope,
+		'et_lj_val_at_minimum':   et_lj_val_at_minimum,
+		'et_ljatr_cubic_poly':    et_ljatr_cubic_poly,
+		'et_ljatr_cp_xhi':        et_ljatr_cp_xhi,
+		'et_ljatr_cp_xlo':        et_ljatr_cp_xlo,
+		'et_ljatr_final_weight':  et_ljatr_final_weight,
+		'et_ljrep_linear_ramp_d2': et_ljrep_linear_ramp_d2,
+		'et_ljrep_from_negcrossing': et_ljrep_from_negcrossing,
+		'et_hydrogen_interaction': et_hydrogen_interaction,
+		'et_ljrep_xr_xlo':   et_ljrep_xr_xlo,
+		'et_ljrep_xr_xhi':   et_ljrep_xr_xhi,
+		'et_ljrep_xr_slope': et_ljrep_xr_slope,
+		'et_ljrep_xr_extrap_slope': et_ljrep_xr_extrap_slope,
+		'et_ljrep_xr_ylo':   et_ljrep_xr_ylo,
+		'et_has':        et_has,
+		'adj':       adj}
+
+def _bfswithin(adj, start, depth):
+	'''
+	Return the set of atoms within `depth` bonds of `start` (inclusive)
+	Arguments:
+	----------
+		adj:   dict - adjacency map {int: set(int)}
+		start: int  - root atom
+		depth: int  - bond-depth limit (1-2 is depth 1, 1-4 is depth 3)
+	Returns:
+	--------
+		set of int: atoms reachable within `depth` bonds, including start
+	'''
+	visited = {start}
+	frontier = {start}
+	for _ in range(depth):
+		nxt = set()
+		for x in frontier:
+			for y in adj.get(x, ()):
+				if y not in visited:
+					visited.add(y); nxt.add(y)
+		frontier = nxt
+		if not frontier: break
+	return visited
+
+def _countnrot(ligand):
+	'''
+	Count non-terminal, non-ring, non-amide single bonds in a ligand
+	(Nrot for AutoDock Vina's conf-independent term).
+	A bond is rotatable iff:
+	  - single bond order
+	  - not a ring (= bridge-edge: removing it disconnects its endpoints)
+	  - both ends have at least one heavy-atom neighbour besides each
+	    other (i.e. not terminal)
+	  - not an amide / amidine C-N (where C is sp2-bonded to O or N)
+	Arguments:
+	----------
+		ligand: Molecule - the ligand
+	Returns:
+	--------
+		int: estimated Nrot
+	'''
+	atoms = ligand.data['Atoms']
+	bonds = ligand.data['Bonds']
+	orders = ligand.data.get('BondOrders', {})
+	def bondorder(a, b):
+		ol = orders.get(a, [])
+		nl = bonds[a]
+		if len(ol) == len(nl):
+			try: return ol[nl.index(b)]
+			except ValueError: return 1
+		return 1
+	def inring(a, b):
+		# BFS from a, excluding the direct a-b edge; if we still
+		# reach b, the bond is part of a cycle (ring bond).
+		seen = {a}
+		stk = [a]
+		while stk:
+			x = stk.pop()
+			for y in bonds.get(x, []):
+				if (x == a and y == b) or (x == b and y == a):
+					continue
+				if y in seen: continue
+				if y == b: return True
+				seen.add(y)
+				stk.append(y)
+		return False
+	def isamide(a, b):
+		# C-N where the C is acyclic and double-bonded to O (true
+		# amide carbonyl). AutoDock's torsion tree leaves these rigid.
+		# Aromatic ring C-N bonds are NOT amides — they get caught by
+		# the ring/inring filter instead.
+		def amide(c_idx, n_idx):
+			# Amide / amidine: C has a double bond to O or N besides
+			# n_idx, and the C-N bond itself is acyclic (so it's not
+			# an aromatic ring substituent like pyridine).
+			if atoms[c_idx][1] != 'C': return False
+			if atoms[n_idx][1] != 'N': return False
+			# C must not have any cyclic bond (else aromatic carbon)
+			for k in bonds.get(c_idx, []):
+				if inring(c_idx, k): return False
+			for k in bonds.get(c_idx, []):
+				if k == n_idx: continue
+				if atoms[k][1] not in ('O', 'N'): continue
+				if bondorder(c_idx, k) >= 2: return True
+			return False
+		return amide(a, b) or amide(b, a)
+	nrot = 0
+	seen = set()
+	for i in sorted(bonds):
+		for j in bonds[i]:
+			if j <= i: continue
+			key = (i, j)
+			if key in seen: continue
+			seen.add(key)
+			if atoms[i][1] == 'H' or atoms[j][1] == 'H': continue
+			if bondorder(i, j) != 1: continue
+			if inring(i, j): continue
+			hvi = [k for k in bonds[i]
+				if atoms[k][1] != 'H' and k != j]
+			hvj = [k for k in bonds[j]
+				if atoms[k][1] != 'H' and k != i]
+			has_h_i = any(atoms[k][1] == 'H' for k in bonds[i]
+				if k != j)
+			has_h_j = any(atoms[k][1] == 'H' for k in bonds[j]
+				if k != i)
+			# Skip if either endpoint is a "no rotation effect"
+			# terminal: terminal C (methyl-like) or terminal heavy
+			# atom with no H attached (halogen, lone substituent).
+			# Terminal O/N/S with H is still rotatable (H direction
+			# matters for H-bonding).
+			if not hvi and (atoms[i][1] == 'C' or not has_h_i):
+				continue
+			if not hvj and (atoms[j][1] == 'C' or not has_h_j):
+				continue
+			if isamide(i, j): continue
+			nrot += 1
+	return nrot
+
+
+def _countnumtors(ligand):
+	'''
+	Compute the Vina conf-independent term's "num_tors" input:
+	sum over rotatable bonds of 0.5 from each side, where each side
+	contributes 0.5 only if it has > 1 heavy non-H neighbour. So a
+	regular rotation between two heavy-substituted carbons contributes
+	1.0, while a rotation where one side has only one heavy neighbour
+	(like a carboxyl C-OH) contributes 0.5. This is the actual quantity
+	used in Vina's affinity denominator `1 + 0.05846 * num_tors`.
+	Arguments:
+	----------
+		ligand: Molecule
+	Returns:
+	--------
+		float: Vina num_tors (typically equal to Nrot or Nrot-k/2)
+	'''
+	atoms = ligand.data['Atoms']
+	bonds = ligand.data['Bonds']
+	orders = ligand.data.get('BondOrders', {})
+	def bondorder(a, b):
+		ol = orders.get(a, [])
+		nl = bonds[a]
+		if len(ol) == len(nl):
+			try: return ol[nl.index(b)]
+			except ValueError: return 1
+		return 1
+	def inring(a, b):
+		seen = {a}; stk = [a]
+		while stk:
+			x = stk.pop()
+			for y in bonds.get(x, []):
+				if (x == a and y == b) or (x == b and y == a):
+					continue
+				if y in seen: continue
+				if y == b: return True
+				seen.add(y); stk.append(y)
+		return False
+	def isamide(a, b):
+		def amide(c_idx, n_idx):
+			if atoms[c_idx][1] != 'C': return False
+			if atoms[n_idx][1] != 'N': return False
+			for k in bonds.get(c_idx, []):
+				if inring(c_idx, k): return False
+			for k in bonds.get(c_idx, []):
+				if k == n_idx: continue
+				if atoms[k][1] not in ('O', 'N'): continue
+				if bondorder(c_idx, k) >= 2: return True
+			return False
+		return amide(a, b) or amide(b, a)
+	num_tors = 0.0
+	seen = set()
+	for i in sorted(bonds):
+		for j in bonds[i]:
+			if j <= i: continue
+			if (i, j) in seen: continue
+			seen.add((i, j))
+			if atoms[i][1] == 'H' or atoms[j][1] == 'H': continue
+			if bondorder(i, j) != 1: continue
+			if inring(i, j): continue
+			hvi = [k for k in bonds[i]
+				if atoms[k][1] != 'H' and k != j]
+			hvj = [k for k in bonds[j]
+				if atoms[k][1] != 'H' and k != i]
+			has_h_i = any(atoms[k][1] == 'H' for k in bonds[i]
+				if k != j)
+			has_h_j = any(atoms[k][1] == 'H' for k in bonds[j]
+				if k != i)
+			if not hvi and (atoms[i][1] == 'C' or not has_h_i):
+				continue
+			if not hvj and (atoms[j][1] == 'C' or not has_h_j):
+				continue
+			if isamide(i, j): continue
+			# 0.5 per side where the side has > 1 heavy neighbour
+			if len(hvi) >= 1: num_tors += 0.5
+			if len(hvj) >= 1: num_tors += 0.5
+	return num_tors
+
+def _ringatoms(bonds):
+	'''
+	Identify atoms that belong to any ring via DFS back-edge detection
+	Arguments:
+	----------
+		bonds: dict - adjacency map {int: list(int)}
+	Returns:
+	--------
+		set of int: atom indices on any cycle
+	'''
+	visited = set()
+	parent = {}
+	ring = set()
+	for root in sorted(bonds):
+		if root in visited: continue
+		stk = [(root, None)]
+		while stk:
+			node, par = stk.pop()
+			if node in visited:
+				if par is not None and par != parent.get(node):
+					a = par; b = node
+					while a is not None and a != b:
+						ring.add(a); a = parent.get(a)
+					ring.add(b)
+				continue
+			visited.add(node); parent[node] = par
+			for nb in bonds.get(node, []):
+				if nb == par: continue
+				if nb in visited:
+					a = node
+					while a is not None and a != nb:
+						ring.add(a); a = parent.get(a)
+					ring.add(nb)
+				else:
+					stk.append((nb, node))
+	return ring
+
 class Score():
 	'''
-	Hybrid physics+statistical score for protein design (L/D/non-canonical)
+	Configurable scoring function for protein design and docking
 	'''
-	def __init__(self, ff=None, box=None):
+	def __init__(self, name='Default', strict=False):
 		'''
-		Initialise an 8-term protein-design score function
+		Initialise a named scoring function from database.json
 		Arguments:
 		----------
-			ff:  ForceField - reusable physics evaluator; created if None
-			box: None for no PBC; (3,) ortho; (3, 3) triclinic
+			name:   str - parameter set under ['Score Parameters']
+				(e.g. 'REF15', 'AutoDock Vina', 'Default');
+				case-insensitive
+			strict: bool - reserved for future use
 		Returns:
 		--------
 			None: instance is configured in place
 		'''
-		raise NotImplementedError(
-			"Score() reads database keys (weights, ref_state, "
-			"lk_solvation, hbond, kbp, rotamer) that were removed in "
-			"the Energy Parameters refactor. Pending migration to "
-			"OpenFF SMIRKS-driven score terms.")
-		if ff is None: ff = ForceField()
-		self.ff = ff
-		self.box = box
-		db = DBLoad()
-		P = db['Energy Parameters']
-		self.weights     = P['weights']
-		self.ref_state   = P['ref_state']
-		self.lk          = P['lk_solvation']
-		self.hb          = P['hbond']
-		self.kbp         = P['kbp']
-		self._kbp_table  = np.asarray(self.kbp['table'], dtype=np.float64)
-		self._lk_types   = None
-		self._kbp_types  = None
-		self._lk_dG      = None
-		self._lk_lam     = None
-		self._lk_V       = None
+		self.strict = strict
+		SP = DBLoad().get('Score Parameters', {}) or {}
+		if not SP:
+			raise ValueError(
+				'Score: database.json has no "Score Parameters" key. '
+				'Run vina.py / ref15.py first to populate.')
+		key_map = {k.upper(): k for k in SP}
+		if name.upper() not in key_map:
+			raise ValueError(
+				'Score: unknown name=%r (available: %r)'
+				% (name, sorted(SP)))
+		self.name = key_map[name.upper()]
+		self.Parameters = copy.deepcopy(SP[self.name])
+		if 'Terms' not in self.Parameters:
+			raise ValueError(
+				"Score: '%s' is missing the 'Terms' key" % name)
+		self.terms = [(t[0], dict(t[1]))
+			for t in self.Parameters['Terms']]
+		self.scale = float(
+			self.Parameters.get('Constants', {}).get('scale', 1.0))
+		self._cache = None
 		self._cache_hash = None
-		# Rotamer Library: backbone-dependent rotamer mixture data, CSR-packed
-		# (residues -> n_chi / rotamers{columns, table, bin_offsets} / densities).
-		# Used by _rotamer_prior to evaluate the multimodal mixture log-likelihood.
-		rl = db.get('Rotamer Library', {}) or {}
-		self._rotlib       = rl.get('residues', {})
-		self._rl_phi_start = float(rl.get('phi_start', -180.0))
-		self._rl_phi_step  = float(rl.get('phi_step',   10.0))
-		self._rl_phi_n     = int  (rl.get('phi_n',     36))
-		self._rl_psi_start = float(rl.get('psi_start', -180.0))
-		self._rl_psi_step  = float(rl.get('psi_step',   10.0))
-		self._rl_psi_n     = int  (rl.get('psi_n',     36))
-		self._rl_warned    = set()
-	def __call__(self, pose, decompose=False):
+	def _topologyhash(self, pose, ligand=None):
 		'''
-		Evaluate the design score; optionally return per-term breakdown
+		Deterministic hash of the pose and optional ligand
 		Arguments:
 		----------
-			pose:      Pose - molecule source pose
-			decompose: bool - if True, return (total, per_term_dict)
+			pose:   Pose or Molecule
+			ligand: Molecule or None
 		Returns:
 		--------
-			float OR (float, dict): total score (and per-term values)
+			int: hash used for cache invalidation
 		'''
-		h = self.ff._topologyhash(pose)
-		if self.ff._cache is None or self.ff._cache_hash != h:
-			self.ff._prepare(pose)
-			self._cache_hash = None
-		cache = self.ff._cache
-		if self._cache_hash != h:
-			self._build_typing(pose)
-			self._cache_hash = h
-		E_lj   = self.ff.VDWPotential(pose, cache=cache, grad=False,
-			box=self.box)
-		E_elec = self.ff.ElectrostaticPotential(pose, cache=cache,
-			grad=False, box=self.box)
-		E_cmap = self.ff.CMAPPotential(pose, cache=cache, grad=False,
-			box=self.box)
-		E_lk   = self._lk_solvation(pose, cache)
-		E_hb   = self._hbond_geom(pose, cache)
-		E_rot  = self._rotamer_prior(pose)
-		E_ref  = self._reference_state(pose)
-		E_kbp  = self._kbp_score(pose, cache)
-		w = self.weights
-		total = (w['LJ']*E_lj + w['Electrostatic']*E_elec
-			+ w['LK']*E_lk + w['Hbond']*E_hb
-			+ w['CMAP']*E_cmap + w['Rotamer']*E_rot
-			+ w['Reference']*E_ref + w['KBP']*E_kbp)
-		if decompose:
-			return float(total), {
-				'LJ': float(E_lj), 'Electrostatic': float(E_elec),
-				'LK': float(E_lk), 'Hbond': float(E_hb),
-				'CMAP': float(E_cmap), 'Rotamer': float(E_rot),
-				'Reference': float(E_ref), 'KBP': float(E_kbp)}
-		return float(total)
-	def _build_typing(self, pose):
+		def keyof(obj):
+			if obj is None: return None
+			a = tuple((int(k), tuple(v))
+				for k, v in sorted(obj.data['Atoms'].items()))
+			b = tuple((int(k), tuple(sorted(int(j) for j in v)))
+				for k, v in sorted(obj.data['Bonds'].items()))
+			return (a, b)
+		return hash((self.name, keyof(pose), keyof(ligand)))
+	def __call__(self, pose, ligand=None, decompose=False,
+			xs_override=None, nrot_override=None):
 		'''
-		Build per-atom LK and KBP type arrays plus LK parameter vectors
+		Evaluate the score function for a pose (optionally with a ligand)
 		Arguments:
 		----------
-			pose: Pose - molecule source pose
+			pose:          Pose or Molecule - receptor / source pose
+			ligand:        Molecule or None - optional ligand
+			decompose:     bool - if True, return (total, per_term dict)
+			xs_override:   dict or None - validation hook; combined-index
+				to XS type name, bypassing derived typing
+			nrot_override: int or None - validation hook
 		Returns:
 		--------
-			None: stores arrays on the instance
+			float OR (float, dict): total score in the score's native
+			unit (REU, kcal/mol, or dimensionless); when decompose=True
+			also returns a per-term breakdown
 		'''
-		atoms = pose.data['Atoms']
-		sorted_ids = sorted(atoms)
-		lk_map  = self.lk['atom_types']
-		kbp_map = self.kbp['atom_types']
-		lk_types_str = []
-		kbp_idx = []
-		dG_list, lam_list, V_list = [], [], []
-		for i in sorted_ids:
-			a = atoms[i]
-			composite = f"{a[0]}-{a[1]}"
-			if composite in lk_map: lk_key = composite
-			elif a[1] in lk_map:    lk_key = a[1]
-			else:
-				raise KeyError(
-					f"Score: atom type '{composite}' "
-					f"(atom #{i}, name='{a[0]}', element='{a[1]}') "
-					f"missing from database.json"
-					f"['Energy Parameters']['lk_solvation']['atom_types']. "
-					f"Add an entry [dG_free, lambda, volume] for "
-					f"this type or its element fallback.")
-			vals = lk_map[lk_key]
-			dG_list.append(vals[0]); lam_list.append(vals[1])
-			V_list.append(vals[2])
-			lk_types_str.append(lk_key)
-			if composite in kbp_map: kbp_idx.append(kbp_map[composite])
-			elif a[1] in kbp_map:    kbp_idx.append(kbp_map[a[1]])
-			else:
-				raise KeyError(
-					f"Score: atom type '{composite}' "
-					f"(atom #{i}, name='{a[0]}', element='{a[1]}') "
-					f"missing from database.json"
-					f"['Energy Parameters']['kbp']['atom_types']. "
-					f"Add an integer type index for this type or its "
-					f"element fallback.")
-		self._lk_dG  = np.asarray(dG_list,  dtype=np.float64)
-		self._lk_lam = np.asarray(lam_list, dtype=np.float64)
-		self._lk_V   = np.asarray(V_list,   dtype=np.float64)
-		self._lk_types  = np.asarray(lk_types_str, dtype=object)
-		self._kbp_types = np.asarray(kbp_idx, dtype=np.int64)
-	def _reference_state(self, pose):
-		'''
-		Per-residue reference (unfolded baseline) energy summed over pose
-		Arguments:
-		----------
-			pose: Pose - molecule source pose
-		Returns:
-		--------
-			float: sum of ref_state[aa] over every residue, in kJ/mol
-		'''
-		aas = pose.data.get('Amino Acids')
-		if aas is None: return 0.0
-		d = self.ref_state
-		total = 0.0
-		for r, info in aas.items():
-			key = info[0].upper()
-			if key not in d:
-				raise KeyError(
-					f"Score: amino acid '{key}' "
-					f"(residue #{r}) missing from "
-					f"database.json['Energy Parameters']['ref_state']. "
-					f"Add a per-aa reference energy. Known canonical "
-					f"codes: ACDEFGHIKLMNPQRSTVWY; non-canonical: "
-					f"BJOUXZ.")
-			total += d[key]
-		return total
-	def _rotlib_cell(self, three_letter, phi_deg, psi_deg):
-		'''
-		Slice the Rotamer Library CSR table for one (residue, phi, psi) cell
-		Arguments:
-		----------
-			three_letter: str - 3-letter residue code (uppercase)
-			phi_deg, psi_deg: float - backbone angles in degrees
-		Returns:
-		--------
-			tuple (entry, table_slice) where:
-				entry: dict {'n_chi': int} or None if the residue is not in the library
-				table_slice: list of rows (each [r..., count, prob, chi..., sig...])
-		'''
-		entry = self._rotlib.get(three_letter)
-		if entry is None: return None, []
-		rot = entry['rotamers']
-		bin_offsets = rot['bin_offsets']
-		i_phi = int(math.floor((phi_deg - self._rl_phi_start)
-			/ self._rl_phi_step)) % self._rl_phi_n
-		i_psi = int(math.floor((psi_deg - self._rl_psi_start)
-			/ self._rl_psi_step)) % self._rl_psi_n
-		bidx = i_phi * self._rl_psi_n + i_psi
-		start = bin_offsets[bidx]
-		end = bin_offsets[bidx + 1]
-		return entry, rot['table'][start:end]
-	def _rotamer_prior(self, pose):
-		'''
-		Multimodal rotamer prior: per-residue mixture-of-Gaussians log-likelihood
-		evaluated at the current chi tuple, given the residue's backbone cell
-		from the Rotamer Library. Each rotamer k contributes
-			P_k(phi,psi) * prod_c N(chi_c; mu_kc, sigma_kc)
-		and the residue energy is  -kT * log( sum_k that ),
-		stably evaluated via logsumexp.
-		Per-rotamer sigmas come from the library (NOT a global hyperparameter).
-		Arguments:
-		----------
-			pose: Pose - molecule source pose
-		Returns:
-		--------
-			float: total rotamer-prior energy in kJ/mol summed over residues
-		'''
-		aas = pose.data.get('Amino Acids')
-		if aas is None or not self._rotlib: return 0.0
-		kT      = 2.494                  # RT at 300 K, kJ/mol
-		LOG_2PI = math.log(2.0 * math.pi)
-		SIG_MIN = 0.5                    # degrees, numerical floor
-		total   = 0.0
-		for r, info in aas.items():
-			c    = info[0]
-			aa_u = c.upper()
-			aa_db     = pose.aminoacids.get(aa_u, {})
-			chi_atoms = aa_db.get('Chi Angle Atoms') or []
-			if not chi_atoms: continue
-			three = aa_db.get('Tricode')
-			if not three: continue
-			# D-amino acid handling: pose stores lowercase code; library is
-			# keyed on the L-form 3-letter. Mirror phi/psi for lookup and
-			# negate library mu values when reading rotamers back.
-			flip = (c != aa_u)
-			phi = pose.GetDihedral(r, 'PHI')
-			psi = pose.GetDihedral(r, 'PSI')
-			if math.isnan(phi) or math.isnan(psi): continue
-			phi_q = -phi if flip else phi
-			psi_q = -psi if flip else psi
-			entry, rows = self._rotlib_cell(three, phi_q, psi_q)
-			if entry is None:
-				if three not in self._rl_warned:
-					self._rl_warned.add(three)
+		h = self._topologyhash(pose, ligand)
+		hash_inputs = (h,
+			id(xs_override) if xs_override is not None else None,
+			nrot_override)
+		if self._cache is None or self._cache_hash != hash_inputs:
+			self._cache = PatternSearch(pose, self.Parameters,
+				ligand=ligand,
+				xs_override=xs_override,
+				nrot_override=nrot_override)
+			self._cache_hash = hash_inputs
+		per_term = {}
+		torsional = False
+		for method_name, kwargs in self.terms:
+			if method_name == 'TorsionalPenalty':
+				torsional = True
 				continue
-			if not rows: continue
-			n_chi = int(entry['n_chi'])
-			if n_chi == 0: continue
-			# Snapshot residue's current chi values once.
-			chi_now = np.empty(n_chi, dtype=np.float64)
+			fn = getattr(self, method_name, None)
+			if fn is None:
+				raise Exception(
+					'Score: method %s not found' % method_name)
+			out = fn(pose, cache=self._cache, ligand=ligand, **kwargs)
+			per_term[method_name] = out
+		inter_kj = sum(v.get('inter_weighted', 0.0)
+			for v in per_term.values())
+		intra_kj = sum(v.get('intra_weighted', 0.0)
+			for v in per_term.values())
+		if torsional:
+			nrot_w = float(
+				self.Parameters['Constants'].get('nrot_w', 0.0))
+			nrot = float(self._cache.get('nrot', 0))
+			denom = 1.0 + nrot_w * nrot
+			affinity_kj = inter_kj / denom if denom != 0 else inter_kj
+			total_native = affinity_kj * self.scale
+			per_term['_summary'] = {
+				'inter_total_kJ': inter_kj,
+				'intra_total_kJ': intra_kj,
+				'nrot': nrot, 'denom': denom,
+				'affinity_native': total_native}
+		else:
+			total_native = (inter_kj + intra_kj) * self.scale
+			per_term['_summary'] = {
+				'inter_total_kJ': inter_kj,
+				'intra_total_kJ': intra_kj,
+				'total_native': total_native}
+		if decompose:
+			return float(total_native), per_term
+		return float(total_native)
+	def _evalpairs(self, cache, kind, pair_fn):
+		'''
+		Apply a per-pair function and sum its result over inter and
+		intra-ligand pair lists, gating on cutoff
+		Arguments:
+		----------
+			cache:   dict - PatternSearch result
+			kind:    str  - 'inter' or 'intra' or 'both'
+			pair_fn: callable - takes (ai, aj, rij, cache) and returns
+				a per-pair contribution array
+		Returns:
+		--------
+			tuple (inter_sum, intra_sum)
+		'''
+		def go(pairs):
+			if len(pairs) == 0: return 0.0
+			ai = pairs[:, 0]; aj = pairs[:, 1]
+			coords = cache['coords']
+			rij = np.linalg.norm(coords[ai] - coords[aj], axis=1)
+			return float(pair_fn(ai, aj, rij, cache).sum())
+		inter_sum = go(cache['inter_pairs'])
+		intra_sum = go(cache['intra_ligand_pairs'])
+		return inter_sum, intra_sum
+	def _termresult(self, inter_raw, intra_raw, weight):
+		'''
+		Pack one term's contribution into the standard dict shape
+		Arguments:
+		----------
+			inter_raw: float - unweighted intermolecular sum
+			intra_raw: float - unweighted intramolecular sum
+			weight:    float - kJ-scale weight (stored in DB x4.184)
+		Returns:
+		--------
+			dict: 'inter_raw', 'intra_raw', 'inter_weighted',
+			'intra_weighted' (the last two are inter_raw/intra_raw
+			x weight, in kJ/mol)
+		'''
+		return {
+			'inter_raw': inter_raw, 'intra_raw': intra_raw,
+			'inter_weighted': inter_raw * weight,
+			'intra_weighted': intra_raw * weight}
+	def _gausspair(self, cache, key):
+		'''
+		Evaluate one Vina gaussian term and pack the result
+		Arguments:
+		----------
+			cache: dict - PatternSearch result
+			key:   str  - 'Gauss1' or 'Gauss2'
+		Returns:
+		--------
+			dict: term result via _termresult
+		'''
+		p = self.Parameters[key]
+		offset = float(p['offset']); width = float(p['width'])
+		cutoff = float(p['cutoff']); weight = float(p['weight'])
+		radii = cache['xs_radii_arr']; xs = cache['xs_types']
+		def fn(ai, aj, rij, c):
+			ri = radii[xs[ai]]; rj = radii[xs[aj]]
+			d = rij - (ri + rj + offset)
+			gate = ((xs[ai] >= 0) & (xs[aj] >= 0) & (rij < cutoff))
+			return np.where(gate, np.exp(-(d / width) ** 2), 0.0)
+		inter_raw, intra_raw = self._evalpairs(cache, 'both', fn)
+		return self._termresult(inter_raw, intra_raw, weight)
+	def Gauss1Potential(self, pose, cache, ligand=None, **kw):
+		'''
+		Vina gaussian-1 attractive term, exp(-(d/0.5)^2)
+		Arguments:
+		----------
+			pose:   Pose or Molecule - source pose
+			cache:  dict - PatternSearch result
+			ligand: Molecule or None - optional
+		Returns:
+		--------
+			dict: term result with inter/intra raw and weighted
+		'''
+		return self._gausspair(cache, 'Gauss1')
+	def Gauss2Potential(self, pose, cache, ligand=None, **kw):
+		'''
+		Vina gaussian-2 long-range attractive term, exp(-((d-3)/2)^2)
+		Arguments:
+		----------
+			pose:   Pose or Molecule - source pose
+			cache:  dict - PatternSearch result
+			ligand: Molecule or None - optional
+		Returns:
+		--------
+			dict: term result with inter/intra raw and weighted
+		'''
+		return self._gausspair(cache, 'Gauss2')
+	def RepulsionPotential(self, pose, cache, ligand=None, **kw):
+		'''
+		Vina repulsion term, d^2 where d < 0 (atomic overlap)
+		Arguments:
+		----------
+			pose:   Pose or Molecule - source pose
+			cache:  dict - PatternSearch result
+			ligand: Molecule or None - optional
+		Returns:
+		--------
+			dict: term result with inter/intra raw and weighted
+		'''
+		p = self.Parameters['Repulsion']
+		offset = float(p['offset']); cutoff = float(p['cutoff'])
+		weight = float(p['weight'])
+		radii = cache['xs_radii_arr']; xs = cache['xs_types']
+		def fn(ai, aj, rij, c):
+			ri = radii[xs[ai]]; rj = radii[xs[aj]]
+			d = rij - (ri + rj + offset)
+			gate = ((xs[ai] >= 0) & (xs[aj] >= 0) & (rij < cutoff))
+			return np.where(gate & (d < 0), d * d, 0.0)
+		inter_raw, intra_raw = self._evalpairs(cache, 'both', fn)
+		return self._termresult(inter_raw, intra_raw, weight)
+	def _slopestep(self, cache, key, mode):
+		'''
+		Evaluate a slope_step term (hydrophobic or h-bond)
+		Arguments:
+		----------
+			cache: dict - PatternSearch result
+			key:   str  - 'Hydrophobic' or 'HBond'
+			mode:  str  - 'hydrophobic' or 'hbond'
+		Returns:
+		--------
+			dict: term result via _termresult
+		'''
+		p = self.Parameters[key]
+		good = float(p['good']); bad = float(p['bad'])
+		cutoff = float(p['cutoff']); weight = float(p['weight'])
+		radii = cache['xs_radii_arr']; xs = cache['xs_types']
+		hphob = cache['xs_is_hydrophobic_arr']
+		donor = cache['xs_is_donor_arr']
+		accep = cache['xs_is_acceptor_arr']
+		def slopestep(x):
+			if bad < good:
+				return np.clip((x - bad) / (good - bad), 0.0, 1.0)
+			elif bad > good:
+				return np.clip((bad - x) / (bad - good), 0.0, 1.0)
+			else:
+				return np.where(x <= good, 1.0, 0.0)
+		def fn(ai, aj, rij, c):
+			ri = radii[xs[ai]]; rj = radii[xs[aj]]
+			d = rij - (ri + rj)
+			valid = (xs[ai] >= 0) & (xs[aj] >= 0) & (rij < cutoff)
+			if mode == 'hydrophobic':
+				gate = hphob[xs[ai]] & hphob[xs[aj]]
+			else:
+				gate = ((donor[xs[ai]] & accep[xs[aj]])
+					| (donor[xs[aj]] & accep[xs[ai]]))
+			return np.where(valid & gate, slopestep(d), 0.0)
+		inter_raw, intra_raw = self._evalpairs(cache, 'both', fn)
+		return self._termresult(inter_raw, intra_raw, weight)
+	def HydrophobicPotential(self, pose, cache, ligand=None, **kw):
+		'''
+		Vina hydrophobic contact term, slope_step over hydrophobic pairs
+		Arguments:
+		----------
+			pose:   Pose or Molecule - source pose
+			cache:  dict - PatternSearch result
+			ligand: Molecule or None - optional
+		Returns:
+		--------
+			dict: term result with inter/intra raw and weighted
+		'''
+		return self._slopestep(cache, 'Hydrophobic', 'hydrophobic')
+	def HBondPotential(self, pose, cache, ligand=None, **kw):
+		'''
+		Vina non-directional hydrogen-bond term over donor-acceptor pairs
+		Arguments:
+		----------
+			pose:   Pose or Molecule - source pose
+			cache:  dict - PatternSearch result
+			ligand: Molecule or None - optional
+		Returns:
+		--------
+			dict: term result with inter/intra raw and weighted
+		'''
+		return self._slopestep(cache, 'HBond', 'hbond')
+	def TorsionalPenalty(self, pose, cache, ligand=None, **kw):
+		'''
+		Marker term; the actual division is applied in __call__ after the
+		other terms have summed the intermolecular total
+		Arguments:
+		----------
+			pose:   Pose or Molecule - source pose
+			cache:  dict - PatternSearch result
+			ligand: Molecule or None - optional
+		Returns:
+		--------
+			dict: zero contributions (the term acts on the running total
+			in __call__, not as a per-pair sum)
+		'''
+		return {'inter_raw': 0.0, 'intra_raw': 0.0,
+			'inter_weighted': 0.0, 'intra_weighted': 0.0}
+	def _ref15pairs(self, cache, same_res=False, cp='cp4',
+			use_cp_rep=False):
+		'''
+		Return (pairs_i, pairs_j, pair_d, pair_w) for the requested
+		intra/inter-residue side, computing the count-pair weight per
+		the rule. 'cp4' (default, inter-residue with rama active
+		and the intra xover4 helpers): 1-2/1-3/1-4 excluded, 1-5 at 0.2,
+		>=1-6 at 1.0. 'cp3' (default intra-residue): 1-2/1-3 excluded,
+		1-4 at 0.2, >=1-5 at 1.0.
+		Arguments:
+		----------
+			cache: per-pose cache from _ref15cache
+			same_res: bool - intra vs inter residue
+			cp: 'cp3' or 'cp4'
+			use_cp_rep: bool - use pair_cp_path (elec_representative_cp)
+				instead of pair_path; matches FaElec default
+		'''
+		mask = cache['pair_same_res']
+		sel = mask if same_res else ~mask
+		path = cache['pair_cp_path'] if use_cp_rep else cache['pair_path']
+		if same_res:
+			if cp == 'cp3':
+				w = np.where(path <= 2, 0.0,
+					np.where(path == 3, 0.2, 1.0))
+			else:
+				w = np.where(path <= 3, 0.0,
+					np.where(path == 4, 0.2, 1.0))
+		else:
+			w = cache['pair_w']
+			if use_cp_rep:
+				if cp == 'cp3':
+					w = np.where(path <= 2, 0.0,
+						np.where(path == 3, 0.2, 1.0))
+				else:
+					w = np.where(path <= 3, 0.0,
+						np.where(path == 4, 0.2, 1.0))
+		sel = sel & (w > 0.0)
+		return (cache['pairs_i'][sel], cache['pairs_j'][sel],
+			cache['pair_d'][sel], w[sel])
+	def _ljpair(self, cache, pi, pj, r):
+		'''
+		Per-pair LJ (atr, rep) using the analytic etable-evaluation
+		formula and the per-atom-type-pair LJ params:
+		  dis2 < ljrep_linear_ramp_d2_cutoff:
+		    ljE = lj_switch_slope * dis + lj_switch_intercept
+		  ljrep_linear_ramp_d2_cutoff <= dis < ljatr_cubic_poly_xlo:
+		    ljE = lj_r12_coeff / dis^12 + lj_r6_coeff / dis^6
+		  ljatr_cubic_poly_xlo <= dis < ljatr_cubic_poly_xhi (4.5 -> 6.0):
+		    ljE = eval(ljatr_cubic_poly, dis)
+		  dis >= ljatr_cubic_poly_xhi (= 6.0): ljE = 0
+		Split into atr/rep:
+		  ljrep_from_negcrossing (REPLS/HREPS):
+		    atrE = ljE if ljE < 0 else 0; repE = ljE if ljE >= 0 else 0
+		  else if dis < lj_minimum:
+		    atrE = lj_val_at_minimum; repE = ljE - lj_val_at_minimum
+		  else:
+		    atrE = ljE; repE = 0
+		Plus per-pair ExtraQuadraticRepulsion adds to repE if dis < xhi.
+		Final: atrE *= ljatr_final_weight.
+		Arguments:
+		----------
+			cache: per-pose cache from _ref15atomcache
+			pi, pj: atom-i and atom-j indices (np.int64)
+			r: pair distances (np.float64)
+		Returns:
+		--------
+			(atrE, repE) numpy arrays length len(pi)
+		'''
+		at_e_idx = cache.get('at_e_idx')
+		n_pairs = len(pi)
+		if at_e_idx is None or n_pairs == 0:
+			z = np.zeros(n_pairs, dtype=np.float64)
+			return z, z.copy()
+		ai = at_e_idx[pi]; aj = at_e_idx[pj]
+		valid = (ai >= 0) & (aj >= 0)
+		a_lo = np.where(ai <= aj, ai, aj)
+		a_hi = np.where(ai <= aj, aj, ai)
+		a_lo_s = np.where(valid, a_lo, 0)
+		a_hi_s = np.where(valid, a_hi, 0)
+		ljrep_ramp_d2  = cache['et_ljrep_linear_ramp_d2'][a_lo_s, a_hi_s]
+		lj_switch_int  = cache['et_lj_switch_intercept'][a_lo_s, a_hi_s]
+		lj_switch_slo  = cache['et_lj_switch_slope'][a_lo_s, a_hi_s]
+		lj_r12         = cache['et_lj_r12_coeff'][a_lo_s, a_hi_s]
+		lj_r6          = cache['et_lj_r6_coeff'][a_lo_s, a_hi_s]
+		ljatr_xlo      = cache['et_ljatr_cp_xlo'][a_lo_s, a_hi_s]
+		ljatr_xhi      = cache['et_ljatr_cp_xhi'][a_lo_s, a_hi_s]
+		ljatr_cp       = cache['et_ljatr_cubic_poly'][a_lo_s, a_hi_s]
+		ljatr_fw       = cache['et_ljatr_final_weight'][a_lo_s, a_hi_s]
+		lj_min         = cache['et_lj_minimum'][a_lo_s, a_hi_s]
+		lj_val_at_min  = cache['et_lj_val_at_minimum'][a_lo_s, a_hi_s]
+		rep_neg        = cache['et_ljrep_from_negcrossing'][a_lo_s, a_hi_s]
+		xr_xlo   = cache['et_ljrep_xr_xlo'][a_lo_s, a_hi_s]
+		xr_xhi   = cache['et_ljrep_xr_xhi'][a_lo_s, a_hi_s]
+		xr_slope = cache['et_ljrep_xr_slope'][a_lo_s, a_hi_s]
+		xr_extrap= cache['et_ljrep_xr_extrap_slope'][a_lo_s, a_hi_s]
+		xr_ylo   = cache['et_ljrep_xr_ylo'][a_lo_s, a_hi_s]
+		d = r
+		d2 = d * d
+		inv_d2 = 1.0 / np.maximum(d2, 1e-12)
+		inv_d6 = inv_d2 ** 3
+		inv_d12 = inv_d6 ** 2
+		lj_linramp  = lj_switch_slo * d + lj_switch_int
+		lj_generic  = lj_r12 * inv_d12 + lj_r6 * inv_d6
+		c0=ljatr_cp[:,0]; c1=ljatr_cp[:,1]; c2=ljatr_cp[:,2]; c3=ljatr_cp[:,3]
+		lj_atr_poly = ((c3 * d + c2) * d + c1) * d + c0
+		ljE = np.where(d2 < ljrep_ramp_d2, lj_linramp,
+			np.where(d < ljatr_xlo, lj_generic,
+				np.where(d < ljatr_xhi, lj_atr_poly, 0.0)))
+		atrE = np.where(rep_neg,
+			np.where(ljE < 0, ljE, 0.0),
+			np.where(d < lj_min, lj_val_at_min, ljE))
+		repE = np.where(rep_neg,
+			np.where(ljE >= 0, ljE, 0.0),
+			np.where(d < lj_min, ljE - lj_val_at_min, 0.0))
+		atrE = atrE * ljatr_fw
+		atrE = np.where(valid, atrE, 0.0)
+		repE = np.where(valid, repE, 0.0)
+		return atrE, repE
+	def _ref15ljraw(self, cache, same_res):
+		'''
+		Per-pair sum of LJ atr/rep using the analytic etable-evaluation
+		formula via `_ljpair`.
+		Returns (atr_raw, rep_raw)
+		'''
+		pi, pj, r, w = self._ref15pairs(cache, same_res=same_res)
+		if len(pi) == 0: return 0.0, 0.0
+		atrE, repE = self._ljpair(cache, pi, pj, r)
+		return float(np.sum(w * atrE)), float(np.sum(w * repE))
+	def FaAtrPotential(self, pose, cache, ligand=None, **kw):
+		'''
+		Fa_atr - inter-residue LJ attractive split
+		'''
+		raw, _ = self._ref15ljraw(cache, same_res=False)
+		weight = float(self.Parameters['FaAtr']['weight'])
+		return {'inter_raw': raw, 'intra_raw': 0.0,
+			'inter_weighted': raw * weight, 'intra_weighted': 0.0,
+			'raw': raw}
+	def FaRepPotential(self, pose, cache, ligand=None, **kw):
+		'''
+		Fa_rep - inter-residue LJ repulsive split
+		'''
+		_, raw = self._ref15ljraw(cache, same_res=False)
+		weight = float(self.Parameters['FaRep']['weight'])
+		return {'inter_raw': raw, 'intra_raw': 0.0,
+			'inter_weighted': raw * weight, 'intra_weighted': 0.0,
+			'raw': raw}
+	def _lkisopair(self, cache, pi, pj, r):
+		'''
+		Return per-direction analytic fa_sol/lk_iso values (one-sided
+		desolvation energies) for atom pairs (pi[k], pj[k]) at distance
+		r[k], using the ported per-atom-type-pair etable params:
+		  - d < close_start: flat constant close_flat
+		  - close_start <= d < close_end: cubic poly close
+		  - close_end <= d < 4.5: standard analytic LK exponential
+		  - 4.5 <= d < 6.0: cubic poly far Hermite fade
+		  - d >= 6.0: 0
+		Both directions evaluated. Returns (lki, lkj), each length len(pi).
+		Pairs where either atom type is not in the etable table
+		(e.g. virtuals or H) return 0 for that pair.
+		Arguments:
+		----------
+			cache: per-pose cache from _ref15atomcache
+			pi: atom-i indices (np.int64)
+			pj: atom-j indices (np.int64)
+			r:  pair distances (np.float64)
+		Returns:
+		--------
+			(lki, lkj): tuple of np.float64 arrays length len(pi)
+		'''
+		at_e_idx = cache.get('at_e_idx')
+		n_pairs = len(pi)
+		if at_e_idx is None or n_pairs == 0:
+			return (np.zeros(n_pairs, dtype=np.float64),
+				np.zeros(n_pairs, dtype=np.float64))
+		ai = at_e_idx[pi]; aj = at_e_idx[pj]
+		valid = (ai >= 0) & (aj >= 0)
+		ai_safe = np.where(valid, ai, 0)
+		aj_safe = np.where(valid, aj, 0)
+		def _eval(io_first, io_second):
+			'''
+			Evaluate analytic etable lk_iso for direction (self=first).
+			Arguments:
+			----------
+				io_first:  self-atom etable idx (npair,)
+				io_second: other-atom etable idx (npair,)
+			Returns:
+			--------
+				np.float64 array (npair,) of one-sided lk_iso values
+			'''
+			cs = cache['et_close_start'][io_first, io_second]
+			ce = cache['et_close_end'][io_first, io_second]
+			cf = cache['et_close_flat'][io_first, io_second]
+			cp = cache['et_close_poly'][io_first, io_second]
+			fp = cache['et_far_poly'][io_first, io_second]
+			lc = cache['et_lk_coeff'][io_first, io_second]
+			la = cache['et_lambda_self'][io_first, io_second]
+			Rs = cache['et_R_self'][io_first, io_second]
+			fw = cache['et_final_w'][io_first, io_second]
+			d = r
+			d2 = d * d
+			exp_arg = (d - Rs) / la
+			gauss = np.exp(-exp_arg * exp_arg)
+			e_mid = lc * gauss / np.maximum(d2, 1e-12)
+			c0 = cp[:, 0]; c1 = cp[:, 1]; c2 = cp[:, 2]; c3 = cp[:, 3]
+			e_close = c0 + c1 * d + c2 * d * d + c3 * d * d * d
+			f0 = fp[:, 0]; f1 = fp[:, 1]; f2 = fp[:, 2]; f3 = fp[:, 3]
+			e_far = f0 + f1 * d + f2 * d * d + f3 * d * d * d
+			e = np.where(d < cs, cf, e_mid)
+			e = np.where((d >= cs) & (d < ce), e_close, e)
+			e = np.where((d >= 4.5) & (d < 6.0), e_far, e)
+			e = np.where(d >= 6.0, 0.0, e)
+			return e * fw
+		lki = _eval(ai_safe, aj_safe)
+		lkj = _eval(aj_safe, ai_safe)
+		lki = np.where(valid, lki, 0.0)
+		lkj = np.where(valid, lkj, 0.0)
+		return lki, lkj
+	def _solpair(self, cache, pi, pj, r):
+		'''
+		Combined fa_sol per-pair value matching the
+		analytic LK-evaluation algorithm (used by FaSol /
+		FaIntraSolXover4). Uses the per-atom-pair COMBINED close/far
+		cubic polynomials (`fasol_cubic_poly_close` / `_far`), which
+		differ from poly1+poly2 because the combined poly is fit to a
+		spline
+		whose boundary derivatives come from the discrete-etable
+		interpolator (not the analytical formula). The exponential
+		region uses lk_coeff1*exp(-x1) + lk_coeff2*exp(-x2) per the
+		analytic LK evaluation. Returns per-pair combined fa_sol
+		energies (length len(pi)).
+		Arguments:
+		----------
+			cache: per-pose cache
+			pi: atom-i indices (np.int64)
+			pj: atom-j indices (np.int64)
+			r:  pair distances (np.float64)
+		Returns:
+		--------
+			np.float64 array: combined fa_sol per pair
+		'''
+		at_e_idx = cache.get('at_e_idx')
+		n_pairs = len(pi)
+		if at_e_idx is None or n_pairs == 0:
+			return np.zeros(n_pairs, dtype=np.float64)
+		ai = at_e_idx[pi]; aj = at_e_idx[pj]
+		valid = (ai >= 0) & (aj >= 0)
+		a_lo = np.where(ai <= aj, ai, aj)
+		a_hi = np.where(ai <= aj, aj, ai)
+		a_lo_safe = np.where(valid, a_lo, 0)
+		a_hi_safe = np.where(valid, a_hi, 0)
+		cs = cache['et_close_start'][a_lo_safe, a_hi_safe]
+		ce = cache['et_close_end'][a_lo_safe, a_hi_safe]
+		cf = cache['et_close_flat_comb'][a_lo_safe, a_hi_safe]
+		cp = cache['et_close_poly_comb'][a_lo_safe, a_hi_safe]
+		fp = cache['et_far_poly_comb'][a_lo_safe, a_hi_safe]
+		fw = cache['et_final_w'][a_lo_safe, a_hi_safe]
+		lc1 = cache['et_lk_coeff'][a_lo_safe, a_hi_safe]
+		lc2 = cache['et_lk_coeff'][a_hi_safe, a_lo_safe]
+		R1  = cache['et_R_self'][a_lo_safe, a_hi_safe]
+		R2  = cache['et_R_self'][a_hi_safe, a_lo_safe]
+		la1 = cache['et_lambda_self'][a_lo_safe, a_hi_safe]
+		la2 = cache['et_lambda_self'][a_hi_safe, a_lo_safe]
+		d = r
+		d2 = d * d
+		x1 = ((d - R1) / la1) ** 2
+		x2 = ((d - R2) / la2) ** 2
+		e_mid = (lc1 * np.exp(-x1) + lc2 * np.exp(-x2)) / np.maximum(
+			d2, 1e-12)
+		c0 = cp[:, 0]; c1 = cp[:, 1]; c2 = cp[:, 2]; c3 = cp[:, 3]
+		e_close = ((c3 * d + c2) * d + c1) * d + c0
+		f0 = fp[:, 0]; f1 = fp[:, 1]; f2 = fp[:, 2]; f3 = fp[:, 3]
+		e_far = ((f3 * d + f2) * d + f1) * d + f0
+		e = np.where(d < cs, cf, e_mid)
+		e = np.where((d >= cs) & (d < ce), e_close, e)
+		e = np.where((d >= 4.5) & (d < 6.0), e_far, e)
+		e = np.where(d >= 6.0, 0.0, e)
+		e = e * fw
+		e = np.where(valid, e, 0.0)
+		return e
+	def _ref15solraw(self, cache, same_res):
+		'''
+		Lazaridis-Karplus solvation raw sum, using the
+		per-atom-type-pair etable params (close-poly + far-fade).
+		Both per-direction terms summed and weighted by the count-pair
+		weight w.
+		Arguments:
+		----------
+			cache: per-pose cache from _ref15atomcache
+			same_res: if True compute intra-residue (xover4) subset,
+				otherwise inter-residue pairs
+		Returns:
+		--------
+			float: raw sum of (lki + lkj) * w over heavy-heavy pairs
+		'''
+		pi, pj, r, w = self._ref15pairs(cache, same_res=same_res)
+		if len(pi) == 0: return 0.0
+		e = self._solpair(cache, pi, pj, r)
+		return float(np.sum(w * e))
+	def FaSolPotential(self, pose, cache, ligand=None, **kw):
+		'''
+		Fa_sol - inter-residue Lazaridis-Karplus solvation
+		'''
+		raw = self._ref15solraw(cache, same_res=False)
+		weight = float(self.Parameters['FaSol']['weight'])
+		return {'inter_raw': raw, 'intra_raw': 0.0,
+			'inter_weighted': raw * weight, 'intra_weighted': 0.0,
+			'raw': raw}
+	def FaIntraRepPotential(self, pose, cache, ligand=None, **kw):
+		'''
+		Fa_intra_rep - intra-residue LJ repulsive split with CP3
+		(1-2/1-3 excluded, 1-4 at 0.2, >=1-5 at 1.0). Uses the same
+		analytic per-pair LJ table as _ref15ljraw.
+		'''
+		pi, pj, r, w = self._ref15pairs(cache, same_res=True, cp='cp3')
+		weight = float(self.Parameters['FaIntraRep']['weight'])
+		if len(pi) == 0:
+			return {'inter_raw': 0.0, 'intra_raw': 0.0,
+				'inter_weighted': 0.0, 'intra_weighted': 0.0,
+				'raw': 0.0}
+		_, repE = self._ljpair(cache, pi, pj, r)
+		raw = float(np.sum(w * repE))
+		return {'inter_raw': 0.0, 'intra_raw': raw,
+			'inter_weighted': 0.0, 'intra_weighted': raw * weight,
+			'raw': raw}
+	def FaIntraSolXover4Potential(self, pose, cache, ligand=None, **kw):
+		'''
+		Fa_intra_sol_xover4 - intra-residue LK solvation, only
+		pairs separated by >=4 bonds (the 'xover4' subset)
+		'''
+		raw = self._ref15solraw(cache, same_res=True)
+		weight = float(self.Parameters['FaIntraSolXover4']['weight'])
+		return {'inter_raw': 0.0, 'intra_raw': raw,
+			'inter_weighted': 0.0, 'intra_weighted': raw * weight,
+			'raw': raw}
+	def FaElecPotential(self, pose, cache, ligand=None, **kw):
+		'''
+		Fa_elec - Coulomb with sigmoidal distance-dependent
+		dielectric, shifted to zero at fa_elec_max_dis. With the
+		INCLUDE_INTRA_RES_PROTEIN flag both inter (CP4) and intra (CP3)
+		pairs contribute.
+		'''
+		weight = float(self.Parameters['FaElec']['weight'])
+		C = self.Parameters['Constants']
+		C0 = float(C.get('coulomb_C0', 322.0637))
+		D = float(C.get('sigmoidal_D', 80.0))
+		D0 = float(C.get('sigmoidal_D0', 6.0))
+		S = float(C.get('sigmoidal_S', 0.4))
+		d_min = float(C.get('fa_elec_min_dis', 1.45))
+		d_max = float(C.get('fa_elec_max_dis', 5.5))
+		q = cache['charges']
+		def diel(d):
+			'''Hingerty 1985 sigmoidal dielectric'''
+			rS = d * S
+			return D - 0.5 * (D - D0) * (
+				2 + 2 * rS + rS * rS) * np.exp(-rS)
+		def ddiel_dr(d):
+			'''Derivative of sigmoidal dielectric'''
+			rS = d * S
+			emr = np.exp(-rS)
+			term1 = 2.0 * S + 2.0 * d * S * S
+			term2 = (2.0 + 2.0 * rS + rS * rS) * (-S)
+			return -0.5 * (D - D0) * (term1 + term2) * emr
+		low_start = d_min - 0.25
+		low_end = d_min + 0.25
+		hi_start = d_max - 1.0
+		hi_end = d_max
+		def pair_sum(pi, pj, r, w):
+			if len(pi) == 0: return 0.0
+			qq = q[pi] * q[pj]
+			eps_r = diel(r)
+			base = C0 * qq / (eps_r * np.maximum(r, 1e-9))
+			base_at_max = C0 * qq / (diel(d_max) * d_max)
+			e = base - base_at_max
+			e = np.where(r >= d_max, 0.0, e)
+			e_min_clamp = (C0 * qq / (diel(d_min) * d_min)
+				- base_at_max)
+			e = np.where(r < d_min, e_min_clamp, e)
+			in_low = (r >= low_start) & (r < low_end)
+			if np.any(in_low):
+				h_low = low_end - low_start
+				eps_le = diel(low_end)
+				deps_le = ddiel_dr(low_end)
+				v0_low = e_min_clamp
+				v1_low = C0 * qq / (eps_le * low_end) - base_at_max
+				d1_low = -C0 * qq * (eps_le + low_end * deps_le) \
+					/ (low_end * low_end * eps_le * eps_le)
+				t = (r - low_start) / h_low
+				t2 = t * t; t3 = t2 * t
+				H = ((2*t3 - 3*t2 + 1) * v0_low
+					+ (-2*t3 + 3*t2) * v1_low
+					+ (t3 - t2) * h_low * d1_low)
+				e = np.where(in_low, H, e)
+			in_hi = (r >= hi_start) & (r < hi_end)
+			if np.any(in_hi):
+				h_hi = hi_end - hi_start
+				eps_hs = diel(hi_start)
+				deps_hs = ddiel_dr(hi_start)
+				v0_hi = C0 * qq / (eps_hs * hi_start) - base_at_max
+				d0_hi = -C0 * qq * (eps_hs + hi_start * deps_hs) \
+					/ (hi_start * hi_start * eps_hs * eps_hs)
+				t = (r - hi_start) / h_hi
+				t2 = t * t; t3 = t2 * t
+				H = ((2*t3 - 3*t2 + 1) * v0_hi
+					+ (t3 - 2*t2 + t) * h_hi * d0_hi)
+				e = np.where(in_hi, H, e)
+			return float(np.sum(w * e))
+		pi, pj, r, w = self._ref15pairs(cache, same_res=False, cp='cp4',
+			use_cp_rep=True)
+		raw = pair_sum(pi, pj, r, w)
+		return {'inter_raw': raw, 'intra_raw': 0.0,
+			'inter_weighted': raw * weight, 'intra_weighted': 0.0,
+			'raw': raw}
+	def LkBallWtdPotential(self, pose, cache, ligand=None, **kw):
+		'''
+		Lk_ball_wtd - anisotropic LK solvation. For each polar
+		atom i with attached water sites and non-zero (w_iso, w_ball)
+		weights, every inter-residue heavy neighbor atom j contributes:
+		  w_iso[i] * lk_solv(i<-j) + w_ball[i] * lk_solv(i<-j) * frac_i
+		where frac_i = (1 - d2_delta/ramp_w2)^2 (clamped to [0,1]) and
+		d2_delta = min(d2(water, j)) - d2_low(j_type). Pair-list and
+		count-pair weighting reuse the cp4 inter-residue pair list
+		(non-adjacent residues already get w=1). Intra-residue is
+		skipped
+		'''
+		weight = float(self.Parameters['LkBallWtd']['weight'])
+		pi, pj, r, w = self._ref15pairs(cache, same_res=False, cp='cp4')
+		if len(pi) == 0:
+			return {'inter_raw': 0.0, 'intra_raw': 0.0,
+				'inter_weighted': 0.0, 'intra_weighted': 0.0,
+				'raw': 0.0}
+		isH = cache['is_H']
+		heavy = ~(isH[pi] | isH[pj])
+		if not np.any(heavy):
+			return {'inter_raw': 0.0, 'intra_raw': 0.0,
+				'inter_weighted': 0.0, 'intra_weighted': 0.0,
+				'raw': 0.0}
+		pi = pi[heavy]; pj = pj[heavy]; r = r[heavy]; w = w[heavy]
+		w_iso = cache['lkb_w_iso']; w_ball = cache['lkb_w_ball']
+		d2_low = cache['lkb_d2_low']
+		water_xyz = cache['lkb_water_xyz']
+		water_off = cache['lkb_water_off']
+		water_cnt = cache['lkb_water_cnt']
+		ramp_w2 = float(cache['lkb_ramp_w2'])
+		X = cache['coords']
+		lk_iso_i, lk_iso_j = self._lkisopair(cache, pi, pj, r)
+		lk_iso_i = lk_iso_i * w
+		lk_iso_j = lk_iso_j * w
+		def _frac(p_polar, p_other):
+			'''
+			Soft-max-of-waters fractional contribution f(d2_delta, ramp)
+			matching the LK-Ball fractional-contribution formula:
+			  weighted_d2_water_delta = -mfade * log(sum(exp(-(d2(W_i,A)-d2_low)/mfade)))
+			  frac = (1 - (weighted_d2/ramp)^2)^2   if 0 < weighted < ramp
+			       = 1                              if weighted <= 0
+			       = 0                              if weighted >= ramp
+			With multi_water_fade = 1.0
+			p_polar: array of atom indices (the polar side, has waters)
+			p_other: array of atom indices (the "atom2" being checked)
+			'''
+			out = np.zeros(len(p_polar), dtype=np.float64)
+			cnt = water_cnt[p_polar]
+			if not np.any(cnt > 0):
+				return out
+			has = cnt > 0
+			idx = np.where(has)[0]
+			other_xyz = X[p_other[idx]]
+			polar_off = water_off[p_polar[idx]]
+			polar_cnt = water_cnt[p_polar[idx]]
+			d2_low_other = d2_low[p_other[idx]]
+			MFADE = 1.0
+			frac_loc = np.zeros(len(idx), dtype=np.float64)
+			for k in range(len(idx)):
+				off = int(polar_off[k])
+				n_w = int(polar_cnt[k])
+				ws = water_xyz[off:off + n_w]
+				diff = ws - other_xyz[k]
+				d2_arr = np.einsum('ij,ij->i', diff, diff)
+				weighted = -MFADE * math.log(
+					float(np.sum(np.exp(
+						-(d2_arr - d2_low_other[k]) / MFADE))))
+				if weighted >= ramp_w2:
+					frac_loc[k] = 0.0
+				elif weighted <= 0.0:
+					frac_loc[k] = 1.0
+				else:
+					xprime = weighted / ramp_w2
+					frac_loc[k] = (1 - xprime * xprime) ** 2
+			out[idx] = frac_loc
+			return out
+		w_iso_i = w_iso[pi]; w_ball_i = w_ball[pi]
+		nonzero_i = water_cnt[pi] > 0
+		w_iso_j = w_iso[pj]; w_ball_j = w_ball[pj]
+		nonzero_j = water_cnt[pj] > 0
+		total = 0.0
+		if np.any(nonzero_i):
+			frac_i = _frac(pi, pj)
+			total += float(np.sum(
+				w_iso_i * lk_iso_i + w_ball_i * lk_iso_i * frac_i))
+		if np.any(nonzero_j):
+			frac_j = _frac(pj, pi)
+			total += float(np.sum(
+				w_iso_j * lk_iso_j + w_ball_j * lk_iso_j * frac_j))
+		raw = total
+		return {'inter_raw': raw, 'intra_raw': 0.0,
+			'inter_weighted': raw * weight, 'intra_weighted': 0.0,
+			'raw': raw}
+	def _ref15stubterm(self, weight_key):
+		'''Generic zero-return stub for terms pending full impl.'''
+		w = float(self.Parameters.get(weight_key, {}).get('weight', 0.0))
+		return {'inter_raw': 0.0, 'intra_raw': 0.0,
+			'inter_weighted': 0.0, 'intra_weighted': 0.0,
+			'raw': 0.0, '_pending_full_impl': True, '_weight': w}
+	def _fadun_rotwell_grid(self, aa, n_chi, residues_db):
+		'''
+		Build per-(AA, rotwell_index) 36x36 grids of -log(P) and chi
+		means/sigmas for the natural cubic spline interpolation. Cached
+		on first use.
+		Arguments:
+		----------
+			aa: amino acid 3-letter code
+			n_chi: number of chi angles for this AA
+			residues_db: rotamer library residues dict
+		Returns:
+		--------
+			dict: rot_idx -> dict with 'neglogP', 'mu', 'sd', plus
+				cached 'ypp_psi' for each quantity (built lazily).
+		'''
+		if not hasattr(self, '_fadun_grid_cache'):
+			self._fadun_grid_cache = {}
+		key = aa
+		if key in self._fadun_grid_cache:
+			return self._fadun_grid_cache[key]
+		entry = residues_db.get(aa)
+		if entry is None:
+			self._fadun_grid_cache[key] = {}
+			return {}
+		rot = entry['rotamers']
+		offs = rot['bin_offsets']
+		tbl = rot['table']
+		MAXE = -math.log(1e-6)
+		all_rotwells = set()
+		for r2 in tbl:
+			all_rotwells.add(r2[0])
+		grids = {}
+		for rw in all_rotwells:
+			grids[rw] = {
+				'neglogP': np.full((36, 36), MAXE),
+				'mu': [np.zeros((36, 36)) for _ in range(n_chi)],
+				'sd': [np.full((36, 36), 1.0)
+					for _ in range(n_chi)],
+				'has_data': np.zeros((36, 36), dtype=bool)}
+		for i_phi in range(36):
+			for i_psi in range(36):
+				bidx = i_phi * 36 + i_psi
+				if bidx + 1 >= len(offs): continue
+				rows = tbl[offs[bidx]:offs[bidx+1]]
+				for r2 in rows:
+					rw = r2[0]
+					if rw not in grids: continue
+					Pk = r2[1]
+					if Pk <= 0.0: continue
+					Pk_clip = max(Pk, 1e-6)
+					g = grids[rw]
+					if g['has_data'][i_phi, i_psi]:
+						old_P = math.exp(-g['neglogP'][i_phi, i_psi])
+						new_P = old_P + Pk_clip
+						g['neglogP'][i_phi, i_psi] = min(MAXE,
+							-math.log(new_P))
+					else:
+						g['neglogP'][i_phi, i_psi] = min(MAXE,
+							-math.log(Pk_clip))
+						for ci in range(n_chi):
+							g['mu'][ci][i_phi, i_psi] = r2[2 + ci]
+							g['sd'][ci][i_phi, i_psi] = \
+								max(r2[2 + n_chi + ci], 0.5)
+						g['has_data'][i_phi, i_psi] = True
+		for rw, g in grids.items():
+			g['neglogP_ypp_psi'] = np.array([
+				self._periodic_cubic_spline(g['neglogP'][i])
+				for i in range(36)])
+			g['mu_ypp_psi'] = [np.array([
+				self._periodic_cubic_spline(g['mu'][ci][i])
+				for i in range(36)]) for ci in range(n_chi)]
+			g['sd_ypp_psi'] = [np.array([
+				self._periodic_cubic_spline(g['sd'][ci][i])
+				for i in range(36)]) for ci in range(n_chi)]
+		self._fadun_grid_cache[key] = grids
+		return grids
+	def _fadun_entropy_grid(self, aa, residues_db):
+		'''Per-cell entropy grid (sum_rotwell P_rw * log(P_rw)) plus
+		ypp_psi for spline. Cached.'''
+		if not hasattr(self, '_fadun_ent_cache'):
+			self._fadun_ent_cache = {}
+		if aa in self._fadun_ent_cache:
+			return self._fadun_ent_cache[aa]
+		entry = residues_db.get(aa)
+		if entry is None:
+			self._fadun_ent_cache[aa] = (np.zeros((36, 36)),
+				np.zeros((36, 36)))
+			return self._fadun_ent_cache[aa]
+		rot = entry['rotamers']
+		offs = rot['bin_offsets']
+		tbl = rot['table']
+		ent = np.zeros((36, 36))
+		for i_phi in range(36):
+			for i_psi in range(36):
+				bidx = i_phi * 36 + i_psi
+				if bidx + 1 >= len(offs): continue
+				rows = tbl[offs[bidx]:offs[bidx+1]]
+				groups = {}
+				for r2 in rows:
+					if r2[1] > 0.0:
+						groups.setdefault(r2[0], 0.0)
+						groups[r2[0]] += r2[1]
+				e = 0.0
+				for Pg in groups.values():
+					if Pg > 0.0: e += Pg * math.log(Pg)
+				ent[i_phi, i_psi] = e
+		ypp_psi = np.array([
+			self._periodic_cubic_spline(ent[i]) for i in range(36)])
+		self._fadun_ent_cache[aa] = (ent, ypp_psi)
+		return self._fadun_ent_cache[aa]
+	def _fadun_spline_eval(self, grid_2d, ypp_psi_grid, fp, fs):
+		'''
+		Evaluate periodic 2D natural cubic spline at (fp, fs) using
+		precomputed ypp_psi (2nd deriv along psi).
+		Arguments:
+		----------
+			grid_2d: 36x36 numpy array of values
+			ypp_psi_grid: 36x36 numpy array of 2nd derivs along psi
+			fp, fs: fractional phi, psi indices in [0, 36)
+		Returns:
+		--------
+			float: interpolated value
+		'''
+		n = 36
+		i_psi = int(math.floor(fs)) % n
+		j_psi = (i_psi + 1) % n
+		frac_s = fs - math.floor(fs)
+		a = 1.0 - frac_s; b = frac_s
+		col_f = (a * grid_2d[:, i_psi] + b * grid_2d[:, j_psi]
+			+ ((a**3 - a) * ypp_psi_grid[:, i_psi]
+			   + (b**3 - b) * ypp_psi_grid[:, j_psi]) / 6.0)
+		ypp_phi = self._periodic_cubic_spline(col_f)
+		return self._spline_eval_1d(col_f, ypp_phi, fp, n)
+	def _fadun_nrchi_data(self, tri):
+		'''
+		Load and cache the per-AA non-rotameric chi_last density tables
+		(Shapovalov backbone-dependent source) for the 8 semi-rotameric AAs. Pre-computes 2nd-derivative grids
+		for the periodic-bicubic phi/psi interpolation of -log(P_rot)
+		and of each chi_last density column.
+		Arguments:
+		----------
+			tri: 3-letter AA code (ASN, ASP, GLU, GLN, HIS, PHE, TRP, TYR)
+		Returns:
+		--------
+			dict: {rotwell_tuple: {neg_log_P_rot_grid, chi_means,
+				chi_sigmas, dens_grid, neg_log_dens, neg_log_dens_ypp,
+				chi_last_low, chi_last_step, chi_last_n}}, or {} if
+			missing
+		'''
+		if not hasattr(self, '_fadun_nrchi_cache'):
+			self._fadun_nrchi_cache = {}
+		if tri in self._fadun_nrchi_cache:
+			return self._fadun_nrchi_cache[tri]
+		from .pose import DBLoad
+		nrchi_db = DBLoad().get('FaDunNrchiDensities', {}) or {}
+		aa_entry = nrchi_db.get(tri)
+		if aa_entry is None:
+			self._fadun_nrchi_cache[tri] = {}
+			return {}
+		n_disc_chi = int(aa_entry['n_disc_chi'])
+		chi_last_n = int(aa_entry['chi_last_n'])
+		chi_last_low = float(aa_entry['chi_last_low'])
+		chi_last_step = float(aa_entry['chi_last_step'])
+		out = {
+			'chi_last_low':  chi_last_low,
+			'chi_last_step': chi_last_step,
+			'chi_last_n':    chi_last_n,
+			'n_disc_chi':    n_disc_chi,
+			'per_rot':       {}}
+		MAXE = 13.815510557964274  # -log(1e-6)
+		for rk_str, rot_dat in aa_entry['per_rot'].items():
+			rot_tuple = tuple(int(x) for x in rk_str.split(','))
+			P_rot = np.asarray(rot_dat['P_rot'],
+				dtype=np.float64).reshape(36, 36)
+			neglogP_rot = np.asarray(rot_dat['neglogP_rot'],
+				dtype=np.float64).reshape(36, 36)
+			cm = np.asarray(rot_dat['chi_means'],
+				dtype=np.float64).reshape(n_disc_chi, 36, 36)
+			cs = np.asarray(rot_dat['chi_sigmas'],
+				dtype=np.float64).reshape(n_disc_chi, 36, 36)
+			dens = np.asarray(rot_dat['densities'],
+				dtype=np.float64).reshape(36, 36, chi_last_n)
+			dens_safe = np.maximum(dens, 1e-6)
+			neglogD = -np.log(dens_safe)
+			neglogD = np.minimum(neglogD, MAXE)
+			ypp_rot = self._fadun_ypp_psi_grid(neglogP_rot)
+			ypp_dens = np.zeros_like(neglogD)
+			for k in range(chi_last_n):
+				ypp_dens[:, :, k] = self._fadun_ypp_psi_grid(
+					neglogD[:, :, k])
+			ypp_Prot = self._fadun_ypp_psi_grid(P_rot)
+			out['per_rot'][rot_tuple] = {
+				'P_rot':         P_rot,
+				'neglogP_rot':   neglogP_rot,
+				'chi_means':     cm,
+				'chi_sigmas':    cs,
+				'densities':     dens,
+				'neglogD':       neglogD,
+				'ypp_rot':       ypp_rot,
+				'ypp_Prot':      ypp_Prot,
+				'ypp_dens':      ypp_dens}
+		self._fadun_nrchi_cache[tri] = out
+		return out
+	def _fadun_ypp_psi_grid(self, grid_2d):
+		'''
+		Precompute psi-direction 2nd derivatives over a 36x36 periodic
+		grid for natural cubic spline use in _fadun_spline_eval.
+		Arguments:
+		----------
+			grid_2d: 36x36 numpy array
+		Returns:
+		--------
+			36x36 numpy array of 2nd derivatives along psi axis
+		'''
+		out = np.zeros_like(grid_2d)
+		for i in range(grid_2d.shape[0]):
+			out[i, :] = self._periodic_cubic_spline(grid_2d[i, :])
+		return out
+	def _fadun_nrchi_eval(self, tri, rot_tuple, phi, psi, chi_last):
+		'''
+		Evaluate the non-rotameric chi_last density (-log) for a
+		semi-rotameric residue at (phi, psi, chi_last) under a specific
+		rotwell. Uses periodic bicubic spline over (phi, psi) and linear
+		interp over chi_last. Also returns -log(P_rot(phi,psi)) and the
+		rotameric chi means/sigmas at this (phi, psi).
+		Arguments:
+		----------
+			tri: 3-letter AA code
+			rot_tuple: tuple of rotameric-chi bin indices
+			phi, psi: in degrees
+			chi_last: in degrees (assumed already folded into AA's
+				canonical range)
+		Returns:
+		--------
+			(neg_log_rot, chi_means_list, chi_sigmas_list, neg_log_dens)
+			tuple; returns (None, None, None, None) if the rotwell or
+			AA is not in the nrchi table.
+		'''
+		data = self._fadun_nrchi_data(tri)
+		if not data: return (None, None, None, None)
+		rdat = data['per_rot'].get(rot_tuple)
+		if rdat is None: return (None, None, None, None)
+		n_disc_chi = int(data['n_disc_chi'])
+		chi_last_low = float(data['chi_last_low'])
+		chi_last_step = float(data['chi_last_step'])
+		chi_last_n = int(data['chi_last_n'])
+		fp = (phi + 180.0) / 10.0
+		fs = (psi + 180.0) / 10.0
+		neg_log_rot = self._fadun_spline_eval(
+			rdat['neglogP_rot'], rdat['ypp_rot'], fp, fs)
+		ip0 = int(math.floor(fp)); js0 = int(math.floor(fs))
+		tp = fp - ip0; ts = fs - js0
+		chi_means_v = []
+		chi_sigmas_v = []
+		for k in range(n_disc_chi):
+			mu_grid = rdat['chi_means'][k]
+			sd_grid = rdat['chi_sigmas'][k]
+			mc = mu_grid[ip0 % 36, js0 % 36]
+			def _unwrap(v, ref):
+				return ref + ((v - ref + 180.0) % 360.0 - 180.0)
+			a = _unwrap(mu_grid[ip0 % 36, js0 % 36], mc)
+			b = _unwrap(mu_grid[(ip0 + 1) % 36, js0 % 36], mc)
+			c = _unwrap(mu_grid[ip0 % 36, (js0 + 1) % 36], mc)
+			d = _unwrap(mu_grid[(ip0 + 1) % 36, (js0 + 1) % 36], mc)
+			mu_v = ((1 - tp) * (1 - ts) * a + tp * (1 - ts) * b
+				+ (1 - tp) * ts * c + tp * ts * d)
+			sd_v = ((1 - tp) * (1 - ts) * sd_grid[ip0 % 36, js0 % 36]
+				+ tp * (1 - ts) * sd_grid[(ip0 + 1) % 36, js0 % 36]
+				+ (1 - tp) * ts * sd_grid[ip0 % 36, (js0 + 1) % 36]
+				+ tp * ts * sd_grid[(ip0 + 1) % 36, (js0 + 1) % 36])
+			chi_means_v.append(mu_v)
+			chi_sigmas_v.append(max(sd_v, 0.5))
+		fc = (chi_last - chi_last_low) / chi_last_step
+		fc_mod = fc - chi_last_n * math.floor(fc / chi_last_n)
+		v_arr = np.empty(chi_last_n)
+		for c in range(chi_last_n):
+			v_arr[c] = self._fadun_spline_eval(
+				rdat['neglogD'][:, :, c],
+				rdat['ypp_dens'][:, :, c], fp, fs)
+		ypp_c = self._periodic_cubic_spline(v_arr)
+		neg_log_dens = self._spline_eval_1d(
+			v_arr, ypp_c, fc_mod, chi_last_n)
+		return (neg_log_rot, chi_means_v, chi_sigmas_v, neg_log_dens)
+	def FaDunPotential(self, pose, cache, ligand=None, **kw):
+		'''
+		Fa_dun - Dunbrack rotamer probability.
+		Per residue: E = -ln(P_rot(phi,psi)) + entropy + chi_dev penalty
+		using natural cubic spline interpolation per (AA, rotwell).
+		Glycine, alanine and any residue without rotamer data contribute 0.
+		If kw['per_res'] is a dict, per-residue contributions are filled
+		into it keyed by residue index (debug hook).
+		'''
+		weight = float(self.Parameters['FaDun']['weight'])
+		per_res = kw.get('per_res')
+		try:
+			from .pose import DBLoad
+			rl = DBLoad().get('Rotamer Library', {}) or {}
+		except Exception:
+			rl = {}
+		residues_db = rl.get('residues', {})
+		if not residues_db:
+			return self._ref15stubterm('FaDun')
+		phi_start = float(rl.get('phi_start', -180.0))
+		phi_step = float(rl.get('phi_step', 10.0))
+		phi_n = int(rl.get('phi_n', 36))
+		psi_start = float(rl.get('psi_start', -180.0))
+		psi_step = float(rl.get('psi_step', 10.0))
+		psi_n = int(rl.get('psi_n', 36))
+		aas = pose.data.get('Amino Acids') or {}
+		SIG_MIN = 0.5
+		LOG_2PI = math.log(2.0 * math.pi)
+		raw = 0.0
+		for ri, info in aas.items():
+			tri = info[5] if len(info) >= 6 else None
+			if tri == 'HIS_D': tri = 'HIS'
+			entry = residues_db.get(tri)
+			if entry is None: continue
+			n_chi = int(entry.get('n_chi', 0))
+			if n_chi <= 0: continue
+			try:
+				phi = pose.GetDihedral(int(ri), 'PHI')
+				psi = pose.GetDihedral(int(ri), 'PSI')
+			except Exception:
+				phi = float('nan'); psi = float('nan')
+			if math.isnan(phi): phi = -90.0
+			if math.isnan(psi): psi = 130.0
+			fp = (phi - phi_start) / phi_step
+			fs = (psi - psi_start) / psi_step
+			ip0 = int(math.floor(fp))
+			js0 = int(math.floor(fs))
+			tp = fp - ip0
+			ts = fs - js0
+			rot = entry['rotamers']
+			offs = rot['bin_offsets']
+			tbl = rot['table']
+			chi_now = []
 			bad = False
 			for ci in range(n_chi):
-				v = pose.GetDihedral(r, 'CHI', chi_type=ci+1)
+				try:
+					v = pose.GetDihedral(int(ri),
+						'CHI', chi_type=ci+1)
+				except Exception:
+					bad = True; break
 				if math.isnan(v): bad = True; break
-				chi_now[ci] = v
+				chi_now.append(v)
 			if bad: continue
-			# Column layout: [count, prob, chi1..N, sig1..N]
-			prob_i = 1
-			chi_i  = 2
-			sig_i  = 2 + n_chi
-			log_terms = []
-			for row in rows:
-				P_k = row[prob_i]
-				if P_k <= 0.0: continue
-				lt = math.log(P_k)
-				for ci in range(n_chi):
-					mu_kc  = row[chi_i + ci]
-					sig_kc = row[sig_i + ci]
-					if sig_kc < SIG_MIN: sig_kc = SIG_MIN
-					if flip: mu_kc = -mu_kc
-					d = ((chi_now[ci] - mu_kc + 180.0) % 360.0) - 180.0
-					lt += -0.5*LOG_2PI - math.log(sig_kc) \
-						- 0.5 * (d / sig_kc) ** 2
-				log_terms.append(lt)
-			if not log_terms: continue
-			# Stable logsumexp.
-			m = max(log_terms)
-			lse = m + math.log(sum(math.exp(lt - m) for lt in log_terms))
-			total += -kT * lse
-		return total
-	def _lk_solvation(self, pose, cache):
+			def binchi(c):
+				c = ((c + 180.0) % 360.0) - 180.0
+				if 0.0 <= c <= 120.0: return 1
+				if abs(c) >= 120.0: return 2
+				return 3
+			SEMI_ROT = ('ASP','ASN','GLU','GLN','PHE','TYR','TRP','HIS')
+			n_rot = n_chi - 1 if tri in SEMI_ROT else n_chi
+			if tri in SEMI_ROT:
+				nrdata = self._fadun_nrchi_data(tri)
+				if nrdata:
+					rot_bins = tuple(binchi(chi_now[k])
+						for k in range(n_rot))
+					chi_last = chi_now[n_chi - 1]
+					clow = nrdata['chi_last_low']
+					cstep = nrdata['chi_last_step']
+					cn = nrdata['chi_last_n']
+					chigh = clow + cn * cstep
+					if (chigh - clow) < 360.0 - 1e-6:
+						while chi_last < clow:
+							chi_last += 180.0
+						while chi_last >= chigh:
+							chi_last -= 180.0
+					else:
+						chi_last = ((chi_last + 180.0) % 360.0) - 180.0
+					nlr, mus_v, sigs_v, nld = \
+						self._fadun_nrchi_eval(tri, rot_bins,
+							phi, psi, chi_last)
+					if nlr is not None:
+						dev_v = 0.0
+						for ci in range(n_rot):
+							d = ((chi_now[ci] - mus_v[ci] + 180.0)
+								% 360.0) - 180.0
+							dev_v += (d / sigs_v[ci]) ** 2
+						contrib = nlr + nld + 0.5 * dev_v
+						raw += contrib
+						if per_res is not None:
+							per_res[int(ri)] = contrib
+						continue
+			if tri not in SEMI_ROT:
+				grids = self._fadun_rotwell_grid(
+					tri, n_chi, residues_db)
+				if tri == 'PRO':
+					rot_bins = [
+						(1 if chi_now[k] > 0 else 2) if k == 0 else 1
+						for k in range(n_chi)]
+				else:
+					rot_bins = [binchi(chi_now[k])
+						for k in range(n_chi)]
+				rot_idx_now = sum(rot_bins[k] * (10 ** (3 - k))
+					for k in range(n_chi))
+				grid = grids.get(rot_idx_now)
+				if grid is not None and grid['has_data'].any():
+					MAXE_NL = math.log(1e6)
+					neg_log_P_v = self._fadun_spline_eval(
+						grid['neglogP'],
+						grid['neglogP_ypp_psi'], fp, fs)
+					neg_log_P_v = min(MAXE_NL, neg_log_P_v)
+					ip0 = int(math.floor(fp))
+					js0 = int(math.floor(fs))
+					tp = fp - ip0
+					ts = fs - js0
+					w00 = (1 - tp) * (1 - ts)
+					w10 = tp * (1 - ts)
+					w01 = (1 - tp) * ts
+					w11 = tp * ts
+					ip0m = ip0 % 36; ip1m = (ip0 + 1) % 36
+					js0m = js0 % 36; js1m = (js0 + 1) % 36
+					mus_v = []
+					sigs_v = []
+					for ci in range(n_chi):
+						mg = grid['mu'][ci]
+						sg = grid['sd'][ci]
+						a = mg[ip0m, js0m]
+						b = mg[ip1m, js0m]
+						c = mg[ip0m, js1m]
+						d = mg[ip1m, js1m]
+						b_u = a + ((b - a + 180.0) % 360.0 - 180.0)
+						c_u = a + ((c - a + 180.0) % 360.0 - 180.0)
+						d_u = a + ((d - a + 180.0) % 360.0 - 180.0)
+						mus_v.append(w00 * a + w10 * b_u
+							+ w01 * c_u + w11 * d_u)
+						sigs_v.append(max(
+							w00 * sg[ip0m, js0m]
+							+ w10 * sg[ip1m, js0m]
+							+ w01 * sg[ip0m, js1m]
+							+ w11 * sg[ip1m, js1m], SIG_MIN))
+					dev_v = 0.0
+					for ci in range(n_chi):
+						d = ((chi_now[ci] - mus_v[ci] + 180.0)
+							% 360.0) - 180.0
+						dev_v += (d / sigs_v[ci]) ** 2
+					contrib = neg_log_P_v + 0.5 * dev_v
+					raw += contrib
+					if per_res is not None:
+						per_res[int(ri)] = contrib
+					continue
+			if tri == 'PRO':
+				rotwell_now = tuple(
+					(1 if chi_now[k] > 0 else 2) if k == 0 else 1
+					for k in range(n_rot))
+			else:
+				rotwell_now = tuple(binchi(chi_now[k])
+					for k in range(n_rot))
+			def cellrows(i_phi, i_psi):
+				bi = (i_phi % phi_n) * psi_n + (i_psi % psi_n)
+				if bi + 1 >= len(offs): return []
+				return tbl[offs[bi]:offs[bi+1]]
+			def rowwell(r2):
+				rw = []
+				for ci in range(n_rot):
+					mu = r2[2 + ci]
+					if tri == 'PRO':
+						b = (1 if mu > 0 else 2) if ci == 0 else 1
+					else:
+						b = binchi(mu)
+					rw.append(b)
+				return tuple(rw)
+			def cellmatch(rows_):
+				'''Match rotameric chis to rotwell. For pure rotameric,
+				return matched row's P/mus/sigs and full entropy. For
+				semi-rotameric, linearly interpolate the chi_last
+				density across bracketing rows within the matching
+				group; return effective P matched at the actual
+				chi_last and the rotameric-chi mus/sigs from the
+				highest-weight row. Entropy is sum over rotameric
+				rotwells of P_rotwell * log(P_rotwell).'''
+				if n_rot == n_chi:
+					ent = 0.0
+					for r2 in rows_:
+						if r2[1] > 0.0:
+							ent += r2[1] * math.log(r2[1])
+					cand = [r2 for r2 in rows_
+						if r2[1] > 0.0
+						and rowwell(r2) == rotwell_now]
+					if not cand: return (0.0, None, None, ent)
+					match = max(cand, key=lambda r2: r2[1])
+					mus = [match[2 + ci] for ci in range(n_chi)]
+					sigs = [match[2 + n_chi + ci]
+						for ci in range(n_chi)]
+					return (match[1], mus, sigs, ent)
+				groups = {}
+				for r2 in rows_:
+					if r2[1] <= 0.0: continue
+					groups.setdefault(rowwell(r2), []).append(r2)
+				ent = 0.0
+				for grows in groups.values():
+					Pg = sum(r2[1] for r2 in grows)
+					if Pg > 0.0: ent += Pg * math.log(Pg)
+				if rotwell_now not in groups:
+					return (0.0, None, None, ent)
+				grp = groups[rotwell_now]
+				P_rotwell = sum(r2[1] for r2 in grp)
+				chi_last = chi_now[n_chi - 1]
+				def unwrap_to(c, ref):
+					return ref + ((c - ref + 180.0) % 360.0 - 180.0)
+				pts = sorted(((unwrap_to(r2[2 + (n_chi-1)],
+					chi_last), r2) for r2 in grp),
+					key=lambda x: x[0])
+				cls = [pt[0] for pt in pts]
+				prs = [pt[1] for pt in pts]
+				P_eff = None
+				for k in range(len(cls) - 1):
+					if cls[k] <= chi_last <= cls[k+1]:
+						span = cls[k+1] - cls[k]
+						if span <= 0:
+							P_eff = prs[k][1]
+						else:
+							t = (chi_last - cls[k]) / span
+							P_eff = (1 - t) * prs[k][1] \
+								+ t * prs[k+1][1]
+						break
+				if P_eff is None:
+					P_eff = prs[0][1] if abs(chi_last - cls[0]) < \
+						abs(chi_last - cls[-1]) else prs[-1][1]
+				match = max(grp, key=lambda r2: r2[1])
+				mus = [match[2 + ci] for ci in range(n_chi)]
+				sigs = [match[2 + n_chi + ci]
+					for ci in range(n_chi)]
+				return (P_eff, mus, sigs, ent)
+			def crom(p0, p1, p2, p3, t):
+				return 0.5 * ((2 * p1) + (-p0 + p2) * t
+					+ (2*p0 - 5*p1 + 4*p2 - p3) * t * t
+					+ (-p0 + 3*p1 - 3*p2 + p3) * t * t * t)
+			samples = [[None]*4 for _ in range(4)]
+			for di in range(4):
+				for dj in range(4):
+					ip = ip0 - 1 + di
+					js = js0 - 1 + dj
+					samples[di][dj] = cellmatch(cellrows(ip, js))
+			ref_p, ref_mu, ref_sig, _ = samples[1][1]
+			if ref_mu is None:
+				for di in range(4):
+					for dj in range(4):
+						if samples[di][dj][1] is not None:
+							ref_mu = samples[di][dj][1]
+							break
+					if ref_mu is not None: break
+			if ref_mu is None:
+				best_dev = None; best_row = None
+				for r2 in cellrows(ip0, js0):
+					if r2[1] <= 0.0: continue
+					dv = 0.0
+					for ci in range(n_rot):
+						mu = r2[2 + ci]
+						sig = r2[2 + n_chi + ci]
+						if sig < SIG_MIN: sig = SIG_MIN
+						d = ((chi_now[ci] - mu + 180.0)
+							% 360.0) - 180.0
+						dv += (d / sig) ** 2
+					if best_dev is None or dv < best_dev:
+						best_dev = dv; best_row = r2
+				if best_row is None: continue
+				P_k = best_row[1]
+				dev = best_dev
+				cent = 0.0
+				cgroups = {}
+				for r2 in cellrows(ip0, js0):
+					if r2[1] <= 0.0: continue
+					cgroups.setdefault(rowwell(r2), 0.0)
+					cgroups[rowwell(r2)] += r2[1]
+				for Pg in cgroups.values():
+					if Pg > 0: cent += Pg * math.log(Pg)
+				contrib = -math.log(P_k) + 0.5 * dev
+				raw += contrib
+				if per_res is not None:
+					per_res[int(ri)] = contrib
+				continue
+			def unwrap(mu_arr, ref):
+				out = []
+				for m in mu_arr:
+					d = ((m - ref + 180.0) % 360.0) - 180.0
+					out.append(ref + d)
+				return out
+			MAXE = 18.0
+			neg_log_P = [[MAXE]*4 for _ in range(4)]
+			mu_grid = [[None]*4 for _ in range(4)]
+			sig_grid = [[None]*4 for _ in range(4)]
+			ent_grid = [[0.0]*4 for _ in range(4)]
+			for di in range(4):
+				for dj in range(4):
+					Pk, mus, sigs, ent = samples[di][dj]
+					ent_grid[di][dj] = ent
+					if Pk > 0.0:
+						neg_log_P[di][dj] = -math.log(Pk)
+						# unwrap mus toward ref
+						mu_grid[di][dj] = unwrap(mus, ref_mu[0]) \
+							if ref_mu else mus
+						sig_grid[di][dj] = sigs
+					else:
+						mu_grid[di][dj] = list(ref_mu) \
+							if ref_mu else [0.0]*n_chi
+						sig_grid[di][dj] = list(ref_sig) \
+							if ref_sig else [SIG_MIN]*n_chi
+			def crom2d(grid, tp, ts):
+				cols = []
+				for di in range(4):
+					row = grid[di]
+					cols.append(crom(row[0], row[1], row[2], row[3], ts))
+				return crom(cols[0], cols[1], cols[2], cols[3], tp)
+			neg_log_P_i = crom2d(neg_log_P, tp, ts)
+			ent_i = crom2d(ent_grid, tp, ts)
+			mu_i = []
+			sig_i = []
+			for ci in range(n_chi):
+				gm = [[mu_grid[di][dj][ci]
+					for dj in range(4)] for di in range(4)]
+				gs = [[sig_grid[di][dj][ci]
+					for dj in range(4)] for di in range(4)]
+				mu_i.append(crom2d(gm, tp, ts))
+				sig_i.append(max(crom2d(gs, tp, ts), SIG_MIN))
+			dev = 0.0
+			for ci in range(n_rot):
+				d = ((chi_now[ci] - mu_i[ci] + 180.0)
+					% 360.0) - 180.0
+				dev += (d / sig_i[ci]) ** 2
+			E_r = neg_log_P_i + 0.5 * dev
+			raw += E_r
+			if per_res is not None:
+				per_res[int(ri)] = E_r
+		return {'inter_raw': 0.0, 'intra_raw': raw,
+			'inter_weighted': 0.0, 'intra_weighted': raw * weight,
+			'raw': raw}
+	def _periodic_cubic_spline(self, y):
 		'''
-		Lazaridis-Karplus EEF1 implicit solvation summed over atom pairs
+		Periodic natural cubic spline 2nd derivatives on uniform grid
+		(h=1). Uses FFT-based circulant tridiagonal solve.
 		Arguments:
 		----------
-			pose:  Pose - molecule source pose
-			cache: dict - ff topology cache providing excl_bool, lj_sigma
+			y: 1-D numpy array (length n) of values on uniform grid
 		Returns:
 		--------
-			float: solvation free energy in kJ/mol
+			numpy array: 2nd derivatives at each grid point
 		'''
-		dG  = self._lk_dG
-		lam = self._lk_lam
-		V   = self._lk_V
-		coords = np.asarray(pose.data['Coordinates'], dtype=np.float64)
-		dvec = self.ff._wrap(
-			coords[:, None, :] - coords[None, :, :], self.box)
-		r = np.linalg.norm(dvec, axis=-1)
-		np.fill_diagonal(r, 1.0)
-		excl = cache['excl_bool']
-		mask = (~excl) & (r < 9.0)
-		R_min = 0.5 * cache['lj_sigma']
-		with np.errstate(divide='ignore', invalid='ignore'):
-			gauss = np.exp(-((r - R_min) / lam[:, None])**2)
-			pre = (2.0 * V[None, :]) / (np.pi**1.5 * lam[:, None])
-			E_ij = pre * (dG[:, None] / (r * r)) * gauss
-		E_self = float(dG.sum())
-		E_pair = float(np.sum(np.where(mask, E_ij, 0.0)))
-		return E_self - E_pair
-	def _hbond_geom(self, pose, cache):
+		y = np.asarray(y, dtype=float)
+		n = len(y)
+		b = 6.0 * (np.roll(y, -1) - 2.0 * y + np.roll(y, 1))
+		k = np.arange(n)
+		A_diag = 4.0 + 2.0 * np.cos(2.0 * np.pi * k / n)
+		b_fft = np.fft.fft(b)
+		return np.real(np.fft.ifft(b_fft / A_diag))
+	def _spline_eval_1d(self, y, ypp, t, n):
+		'''Evaluate periodic cubic spline at fractional index t.'''
+		i = int(math.floor(t)) % n
+		j = (i + 1) % n
+		frac = t - math.floor(t)
+		a = 1.0 - frac
+		return (a * y[i] + frac * y[j]
+			+ ((a*a*a - a) * ypp[i] + (frac*frac*frac - frac) * ypp[j])
+			/ 6.0)
+	def _rama_spline_eval(self, table, fp, fs):
 		'''
-		Geometric hydrogen-bond term over donor-H-acceptor-base quartets
+		Periodic 2D natural cubic spline on 36x36 grid. Caches the
+		ypp_psi (2nd deriv along psi for each phi row). Per-query
+		computation of ypp_phi for the column-of-f values.
 		Arguments:
 		----------
-			pose:  Pose - molecule source pose
-			cache: dict - ff topology cache providing nbrs adjacency
+			table: 36x36 list/array of values
+			fp: fractional phi index (0..36)
+			fs: fractional psi index (0..36)
 		Returns:
 		--------
-			float: H-bond energy contribution in kJ/mol
+			float: spline-interpolated value
 		'''
+		if not hasattr(self, '_rama_spline_cache'):
+			self._rama_spline_cache = {}
+		key = id(table)
+		cached = self._rama_spline_cache.get(key)
+		if cached is None:
+			arr = np.asarray(table, dtype=float)
+			ypp_psi = np.zeros_like(arr)
+			for i in range(arr.shape[0]):
+				ypp_psi[i] = self._periodic_cubic_spline(arr[i])
+			cached = (arr, ypp_psi)
+			self._rama_spline_cache[key] = cached
+		arr, ypp_psi = cached
+		n = arr.shape[0]
+		i_psi = int(math.floor(fs)) % n
+		j_psi = (i_psi + 1) % n
+		frac_s = fs - math.floor(fs)
+		a = 1.0 - frac_s; b = frac_s
+		col_f = (a * arr[:, i_psi] + b * arr[:, j_psi]
+			+ ((a**3 - a) * ypp_psi[:, i_psi]
+			   + (b**3 - b) * ypp_psi[:, j_psi]) / 6.0)
+		ypp_phi = self._periodic_cubic_spline(col_f)
+		return self._spline_eval_1d(col_f, ypp_phi, fp, n)
+	def RamaPreProTermPotential(self, pose, cache, ligand=None, **kw):
+		'''
+		Rama_prepro - phi/psi Ramachandran propensity.
+		Per residue r: E_r = -log P(phi_r, psi_r | aa_r) using the
+		regular tables, or the pre-proline tables if r+1 is Pro.
+		Uses periodic natural bicubic spline.
+		'''
+		weight = float(self.Parameters['RamaPreProTerm']['weight'])
+		rd = self.Parameters.get('Rama_data') or {}
+		all_t = rd.get('all', {})
+		pre_t = rd.get('prepro', {})
+		if not all_t:
+			return self._ref15stubterm('RamaPreProTerm')
+		aas = pose.data.get('Amino Acids') or {}
+		raw = 0.0
+		sorted_ris = sorted(int(r) for r in aas.keys())
+		next_tri = {}
+		for k, ri in enumerate(sorted_ris):
+			if k + 1 < len(sorted_ris):
+				nxt = sorted_ris[k+1]
+				nxt_info = aas.get(nxt)
+				if nxt_info and len(nxt_info) >= 6:
+					next_tri[ri] = nxt_info[5]
+		for ri in sorted_ris:
+			info = aas.get(ri)
+			if info is None: continue
+			tri = info[5] if len(info) >= 6 else None
+			if tri == 'HIS_D': tri = 'HIS'
+			try:
+				phi = pose.GetDihedral(ri, 'PHI')
+				psi = pose.GetDihedral(ri, 'PSI')
+			except Exception: continue
+			if math.isnan(phi) or math.isnan(psi): continue
+			use_pre = (next_tri.get(ri) == 'PRO'
+				and tri in pre_t and pre_t[tri])
+			table = pre_t[tri] if use_pre else all_t.get(tri)
+			if table is None: continue
+			cache_key = id(table)
+			if not hasattr(self, '_rama_entropy'):
+				self._rama_entropy = {}
+				self._rama_logshift = {}
+			ent_cache = self._rama_entropy
+			shift_cache = self._rama_logshift
+			ent = ent_cache.get(cache_key)
+			if ent is None:
+				S = 0.0
+				for row in table:
+					for nE in row:
+						S += math.exp(-nE)
+				logS = math.log(S) if S > 0 else 0.0
+				shift_cache[cache_key] = logS
+				ent = 0.0
+				for row in table:
+					for nE in row:
+						p_norm = math.exp(-(nE + logS))
+						if p_norm > 0:
+							ent += p_norm * math.log(p_norm)
+				ent_cache[cache_key] = ent
+			log_shift = shift_cache[cache_key]
+			fp = (phi + 180.0) / 10.0
+			fs = (psi + 180.0) / 10.0
+			e = self._rama_spline_eval(table, fp, fs)
+			raw += (e + log_shift + ent)
+		return {'inter_raw': 0.0, 'intra_raw': raw,
+			'inter_weighted': 0.0, 'intra_weighted': raw * weight,
+			'raw': raw}
+	def PAaPpPotential(self, pose, cache, ligand=None, **kw):
+		'''
+		P_aa_pp - P(aa|phi,psi) propensity.
+		Formula (P_AA_pp_energy):
+		  E = -log( P_AA_pp[aa](phi, psi) / P_AA[aa] )
+		where P_AA_pp is the conditional probability table for the
+		AA at (phi, psi) on a 36x36 grid (10° spacing, offset by 5°
+		from the cell boundary), and P_AA is the overall per-AA
+		frequency. Bicubic spline interpolation is done on the
+		-log(P_AA_pp) energy grid; the P_AA term enters as a constant
+		log shift.
+		Skips terminal residues (p_aa_pp is not defined at termini.
+		HIS_D maps to HIS.
+		'''
+		weight = float(self.Parameters['PAaPp']['weight'])
+		paa = self.Parameters.get('P_AA') or {}
+		paapp = self.Parameters.get('P_AA_pp') or {}
+		if not paa or not paapp:
+			return self._ref15stubterm('PAaPp')
+		aas = pose.data.get('Amino Acids') or {}
+		nterm = set(); cterm = set()
+		if aas:
+			ch_map = {}
+			for ri, info in aas.items():
+				ch = info[1] if len(info) > 1 else ''
+				ch_map.setdefault(ch, []).append(int(ri))
+			for ris in ch_map.values():
+				ris.sort()
+				if ris:
+					nterm.add(ris[0]); cterm.add(ris[-1])
+		raw = 0.0
+		if not hasattr(self, '_paapp_spline_cache'):
+			self._paapp_spline_cache = {}
+		cache_pp = self._paapp_spline_cache
+		if not cache_pp:
+			MAXE = math.log(1e6)
+			for aa, tbl in paapp.items():
+				grid = np.zeros((36, 36))
+				for i in range(36):
+					for j in range(36):
+						v = tbl[i][j]
+						grid[i, j] = (-math.log(v)
+							if v > 0 else MAXE)
+				ypp_psi = np.stack(
+					[self._periodic_cubic_spline(grid[i])
+						for i in range(36)])
+				cache_pp[aa] = (grid, ypp_psi)
+		for ri, info in aas.items():
+			if int(ri) in nterm or int(ri) in cterm: continue
+			tri = info[5] if len(info) >= 6 else None
+			if tri == 'HIS_D': tri = 'HIS'
+			if tri not in cache_pp: continue
+			try:
+				phi = pose.GetDihedral(int(ri), 'PHI')
+				psi = pose.GetDihedral(int(ri), 'PSI')
+			except Exception: continue
+			if math.isnan(phi) or math.isnan(psi): continue
+			fp = (phi + 175.0) / 10.0
+			fs = (psi + 175.0) / 10.0
+			grid, ypp_psi = cache_pp[tri]
+			neg_log_pp = self._fadun_spline_eval(grid, ypp_psi, fp, fs)
+			raw += neg_log_pp + math.log(paa.get(tri, 1.0))
+		return {'inter_raw': 0.0, 'intra_raw': raw,
+			'inter_weighted': 0.0, 'intra_weighted': raw * weight,
+			'raw': raw}
+	def OmegaPotential(self, pose, cache, ligand=None, **kw):
+		'''
+		Omega - peptide-bond omega tether (OmegaTether term).
+		Two branches:
+		  - Cis-like (omega in [-90°, 90°]):
+		      score = 0.01 * angular_dist(omega, 0°)²
+		  - Trans (omega in [90°, 270°]):
+		      mu, sigma = bicubic-interpolated tables (phi, psi)-
+		        dependent; 4 tables: all (default), gly, pro, valile.
+		      offset = angular_dist(omega, mu)
+		      score = log(1/(6*sqrt(2π)))          # normalisation
+		            - log(1/(sigma*sqrt(2π)))      # entropy
+		            + offset² / (2*sigma²)         # log-prob
+		Upper-terminus residues contribute 0 (no defined omega).
+		'''
+		weight = float(self.Parameters['Omega']['weight'])
+		omega_tab = self.Parameters.get('Omega_tables') or {}
+		if not omega_tab:
+			return self._ref15stubterm('Omega')
+		aas = pose.data.get('Amino Acids') or {}
+		cterm = set()
+		if aas:
+			ch_map = {}
+			for ri, info in aas.items():
+				ch = info[1] if len(info) > 1 else ''
+				ch_map.setdefault(ch, []).append(int(ri))
+			for ris in ch_map.values():
+				ris.sort()
+				if ris: cterm.add(ris[-1])
+		raw = 0.0
+		normalization = math.log(1.0 / (6.0 * math.sqrt(2 * math.pi)))
+		if not hasattr(self, '_omega_spline_cache'):
+			self._omega_spline_cache = {}
+		cache_o = self._omega_spline_cache
+		if not cache_o:
+			for key, t in omega_tab.items():
+				mu_g = np.array(t['mu'])
+				sig_g = np.array(t['sigma'])
+				mu_ypp = np.stack(
+					[self._periodic_cubic_spline(mu_g[i])
+						for i in range(36)])
+				sig_ypp = np.stack(
+					[self._periodic_cubic_spline(sig_g[i])
+						for i in range(36)])
+				cache_o[key] = (mu_g, mu_ypp, sig_g, sig_ypp)
+		for ri in sorted(aas):
+			if int(ri) in cterm: continue
+			tri = aas[ri][5] if len(aas[ri]) >= 6 else None
+			if tri == 'HIS_D': tri = 'HIS'
+			try:
+				om = pose.GetDihedral(int(ri), 'OMEGA')
+				phi = pose.GetDihedral(int(ri), 'PHI')
+				psi = pose.GetDihedral(int(ri), 'PSI')
+			except Exception: continue
+			if math.isnan(om): continue
+			om_nn = om
+			while om_nn < 0: om_nn += 360
+			while om_nn >= 360: om_nn -= 360
+			om_p = om_nn
+			while om_p < -90: om_p += 360
+			while om_p > 270: om_p -= 360
+			if om_p < 90:
+				dangle = ((om_p - 0 + 180) % 360) - 180
+				raw += 0.01 * dangle * dangle
+				continue
+			if math.isnan(phi): phi = 0.0
+			if math.isnan(psi): psi = 0.0
+			if tri == 'GLY': key = 'gly'
+			elif tri == 'PRO': key = 'pro'
+			elif tri in ('ILE', 'VAL'): key = 'valile'
+			else: key = 'all'
+			mu_g, mu_ypp, sig_g, sig_ypp = cache_o[key]
+			phi_nn = phi
+			while phi_nn < 0: phi_nn += 360
+			psi_nn = psi
+			while psi_nn < 0: psi_nn += 360
+			fp = (phi_nn - 5.0) / 10.0
+			fs = (psi_nn - 5.0) / 10.0
+			fp = fp % 36.0
+			fs = fs % 36.0
+			mu = self._fadun_spline_eval(mu_g, mu_ypp, fp, fs)
+			sigma = self._fadun_spline_eval(sig_g, sig_ypp, fp, fs)
+			if sigma < 1e-6: continue
+			entropy = -math.log(1.0 / (sigma * math.sqrt(2 * math.pi)))
+			# offset = subtract_degree_angles(omega_p, mu)
+			offset = ((om_p - mu + 180) % 360) - 180
+			logprob = offset * offset / (2 * sigma * sigma)
+			raw += normalization + entropy + logprob
+		return {'inter_raw': 0.0, 'intra_raw': raw,
+			'inter_weighted': 0.0, 'intra_weighted': raw * weight,
+			'raw': raw}
+	def ProClosePotential(self, pose, cache, ligand=None, **kw):
+		'''
+		Pro_close - proline ring closure (ProClosureEnergy term).
+		Two contributions per PRO residue:
+		  1. Intra: dist²(N, NV) / sd² where NV is the virtual atom
+		     placed via the PRO internal-coord spec (bond=1.4754 from CD, angle=77.3°
+		     from CG, dihedral=0° from N) and sd² = (0.1)² = 0.01.
+		     For N-term PRO additionally: dist²(CA, CAV) / sd² where
+		     CAV is built from NV (bond=1.383018, angle=65.869°,
+		     dihedral=0° from CA).
+		  2. Pair (lower-res, PRO): chi4 dihedral(CD-N-C(prev)-O(prev))
+		     scored via a two-mode Gaussian:
+		       chi4 > pi/2: ((chi4 - trans_mean)/trans_sd)²
+		       chi4 <= pi/2: ((chi4 - cis_mean)/cis_sd)²
+		     with trans_mean=176.3°, trans_sd=6.0158°,
+		     cis_mean=-2.9105°, cis_sd=5.8239° (all in radians).
+		'''
+		weight = float(self.Parameters['ProClose']['weight'])
+		aas = pose.data.get('Amino Acids') or {}
 		atoms = pose.data['Atoms']
-		nbrs = cache['nbrs']
-		donors, acceptors = [], []
-		for i, a in atoms.items():
-			elem = a[1]
-			ns = nbrs.get(i, [])
-			if elem in ('N', 'O'):
-				hs = [int(j) for j in ns if atoms[int(j)][1] == 'H']
-				heavy = [int(j) for j in ns if atoms[int(j)][1] != 'H']
-				for h in hs: donors.append((i, h))
-				if heavy: acceptors.append((i, heavy[0]))
-		if not donors or not acceptors: return 0.0
-		D = np.asarray(donors,    dtype=np.int64)
-		A = np.asarray(acceptors, dtype=np.int64)
-		coords = np.asarray(pose.data['Coordinates'], dtype=np.float64)
-		dvec_HA = self.ff._wrap(
-			coords[D[:, 1]][:, None, :] - coords[A[:, 0]][None, :, :],
-			self.box)
-		r_HA = np.linalg.norm(dvec_HA, axis=-1)
-		mask_r = (r_HA > 1.4) & (r_HA < 3.0)
-		dvec_HD = (coords[D[:, 0]] - coords[D[:, 1]])
-		nrm_HD = np.linalg.norm(dvec_HD, axis=-1, keepdims=True)
-		uHD = dvec_HD / np.maximum(nrm_HD, 1e-12)
-		uHA = dvec_HA / np.maximum(r_HA[:, :, None], 1e-12)
-		cos_DHA = np.einsum('ik,ijk->ij', uHD, -uHA)
-		dvec_AB = (coords[A[:, 1]] - coords[A[:, 0]])
-		nrm_AB = np.linalg.norm(dvec_AB, axis=-1, keepdims=True)
-		uAB = dvec_AB / np.maximum(nrm_AB, 1e-12)
-		cos_HAB = np.einsum('ijk,jk->ij', uHA, uAB)
-		E_r = self.hb['well_depth'] * np.exp(
-			-((r_HA - self.hb['r_opt'])**2) / (self.hb['r_sigma']**2))
-		F_DHA = np.maximum(0.0, -cos_DHA)**2
-		F_HAB = np.maximum(0.0,  cos_HAB)**2
-		E = -E_r * F_DHA * F_HAB
-		return float(np.sum(np.where(mask_r, E, 0.0)))
-	def _kbp_score(self, pose, cache):
+		coords = np.asarray(pose.data['Coordinates'])
+		raw = 0.0
+		sd_sq = 0.01
+		trans_mean = math.radians(176.3)
+		trans_sd = math.radians(6.0158)
+		cis_mean = math.radians(-2.9105)
+		cis_sd = math.radians(5.8239)
+		def place(p, g, gg, bond, theta, phi):
+			'''Place an atom via the internal-coord spec: A_dir = -cos(theta)·e_PG
+			+ sin(theta)·(cos(phi)·perp + sin(phi)·normal) where e_PG is
+			unit(G-P), perp is the in-plane perpendicular projecting
+			toward GG, normal is e_PG × perp.'''
+			e_pg = g - p
+			e_pg = e_pg / np.linalg.norm(e_pg)
+			e_ggg = gg - g
+			e_ggg = e_ggg / np.linalg.norm(e_ggg)
+			perp = e_ggg - np.dot(e_ggg, e_pg) * e_pg
+			perp = perp / np.linalg.norm(perp)
+			normal = np.cross(e_pg, perp)
+			d = (-math.cos(theta) * e_pg
+				+ math.sin(theta) * (math.cos(phi) * perp
+					+ math.sin(phi) * normal))
+			return p + bond * d
+		def dihedral(a, b, c, d):
+			'''Dihedral angle a-b-c-d in radians (standard
+			dihedral_radians convention).'''
+			b1 = a - b; b2 = c - b; b3 = d - c
+			b2_norm = b2 / np.linalg.norm(b2)
+			v = b1 - np.dot(b1, b2_norm) * b2_norm
+			w = b3 - np.dot(b3, b2_norm) * b2_norm
+			x = float(np.dot(v, w))
+			y = float(np.dot(np.cross(b2_norm, v), w))
+			return math.atan2(y, x)
+		n_term_set = set()
+		if aas:
+			chains = {}
+			for ri, info in aas.items():
+				ch = info[1] if len(info) > 1 else ''
+				chains.setdefault(ch, []).append(int(ri))
+			for ch, ris in chains.items():
+				ris.sort()
+				if ris: n_term_set.add(ris[0])
+		ri_sorted = sorted(int(r) for r in aas.keys())
+		ri_to_prev = {}
+		for i, r in enumerate(ri_sorted):
+			if i > 0: ri_to_prev[r] = ri_sorted[i - 1]
+		for ri, info in aas.items():
+			tri = info[5] if len(info) >= 6 else None
+			if tri != 'PRO': continue
+			name_to_idx = {atoms[int(a)][0]: int(a)
+				for a in info[2] + info[3]}
+			needed = ('N', 'CA', 'CG', 'CD')
+			if not all(nm in name_to_idx for nm in needed): continue
+			n = coords[name_to_idx['N']]
+			ca = coords[name_to_idx['CA']]
+			cg = coords[name_to_idx['CG']]
+			cd = coords[name_to_idx['CD']]
+			nv = place(cd, cg, n, 1.4754, math.radians(77.3), 0.0)
+			d2_n_nv = float(np.sum((nv - n) ** 2))
+			raw += d2_n_nv / sd_sq
+			if int(ri) in n_term_set:
+				cav = place(nv, cd, ca, 1.383018,
+					math.radians(65.869), 0.0)
+				d2_ca_cav = float(np.sum((cav - ca) ** 2))
+				raw += d2_ca_cav / sd_sq
+			prev = ri_to_prev.get(int(ri))
+			if prev is None: continue
+			prev_info = aas.get(prev)
+			if prev_info is None: continue
+			prev_atoms = {atoms[int(a)][0]: int(a)
+				for a in prev_info[2] + prev_info[3]}
+			if 'C' not in prev_atoms or 'O' not in prev_atoms: continue
+			c_prev = coords[prev_atoms['C']]
+			o_prev = coords[prev_atoms['O']]
+			chi4 = dihedral(coords[name_to_idx['CD']], n,
+				c_prev, o_prev)
+			if chi4 < -math.pi / 2: chi4 += 2 * math.pi
+			if chi4 > math.pi / 2:
+				diff = chi4 - trans_mean
+				raw += diff * diff / (trans_sd * trans_sd)
+			else:
+				diff = chi4 - cis_mean
+				raw += diff * diff / (cis_sd * cis_sd)
+		return {'inter_raw': 0.0, 'intra_raw': raw,
+			'inter_weighted': 0.0, 'intra_weighted': raw * weight,
+			'raw': raw}
+	def DslfFa13Potential(self, pose, cache, ligand=None, **kw):
 		'''
-		Knowledge-based pair potential summed over far-pair atom pairs
-		Arguments:
-		----------
-			pose:  Pose - molecule source pose
-			cache: dict - ff topology cache providing mask_far
-		Returns:
-		--------
-			float: KBP energy contribution in kJ/mol
+		Dslf_fa13 - disulfide geometry potential, per the
+		full-atom disulfide geometry spec. For each
+		SG-SG bonded CYS pair, the score is:
+		  -shift_ + wt_len*score_d + wt_ang*(score_a1 + score_a2)
+		  + wt_dihSS*score_ss + wt_dihCS*(score_cs1 + score_cs2)
+		with distance / angle / dihedral terms using the
+		DisulfideParams13 parameter set.
 		'''
-		t = self._kbp_types
-		table = self._kbp_table
-		cutoff = float(self.kbp['cutoff'])
-		bin_w  = float(self.kbp['bin_width'])
-		N_bins = table.shape[2]
+		from math import erfc
+		weight = float(self.Parameters['DslfFa13']['weight'])
+		aas = pose.data.get('Amino Acids') or {}
+		atoms = pose.data['Atoms']
+		coords = np.asarray(pose.data['Coordinates'])
+		raw = 0.0
+		shift = 2.0
+		mest = math.exp(-20.0)
+		wt_len = wt_ang = wt_dihSS = wt_dihCS = 0.1
+		d_location = 2.01; d_scale = 0.08; d_shape = 6.0
+		a_logA = -419.8120; a_kappa = 419.7; a_mu = 104.22
+		dss_logA1 = -32.9599; dss_kappa1 = 30.9053; dss_mu1 = -86.0964
+		dss_logA2 = -23.3471; dss_kappa2 = 20.9805; dss_mu2 = 92.3915
+		dcs_logA1 = -15.8644; dcs_mu1 = -72.2016; dcs_kappa1 = 13.3778
+		dcs_logA2 = -16.9017; dcs_mu2 =  78.0303; dcs_kappa2 = 13.6370
+		dcs_logA3 = -7.0219;  dcs_mu3 = -172.5505; dcs_kappa3 = 2.9327
+		def dihedral(a, b, c, d):
+			'''Standard 4-atom dihedral'''
+			b1 = a - b; b2 = c - b; b3 = d - c
+			n = np.linalg.norm(b2)
+			if n < 1e-9: return 0.0
+			b2n = b2 / n
+			v = b1 - np.dot(b1, b2n) * b2n
+			w = b3 - np.dot(b3, b2n) * b2n
+			x = float(np.dot(v, w))
+			y = float(np.dot(np.cross(b2n, v), w))
+			return math.degrees(math.atan2(y, x))
+		def angle(a, b, c):
+			'''Angle a-b-c in degrees'''
+			v1 = a - b; v2 = c - b
+			c_val = float(np.dot(v1, v2) / max(
+				np.linalg.norm(v1) * np.linalg.norm(v2), 1e-12))
+			return math.degrees(math.acos(max(-1, min(1, c_val))))
+		cys = []
+		for ri, info in aas.items():
+			tri = info[5] if len(info) >= 6 else None
+			if tri != 'CYS': continue
+			name_to_idx = {atoms[int(a)][0]: int(a)
+				for a in info[2] + info[3]}
+			if all(nm in name_to_idx
+					for nm in ('SG', 'CB', 'CA')):
+				cys.append((name_to_idx['SG'],
+					name_to_idx['CB'], name_to_idx['CA']))
+		PI = math.pi
+		for i in range(len(cys)):
+			for j in range(i + 1, len(cys)):
+				sg1, cb1, ca1 = cys[i]
+				sg2, cb2, ca2 = cys[j]
+				ssdist = float(np.linalg.norm(
+					coords[sg1] - coords[sg2]))
+				if ssdist > 3.0: continue
+				score = -shift
+				z = (ssdist - d_location) / d_scale
+				score_d = (z * z / 2.0
+					- math.log(erfc(-d_shape * z / math.sqrt(2.0))
+						+ mest))
+				score += wt_len * score_d
+				csang1 = angle(coords[cb1], coords[sg1], coords[sg2])
+				csang2 = angle(coords[cb2], coords[sg2], coords[sg1])
+				score += wt_ang * (-a_logA - a_kappa
+					* math.cos(PI / 180 * (csang1 - a_mu)))
+				score += wt_ang * (-a_logA - a_kappa
+					* math.cos(PI / 180 * (csang2 - a_mu)))
+				ss_dih = dihedral(coords[cb1], coords[sg1],
+					coords[sg2], coords[cb2])
+				e1 = (math.exp(dss_logA1) * math.exp(dss_kappa1
+					* math.cos(PI/180 * (ss_dih - dss_mu1))))
+				e2 = (math.exp(dss_logA2) * math.exp(dss_kappa2
+					* math.cos(PI/180 * (ss_dih - dss_mu2))))
+				score += wt_dihSS * (-math.log(e1 + e2 + mest))
+				for ca_, cb_, sg_, sgo_ in (
+						(ca1, cb1, sg1, sg2),
+						(ca2, cb2, sg2, sg1)):
+					ang = dihedral(coords[ca_], coords[cb_],
+						coords[sg_], coords[sgo_])
+					e1 = (math.exp(dcs_logA1) * math.exp(
+						dcs_kappa1 * math.cos(
+							PI/180 * (ang - dcs_mu1))))
+					e2 = (math.exp(dcs_logA2) * math.exp(
+						dcs_kappa2 * math.cos(
+							PI/180 * (ang - dcs_mu2))))
+					e3 = (math.exp(dcs_logA3) * math.exp(
+						dcs_kappa3 * math.cos(
+							PI/180 * (ang - dcs_mu3))))
+					score += wt_dihCS * (-math.log(
+						e1 + e2 + e3 + mest))
+				raw += score
+		return {'inter_raw': 0.0, 'intra_raw': raw,
+			'inter_weighted': 0.0, 'intra_weighted': raw * weight,
+			'raw': raw}
+	def YhhPlanarityPotential(self, pose, cache, ligand=None, **kw):
+		'''yhh_planarity - Tyr hydroxyl planarity, 0.5*(cos(pi-2*chi3)+1)'''
+		weight = float(self.Parameters['YhhPlanarity']['weight'])
+		aas = pose.data.get('Amino Acids') or {}
+		atoms = pose.data['Atoms']
 		coords = np.asarray(pose.data['Coordinates'], dtype=np.float64)
-		dvec = self.ff._wrap(coords[:, None, :] - coords[None, :, :], self.box)
-		r = np.linalg.norm(dvec, axis=-1)
-		mask = cache['mask_far'] & (r > 0.0) & (r < cutoff)
-		I, J = np.where(mask)
-		if len(I) == 0: return 0.0
-		bins = np.minimum((r[I, J] / bin_w).astype(np.int64), N_bins - 1)
-		E = table[t[I], t[J], bins]
-		return float(E.sum())
+		raw = 0.0
+		for ri, info in aas.items():
+			tri = info[5] if len(info) >= 6 else None
+			if tri != 'TYR': continue
+			name_to_idx = {atoms[int(a)][0]: int(a)
+				for a in info[2] + info[3]}
+			needed = ('CE2', 'CZ', 'OH', 'HH')
+			if not all(nm in name_to_idx for nm in needed): continue
+			a, b, c, d = (coords[name_to_idx[nm]] for nm in needed)
+			b1 = b - a; b2 = c - b; b3 = d - c
+			n1 = np.cross(b1, b2); n2 = np.cross(b2, b3)
+			m1 = np.cross(n1, b2 / np.linalg.norm(b2))
+			x = float(np.dot(n1, n2))
+			y = float(np.dot(m1, n2))
+			chi3 = np.arctan2(y, x)
+			raw += 0.5 * (np.cos(np.pi - 2 * chi3) + 1.0)
+		return {'inter_raw': 0.0, 'intra_raw': raw,
+			'inter_weighted': 0.0, 'intra_weighted': raw * weight,
+			'raw': raw}
+	def RefPotential(self, pose, cache, ligand=None, **kw):
+		'''
+		Ref - per-amino-acid unfolded reference energy
+		'''
+		weight = float(self.Parameters['Ref']['weight'])
+		refs = self.Parameters.get('METHOD_WEIGHTS_ref', [])
+		order = ['ALA','CYS','ASP','GLU','PHE','GLY','HIS','ILE','LYS',
+			'LEU','MET','ASN','PRO','GLN','ARG','SER','THR','VAL',
+			'TRP','TYR']
+		ref_by_tri = {tri: float(refs[i])
+			for i, tri in enumerate(order) if i < len(refs)}
+		aas = pose.data.get('Amino Acids') or {}
+		raw = 0.0
+		for ri, info in aas.items():
+			tri = info[5] if len(info) >= 6 else None
+			if tri == 'HIS_D': tri = 'HIS'
+			raw += ref_by_tri.get(tri, 0.0)
+		return {'inter_raw': 0.0, 'intra_raw': raw,
+			'inter_weighted': 0.0, 'intra_weighted': raw * weight,
+			'raw': raw}
+	def DefaultOffsetPotential(self, pose, cache, ligand=None, **kw):
+		'''
+		Default smoke-test calibration term. Returns per_residue x N
+		residues so the calibrated 52-mer benchmark lands on exactly
+		100.0 (closed-form, exactly linear in per_residue). Inactive
+		for any param set without 'DefaultOffset' key.
+		'''
+		weight = float(self.Parameters.get(
+			'DefaultOffset', {}).get('weight', 0.0))
+		per_res = float(self.Parameters.get(
+			'Constants', {}).get('per_residue', 0.0))
+		aas = pose.data.get('Amino Acids') or {}
+		raw = float(len(aas)) * per_res
+		return {'inter_raw': raw, 'intra_raw': 0.0,
+			'inter_weighted': raw * weight, 'intra_weighted': 0.0,
+			'raw': raw}
+	def _hbond_chemtype_maps(self):
+		'''Build (residue, atom-name) -> donor/acceptor chem type maps.'''
+		donor_map = {}; acceptor_map = {}; base_map = {}
+		for tri in ['ALA','ARG','ASN','ASP','CYS','GLN','GLU','GLY','HIS',
+			'HIS_D','ILE','LEU','LYS','MET','PHE','PRO','SER','THR',
+			'TRP','TYR','VAL']:
+			if tri != 'PRO': donor_map[(tri, 'N')] = 'hbdon_PBA'
+		donor_map[('ASN', 'ND2')] = 'hbdon_CXA'
+		donor_map[('GLN', 'NE2')] = 'hbdon_CXA'
+		donor_map[('HIS', 'NE2')] = 'hbdon_IME'
+		donor_map[('HIS_D', 'ND1')] = 'hbdon_IMD'
+		donor_map[('TRP', 'NE1')] = 'hbdon_IND'
+		donor_map[('LYS', 'NZ')] = 'hbdon_AMO'
+		donor_map[('ARG', 'NE')] = 'hbdon_GDE'
+		donor_map[('ARG', 'NH1')] = 'hbdon_GDH'
+		donor_map[('ARG', 'NH2')] = 'hbdon_GDH'
+		donor_map[('TYR', 'OH')] = 'hbdon_AHX'
+		donor_map[('SER', 'OG')] = 'hbdon_HXL'
+		donor_map[('THR', 'OG1')] = 'hbdon_HXL'
+		for tri in ['ALA','ARG','ASN','ASP','CYS','GLN','GLU','GLY','HIS',
+			'HIS_D','ILE','LEU','LYS','MET','PHE','PRO','SER','THR',
+			'TRP','TYR','VAL']:
+			acceptor_map[(tri, 'O')] = 'hbacc_PBA'
+			base_map[(tri, 'O')] = 'C'
+			acceptor_map[(tri, 'OXT')] = 'hbacc_PBA'
+			base_map[(tri, 'OXT')] = 'C'
+		acceptor_map[('ASN', 'OD1')] = 'hbacc_CXA'; base_map[('ASN','OD1')] = 'CG'
+		acceptor_map[('GLN', 'OE1')] = 'hbacc_CXA'; base_map[('GLN','OE1')] = 'CD'
+		acceptor_map[('ASP', 'OD1')] = 'hbacc_CXL'; base_map[('ASP','OD1')] = 'CG'
+		acceptor_map[('ASP', 'OD2')] = 'hbacc_CXL'; base_map[('ASP','OD2')] = 'CG'
+		acceptor_map[('GLU', 'OE1')] = 'hbacc_CXL'; base_map[('GLU','OE1')] = 'CD'
+		acceptor_map[('GLU', 'OE2')] = 'hbacc_CXL'; base_map[('GLU','OE2')] = 'CD'
+		acceptor_map[('HIS', 'ND1')] = 'hbacc_IME'; base_map[('HIS','ND1')] = 'CG'
+		acceptor_map[('HIS_D', 'NE2')] = 'hbacc_IMD'; base_map[('HIS_D','NE2')] = 'CD2'
+		acceptor_map[('TYR', 'OH')] = 'hbacc_AHX'; base_map[('TYR','OH')] = 'CZ'
+		acceptor_map[('SER', 'OG')] = 'hbacc_HXL'; base_map[('SER','OG')] = 'CB'
+		acceptor_map[('THR', 'OG1')] = 'hbacc_HXL'; base_map[('THR','OG1')] = 'CB'
+		return donor_map, acceptor_map, base_map
+	def _hbond_eval_lookup(self, hb):
+		'''(don, acc, sep_str) -> eval entry'''
+		key = {}
+		for e in hb['eval_table']:
+			key[(e['don'], e['acc'], e['sep'])] = e
+		return key
+	def _hbond_poly_eval(self, poly, x):
+		'''Horner evaluation with clamping to (xmin, xmax) -> min/max_val'''
+		if poly is None: return 0.0
+		if x <= poly['xmin']: return poly['min_val']
+		if x >= poly['xmax']: return poly['max_val']
+		c = poly['coeffs']
+		if not c: return 0.0
+		v = c[0]
+		for i in range(1, len(c)):
+			v = v * x + c[i]
+		return v
+	def _hbond_fade(self, fade, x):
+		'''Smoothed fade interval evaluator.'''
+		if fade is None: return 1.0
+		kind = fade.get('kind', 'smoothed')
+		mn1 = fade['min1']; mn2 = fade['min2']
+		mx1 = fade['max1']; mx2 = fade['max2']
+		if x <= mn1 or x >= mx2: return 0.0
+		if mn2 <= x <= mx1: return 1.0
+		if x < mn2:
+			t = (x - mn1) / max(mn2 - mn1, 1e-12)
+			return t * t * (3.0 - 2.0 * t)
+		t = (mx2 - x) / max(mx2 - mx1, 1e-12)
+		return t * t * (3.0 - 2.0 * t)
+	def _ref15hbond(self, pose, cache, per_hb=None):
+		'''
+		Sum hbond energies and categorize into hbw_SR_BB / hbw_LR_BB
+		/ hbw_SR_BB_SC / hbw_LR_BB_SC / hbw_SC. Backbone-sidechain
+		(short range) and (long range) merged into BB_SC; SR_BB and
+		LR_BB kept separate.
+		If `per_hb` is a list, each accepted hbond is appended as a
+		tuple (don_ri, don_atom_name, acc_ri, acc_atom_name, e, category)
+		for debugging.
+		Returns dict with keys 'SR_BB', 'LR_BB', 'BB_SC', 'SC' -> raw
+		(unweighted) per-category contribution.
+		'''
+		hb = self.Parameters.get('HBond_data') or {}
+		if not hb: return {'SR_BB': 0.0, 'LR_BB': 0.0,
+			'BB_SC': 0.0, 'SC': 0.0}
+		donor_map, acceptor_map, base_map = self._hbond_chemtype_maps()
+		eval_key = self._hbond_eval_lookup(hb)
+		polys = hb['polynomials']; fades = hb['fade_intervals']
+		don_str_tab = hb['donor_strengths']
+		acc_str_tab = hb['acceptor_strengths']
+		atoms = pose.data['Atoms']
+		coords = np.asarray(pose.data['Coordinates'])
+		bonds = cache.get('adj') or pose.data['Bonds']
+		aas = pose.data.get('Amino Acids') or {}
+		atom_to_res = {}
+		res_atom = {}
+		for ri, info in aas.items():
+			tri = info[5] if len(info) >= 6 else None
+			if tri == 'HIS': pass
+			for ai in info[2] + info[3]:
+				ai = int(ai)
+				atom_to_res[ai] = (int(ri), tri)
+				res_atom.setdefault((int(ri), atoms[ai][0]), ai)
+		nb_count = {}
+		nb_xyz = {}
+		for ri, info in aas.items():
+			tri = info[5] if len(info) >= 6 else None
+			nb_atom = 'CA' if tri == 'GLY' else 'CB'
+			ai = res_atom.get((int(ri), nb_atom))
+			if ai is None:
+				ai = res_atom.get((int(ri), 'CA'))
+			if ai is not None:
+				nb_xyz[int(ri)] = coords[ai]
+		ri_list = list(nb_xyz.keys())
+		nb_arr = np.stack([nb_xyz[r] for r in ri_list], axis=0)
+		dd = np.linalg.norm(nb_arr[:, None, :] - nb_arr[None, :, :],
+			axis=2)
+		within = (dd < 10.0)
+		counts = within.sum(axis=1)
+		for k, r in enumerate(ri_list):
+			nb_count[r] = int(counts[k])
+		def burial_w(n):
+			'''Per-residue burial weight (smooth linear form)'''
+			if n < 7: return 0.1
+			if n > 24: return 0.5
+			return (n - 2.75) * (0.5 / 21.25)
+		donors = []
+		for ai, info in atoms.items():
+			if info[1] not in ('N', 'O'): continue
+			tri_pair = atom_to_res.get(int(ai))
+			if tri_pair is None: continue
+			ri, tri = tri_pair
+			key = (tri, info[0])
+			if key not in donor_map: continue
+			for j in bonds.get(int(ai), []):
+				jinfo = atoms.get(int(j))
+				if jinfo is None: continue
+				if jinfo[1] != 'H': continue
+				donors.append({'D': int(ai), 'H': int(j),
+					'ri': ri, 'tri': tri, 'chem': donor_map[key]})
+		acceptors = []
+		for ai, info in atoms.items():
+			if info[1] not in ('N', 'O'): continue
+			tri_pair = atom_to_res.get(int(ai))
+			if tri_pair is None: continue
+			ri, tri = tri_pair
+			key = (tri, info[0])
+			if key not in acceptor_map: continue
+			b_name = base_map.get(key)
+			b_ai = res_atom.get((ri, b_name))
+			if b_ai is None: continue
+			chem = acceptor_map[key]
+			b2_ai = None
+			if chem in ('hbacc_HXL', 'hbacc_AHX'):
+				for k in bonds.get(int(ai), []):
+					k = int(k)
+					if atoms.get(k, [None,'X'])[1] == 'H':
+						b2_ai = k; break
+			else:
+				same_res_nbrs = []
+				other_nbrs = []
+				for k in bonds.get(b_ai, []):
+					k = int(k)
+					if k == int(ai): continue
+					if atoms.get(k, [None,'H'])[1] == 'H': continue
+					tri_pair_k = atom_to_res.get(k)
+					if tri_pair_k is not None and tri_pair_k[0] == ri:
+						same_res_nbrs.append(k)
+					else:
+						other_nbrs.append(k)
+				if same_res_nbrs:
+					b2_ai = sorted(same_res_nbrs)[0]
+				elif other_nbrs:
+					b2_ai = sorted(other_nbrs)[0]
+			acceptors.append({'A': int(ai), 'B': b_ai, 'B2': b2_ai,
+				'ri': ri, 'tri': tri, 'chem': chem})
+		cat_totals = {'SR_BB': 0.0, 'LR_BB': 0.0,
+			'BB_SC': 0.0, 'SC': 0.0}
+		if not donors or not acceptors: return cat_totals
+		all_hbonds = []
+		H_idx = np.array([d['H'] for d in donors], dtype=np.int64)
+		A_idx = np.array([a['A'] for a in acceptors], dtype=np.int64)
+		Hc = coords[H_idx]; Ac = coords[A_idx]
+		dHA = np.linalg.norm(
+			Hc[:, None, :] - Ac[None, :, :], axis=2)
+		within = np.where(dHA < 3.2)
+		for ix, iy in zip(*within):
+			d = donors[ix]; a = acceptors[iy]
+			if d['D'] == a['A']: continue
+			if d['ri'] == a['ri']: continue
+			diff = a['ri'] - d['ri']
+			if abs(diff) > 4 or diff == 0:
+				sep = 'seq_sep_other'
+			elif diff == -4: sep = 'seq_sep_M4'
+			elif diff == -3: sep = 'seq_sep_M3'
+			elif diff == -2: sep = 'seq_sep_M2'
+			elif abs(diff) == 1: sep = 'seq_sep_PM1'
+			elif diff == 2: sep = 'seq_sep_P2'
+			elif diff == 3: sep = 'seq_sep_P3'
+			elif diff == 4: sep = 'seq_sep_P4'
+			else: sep = 'seq_sep_other'
+			entry = eval_key.get((d['chem'], a['chem'], sep))
+			if entry is None:
+				entry = eval_key.get((d['chem'], a['chem'], 'seq_sep_other'))
+			if entry is None: continue
+			D_xyz = coords[d['D']]; H_xyz = coords[d['H']]
+			A_xyz = coords[a['A']]; B_xyz = coords[a['B']]
+			AH = float(dHA[ix, iy])
+			vDH = D_xyz - H_xyz; vAH = A_xyz - H_xyz
+			cosAHD = float(np.dot(vDH, vAH) /
+				max(np.linalg.norm(vDH) * np.linalg.norm(vAH), 1e-12))
+			vBA = B_xyz - A_xyz; vHA = -vAH
+			cosBAH = float(np.dot(vBA, vHA) /
+				max(np.linalg.norm(vBA) * np.linalg.norm(vHA), 1e-12))
+			poly_d = polys.get(entry['poly_AHdist'])
+			poly_bah_short = polys.get(entry['poly_cosBAH_short'])
+			poly_bah_long = polys.get(entry['poly_cosBAH_long'])
+			poly_ahd_short = polys.get(entry['poly_cosAHD_short'])
+			poly_ahd_long = polys.get(entry['poly_cosAHD_long'])
+			xH = -cosBAH
+			xD = -cosAHD
+			AHD_rad = math.acos(max(-1.0, min(1.0, cosAHD)))
+			def ahd_arg(poly):
+				'''AHD polys live in either cosAHD- or AHD-rad space'''
+				if poly is None: return xD
+				return AHD_rad if poly.get('xmin', -1) > 0.5 else xD
+			Pr = self._hbond_poly_eval(poly_d, AH)
+			PSxH = self._hbond_poly_eval(poly_bah_short, xH)
+			PLxH = self._hbond_poly_eval(poly_bah_long, xH)
+			PSxD = self._hbond_poly_eval(
+				poly_ahd_short, ahd_arg(poly_ahd_short))
+			PLxD = self._hbond_poly_eval(
+				poly_ahd_long, ahd_arg(poly_ahd_long))
+			FSr = self._hbond_fade(
+				fades.get(entry['fade_AHdist']), AH)
+			FLr = 0.0
+			fbah_s_name = entry['fade_cosBAH_short']
+			fbah_l_name = entry['fade_cosBAH_long']
+			fbah_s = fades.get(fbah_s_name)
+			fbah_l = fades.get(fbah_l_name)
+			FxH = self._hbond_fade(fbah_l, xH)
+			fahd_s = fades.get(entry['fade_cosAHD_short'])
+			FxD = self._hbond_fade(fahd_s, xD)
+			e = (Pr * FxD * FxH
+				+ FSr * (PSxD * FxH + FxD * PSxH)
+				+ FLr * (PLxD * FxH + FxD * PLxH))
+			acc_hyb = self.Parameters.get('HBond_data', {}) \
+				.get('acc_hybridization', {}).get(a['chem'])
+			s = (don_str_tab.get(d['chem'], 1.0)
+				* acc_str_tab.get(a['chem'], 1.0))
+			e *= s
+			if acc_hyb == 'SP2_HYBRID' and a.get('B2') is not None:
+				B2_xyz = coords[a['B2']]
+				b1 = B_xyz - B2_xyz
+				b2 = A_xyz - B_xyz
+				b3 = H_xyz - A_xyz
+				n1 = np.cross(b1, b2); n2 = np.cross(b2, b3)
+				n1n = np.linalg.norm(n1); n2n = np.linalg.norm(n2)
+				if n1n > 1e-9 and n2n > 1e-9:
+					m1 = n1 / n1n; m2 = n2 / n2n
+					cos_chi = float(np.dot(m1, m2))
+					sin_chi_sign = float(np.dot(np.cross(m1, m2),
+						b2 / max(np.linalg.norm(b2), 1e-12)))
+					chi = math.atan2(sin_chi_sign, cos_chi)
+					d_p = 0.75; m_p = 1.6; l_p = 0.357
+					PI = math.pi
+					PI_minus_BAH = math.acos(
+						max(-1.0, min(1.0, xH)))
+					BAH = PI - PI_minus_BAH
+					H_chi = (math.cos(2 * chi) + 1) * 0.5
+					if BAH >= PI * 2.0 / 3.0:
+						F_p = d_p * 0.5 * math.cos(3 * PI_minus_BAH) \
+							+ d_p * 0.5 - 0.5
+						G_p = d_p - 0.5
+					elif BAH >= PI * (2.0 / 3.0 - l_p):
+						outer = math.cos(
+							PI - (PI * 2.0 / 3.0 - BAH) / l_p)
+						F_p = m_p * 0.5 * outer + m_p * 0.5 - 0.5
+						G_p = (m_p - d_p) * 0.5 * outer \
+							+ (m_p - d_p) * 0.5 + d_p - 0.5
+					else:
+						F_p = m_p - 0.5; G_p = m_p - 0.5
+					e += s * (H_chi * F_p + (1 - H_chi) * G_p)
+			elif acc_hyb == 'SP3_HYBRID' and a['chem'] in (
+					'hbacc_HXL', 'hbacc_AHX') and a.get('B2') is not None:
+				B2_xyz = coords[a['B2']]
+				b1 = H_xyz - A_xyz
+				b2 = A_xyz - B_xyz
+				b3 = B_xyz - B2_xyz
+				n1 = np.cross(b1, b2); n2 = np.cross(b2, b3)
+				n1n = np.linalg.norm(n1); n2n = np.linalg.norm(n2)
+				if n1n > 1e-9 and n2n > 1e-9:
+					m1 = n1 / n1n; m2 = n2 / n2n
+					cos_chi = float(np.dot(m1, m2))
+					sin_chi_sign = float(np.dot(np.cross(m1, m2),
+						b2 / max(np.linalg.norm(b2), 1e-12)))
+					chi = math.atan2(sin_chi_sign, cos_chi)
+					PI = math.pi
+					max_penalty = 0.125
+					PI_minus_BAH = math.acos(
+						max(-1.0, min(1.0, xH)))
+					BAH = PI - PI_minus_BAH
+					chi_scale = 0.0
+					if ((chi > PI/3 and chi < PI/2) or
+							(chi < -PI/3 and chi > -PI/2) or
+							(chi > 3*PI/2 and chi < 5*PI/3)):
+						chi_scale = (-math.cos(6 * chi) + 1) / 2
+					elif ((chi > PI/2 and chi < 3*PI/2) or
+							(chi < -PI/2 and chi > -3*PI/2)):
+						chi_scale = 1.0
+					BAH_bonus = -1.0
+					if BAH > 2 * PI / 3:
+						BAH_bonus = -math.cos(3 * BAH) / 2 - 0.5
+					sp3_acc_penalty = (s * max_penalty
+						* (1 + BAH_bonus * chi_scale))
+					e += sp3_acc_penalty
+			input_e = e
+			if input_e > 0.1:
+				continue
+			if input_e > -0.1:
+				e = -0.025 + 0.5 * input_e \
+					- 2.5 * input_e * input_e
+			w = entry['weight']
+			don_is_bb = atoms[d['D']][0] == 'N'
+			acc_is_bb = atoms[a['A']][0] in ('O', 'OXT', 'OT1', 'OT2')
+			all_hbonds.append({
+				'ri_d': d['ri'], 'd_atom': atoms[d['H']][0],
+				'ri_a': a['ri'], 'a_atom': atoms[a['A']][0],
+				'e': e, 'w': w,
+				'don_is_bb': don_is_bb,
+				'acc_is_bb': acc_is_bb,
+				'AH': AH, 'cosBAH': cosBAH, 'cosAHD': cosAHD})
+		don_bbg = set()
+		acc_bbg = set()
+		for h in all_hbonds:
+			if h['don_is_bb'] and h['acc_is_bb']:
+				don_bbg.add(h['ri_d'])
+				acc_bbg.add(h['ri_a'])
+		for h in all_hbonds:
+			if h['don_is_bb'] and not h['acc_is_bb']:
+				if h['ri_d'] in don_bbg: continue
+			elif not h['don_is_bb'] and h['acc_is_bb']:
+				if h['ri_a'] in acc_bbg: continue
+			e = h['e']; w = h['w']
+			cat = None
+			if w == 'hbw_SR_BB':
+				cat_totals['SR_BB'] += e; cat = 'SR_BB'
+			elif w == 'hbw_LR_BB':
+				cat_totals['LR_BB'] += e; cat = 'LR_BB'
+			elif w in ('hbw_SR_BB_SC', 'hbw_LR_BB_SC'):
+				cat_totals['BB_SC'] += e; cat = 'BB_SC'
+			elif w == 'hbw_SC':
+				cat_totals['SC'] += e; cat = 'SC'
+			if per_hb is not None and cat is not None:
+				per_hb.append((h['ri_d'], h['d_atom'], h['ri_a'],
+					h['a_atom'], e, cat, h['AH'], h['cosBAH'],
+					h['cosAHD']))
+		return cat_totals
+	def HBondSrBbPotential(self, pose, cache, ligand=None, **kw):
+		'''Hbond_sr_bb: short-range bb-bb hbonds'''
+		raw = self._ref15hbond(pose, cache)['SR_BB']
+		w = float(self.Parameters['HBondSrBb']['weight'])
+		return {'inter_raw': 0.0, 'intra_raw': raw,
+			'inter_weighted': 0.0, 'intra_weighted': raw * w,
+			'raw': raw}
+	def HBondLrBbPotential(self, pose, cache, ligand=None, **kw):
+		'''Hbond_lr_bb: long-range bb-bb hbonds'''
+		raw = self._ref15hbond(pose, cache)['LR_BB']
+		w = float(self.Parameters['HBondLrBb']['weight'])
+		return {'inter_raw': 0.0, 'intra_raw': raw,
+			'inter_weighted': 0.0, 'intra_weighted': raw * w,
+			'raw': raw}
+	def HBondBbScPotential(self, pose, cache, ligand=None, **kw):
+		'''Hbond_bb_sc: backbone-sidechain hbonds'''
+		raw = self._ref15hbond(pose, cache)['BB_SC']
+		w = float(self.Parameters['HBondBbSc']['weight'])
+		return {'inter_raw': 0.0, 'intra_raw': raw,
+			'inter_weighted': 0.0, 'intra_weighted': raw * w,
+			'raw': raw}
+	def HBondScPotential(self, pose, cache, ligand=None, **kw):
+		'''Hbond_sc: sidechain-sidechain hbonds'''
+		raw = self._ref15hbond(pose, cache)['SC']
+		w = float(self.Parameters['HBondSc']['weight'])
+		return {'inter_raw': 0.0, 'intra_raw': raw,
+			'inter_weighted': 0.0, 'intra_weighted': raw * w,
+			'raw': raw}
