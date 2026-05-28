@@ -4048,7 +4048,7 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None,
 	def ref15pairs(cache, same_res=False, cp='cp4',
 			use_cp_rep=False):
 		'''
-		Build the REF15 typed-pair index arrays (i, j, distance, weight) for one same-res mode
+		Build the typed-pair index arrays (i, j, distance, weight) for one same-res mode
 		Arguments:
 		----------
 			cache: dict - ScoreMatch cache
@@ -4810,7 +4810,7 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None,
 		return t * t * (3.0 - 2.0 * t)
 	def ref15hbond(pose, cache, per_hb=None):
 		'''
-		Compute the REF15 hydrogen-bond energy with the four categories partitioned
+		Compute the hydrogen-bond energy with the four categories partitioned
 		Arguments:
 		----------
 			cache: dict - ScoreMatch cache
@@ -5112,12 +5112,13 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None,
 					h['a_atom'], e, cat, h['AH'], h['cosBAH'],
 					h['cosAHD']))
 		return cat_totals
+	cache = {}
 	if 'XS_atom_types' in params:
-		cache = patternsearchvina(pose, params, ligand,
-			xs_override, nrot_override)
-	elif 'Atom_types' in params:
-		cache = ref15atomcache(pose, params)
-	else:
+		cache.update(patternsearchvina(pose, params, ligand,
+			xs_override, nrot_override))
+	if 'Atom_types' in params:
+		cache.update(ref15atomcache(pose, params))
+	if not cache:
 		raise Exception(
 			'ScoreMatch: unsupported params')
 	cache['patternsearch'] = patternsearch
