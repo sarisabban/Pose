@@ -118,7 +118,17 @@ def SMIRKSMatch(pose, params):
 			out.append(canon)
 		return out
 	rings = find_rings()
-	def hyb_of(rec): return rec[-1] if rec else 'sp3'
+	def hyb_of(rec):
+		'''
+		Hybridisation tag from an atom record, defaulting to sp3
+		Arguments:
+		----------
+			rec: atom record from self.data['Atoms'] (list)
+		Returns:
+		--------
+			str: hybridisation tag at rec[-1], or 'sp3' when rec is empty
+		'''
+		return rec[-1] if rec else 'sp3'
 	def kekulise():
 		'''
 		Find a valid Kekulé assignment for all 1.5-order bonds via
@@ -194,10 +204,39 @@ def SMIRKSMatch(pose, params):
 			if ok:
 				assn = [-1] * len(comp)
 				def doubles_seen(a, comp_assn):
+					'''
+					Count how many candidate edges for atom a are already assigned bond order 2
+					Arguments:
+					----------
+						a: int - atom index
+						comp_assn: list - per-edge tentative bond-order assignment
+					Returns:
+					--------
+						int: number of candidate edges currently at order 2
+					'''
 					return sum(1 for ci in atom_cands[a] if comp_assn[ci] == 2)
 				def remaining(a, comp_assn):
+					'''
+					List candidate edges for atom a that are still unassigned
+					Arguments:
+					----------
+						a: int - atom index
+						comp_assn: list - per-edge tentative bond-order assignment
+					Returns:
+					--------
+						list of int: indices of candidate edges still unassigned for atom a
+					'''
 					return [ci for ci in atom_cands[a] if comp_assn[ci] == -1]
 				def propagate(comp_assn):
+					'''
+					Force-propagate edges whose budget is fully determined; return False on contradiction
+					Arguments:
+					----------
+						comp_assn: list - per-edge tentative bond-order assignment
+					Returns:
+					--------
+						bool: True if propagation completed without contradiction
+					'''
 					changed = True
 					while changed:
 						changed = False
@@ -213,6 +252,15 @@ def SMIRKSMatch(pose, params):
 								changed = True
 					return True
 				def dfs(comp_assn):
+					'''
+					Recursive DFS over edge assignments to find a consistent Kekule bond-order solution
+					Arguments:
+					----------
+						comp_assn: list - per-edge tentative bond-order assignment
+					Returns:
+					--------
+						bool: True if a complete assignment was found
+					'''
 					if not propagate(comp_assn): return False
 					una = [ci for ci in range(len(comp)) if comp_assn[ci] == -1]
 					if not una: return True
@@ -286,19 +334,55 @@ def SMIRKSMatch(pose, params):
 		s = smirks
 		pos = [0]
 		def peek(off=0):
+			'''
+			Peek at the character `off` positions ahead of the cursor without consuming it
+			Arguments:
+			----------
+				off: int, default 0 - offset from cursor
+			Returns:
+			--------
+				str: single character at cursor+off, or '' past end of input
+			'''
 			p = pos[0] + off
 			return s[p] if p < len(s) else ''
 		def take(c):
+			'''
+			Consume the expected character at the cursor or raise ValueError
+			Arguments:
+			----------
+				c: str - expected single character
+			Returns:
+			--------
+				No return value
+			'''
 			if peek() != c: raise ValueError(
 				f'Expected {c!r} at {pos[0]} in {s!r}')
 			pos[0] += 1
 		def read_int():
+			'''
+			Consume a run of decimal digits at the cursor
+			Arguments:
+			----------
+				No arguments taken
+			Returns:
+			--------
+				int or None: integer value if any digits were read, else None
+			'''
 			start = pos[0]
 			while pos[0] < len(s) and s[pos[0]].isdigit(): pos[0] += 1
 			return int(s[start:pos[0]]) if pos[0] > start else None
 		# atom-expr (until ']' or ':'); precedence low->high: ';' ',' '&' '!'
 		def atom_expr():
 			# parse low-prec AND chain
+			'''
+			Parse a full SMIRKS atom expression: AND-chains joined by ';' (low precedence)
+			Arguments:
+			----------
+				No arguments taken
+			Returns:
+			--------
+				tuple: nested ('and', 'or', 'not', primitive) AST node
+			'''
 			left = atom_or()
 			while peek() == ';':
 				pos[0] += 1
@@ -306,6 +390,15 @@ def SMIRKSMatch(pose, params):
 				left = ('and', left, right)
 			return left
 		def atom_or():
+			'''
+			Parse one OR-chain of atom expressions joined by ','
+			Arguments:
+			----------
+				No arguments taken
+			Returns:
+			--------
+				tuple: nested AST node for the parsed expression
+			'''
 			left = atom_and()
 			while peek() == ',':
 				pos[0] += 1
@@ -313,6 +406,15 @@ def SMIRKSMatch(pose, params):
 				left = ('or', left, right)
 			return left
 		def atom_and():
+			'''
+			Parse one AND-chain of atom expressions joined by '&' or by adjacency
+			Arguments:
+			----------
+				No arguments taken
+			Returns:
+			--------
+				tuple: nested AST node for the parsed expression
+			'''
 			left = atom_neg()
 			while peek() not in ('', ',', ';', ']', ':'):
 				if peek() == '&': pos[0] += 1
@@ -320,11 +422,29 @@ def SMIRKSMatch(pose, params):
 				left = ('and', left, right)
 			return left
 		def atom_neg():
+			'''
+			Parse an optionally-negated atom primitive: '!' prefix toggles negation
+			Arguments:
+			----------
+				No arguments taken
+			Returns:
+			--------
+				tuple: AST node wrapping the primitive (wrapped in 'not' if prefixed)
+			'''
 			if peek() == '!':
 				pos[0] += 1
 				return ('not', atom_neg())
 			return atom_prim()
 		def atom_prim():
+			'''
+			Parse a single atom primitive (element symbol, '#n', '@chirality', degree, charge, etc.)
+			Arguments:
+			----------
+				No arguments taken
+			Returns:
+			--------
+				tuple: AST node for the primitive
+			'''
 			c = peek()
 			if c == '*':
 				pos[0] += 1
@@ -383,6 +503,15 @@ def SMIRKSMatch(pose, params):
 		# bond-expr: parse a bond expression between two atoms
 		def bond_expr():
 			# low-prec AND chain (rare in upstream FF)
+			'''
+			Parse a full SMIRKS bond expression: AND-chains joined by ';'
+			Arguments:
+			----------
+				No arguments taken
+			Returns:
+			--------
+				tuple: nested AST node for the bond expression
+			'''
 			left = bond_or()
 			while peek() == ';':
 				pos[0] += 1
@@ -390,6 +519,15 @@ def SMIRKSMatch(pose, params):
 				left = ('and', left, right)
 			return left
 		def bond_or():
+			'''
+			Parse one OR-chain of bond expressions joined by ','
+			Arguments:
+			----------
+				No arguments taken
+			Returns:
+			--------
+				tuple: nested AST node for the parsed bond expression
+			'''
 			left = bond_and()
 			while peek() == ',':
 				pos[0] += 1
@@ -397,6 +535,15 @@ def SMIRKSMatch(pose, params):
 				left = ('or', left, right)
 			return left
 		def bond_and():
+			'''
+			Parse one AND-chain of bond expressions joined by '&' or by adjacency
+			Arguments:
+			----------
+				No arguments taken
+			Returns:
+			--------
+				tuple: nested AST node for the parsed bond expression
+			'''
 			left = bond_neg()
 			# Explicit '&' AND, plus implicit AND between adjacent bond primitives
 			while peek() in ('&', '-', '=', '#', ':', '~', '@', '!'):
@@ -405,11 +552,29 @@ def SMIRKSMatch(pose, params):
 				left = ('and', left, right)
 			return left
 		def bond_neg():
+			'''
+			Parse an optionally-negated bond primitive: '!' prefix toggles negation
+			Arguments:
+			----------
+				No arguments taken
+			Returns:
+			--------
+				tuple: AST node wrapping the primitive (wrapped in 'not' if prefixed)
+			'''
 			if peek() == '!':
 				pos[0] += 1
 				return ('not', bond_neg())
 			return bond_prim()
 		def bond_prim():
+			'''
+			Parse a single bond primitive (-, =, #, :, @, ~, /, \\, ring digit)
+			Arguments:
+			----------
+				No arguments taken
+			Returns:
+			--------
+				tuple: AST node for the bond primitive
+			'''
 			c = peek()
 			if c == '-': pos[0] += 1; return ('bo', 1.0)
 			if c == '=': pos[0] += 1; return ('bo', 2.0)
@@ -427,6 +592,15 @@ def SMIRKSMatch(pose, params):
 		ring_open = {}  # closure_digit -> (atom_idx, bond_expr_or_None)
 		def parse_atom():
 			# Bare atom forms inside recursion: '*' = wildcard; element symbols
+			'''
+			Parse a bracketed atom '[...]' or a bare atom symbol, advancing the cursor
+			Arguments:
+			----------
+				No arguments taken
+			Returns:
+			--------
+				tuple: AST node for the atom expression
+			'''
 			c = peek()
 			if c != '[':
 				if c == '*':
@@ -459,9 +633,27 @@ def SMIRKSMatch(pose, params):
 			if tag is not None: tags[tag] = idx
 			return idx
 		def is_atom_start(c):
+			'''
+			Test whether a character can begin an atom token in SMIRKS
+			Arguments:
+			----------
+				c: str - single character
+			Returns:
+			--------
+				bool: True if c starts an atom (bracket, '*', or element letter)
+			'''
 			return c == '[' or c == '*' or (
 				c and (c.isupper() or c.islower()) and c not in 'hRrXx')
 		def parse_branch(prev_idx):
+			'''
+			Parse a parenthesised branch sub-chain attached to atom prev_idx
+			Arguments:
+			----------
+				prev_idx: int - atom index this branch attaches to
+			Returns:
+			--------
+				No return value
+			'''
 			take('(')
 			# optional bond before the next atom in the branch
 			if peek() and not is_atom_start(peek()) and peek() != '(':
@@ -473,6 +665,15 @@ def SMIRKSMatch(pose, params):
 			parse_chain(a_idx)
 			take(')')
 		def parse_chain(prev_idx):
+			'''
+			Parse a chain of atoms-and-bonds at the current cursor, starting from prev_idx
+			Arguments:
+			----------
+				prev_idx: int - atom index this chain extends from (-1 for root)
+			Returns:
+			--------
+				No return value
+			'''
 			while pos[0] < len(s):
 				c = peek()
 				if c == ')' or c == '': return
@@ -615,6 +816,15 @@ def SMIRKSMatch(pose, params):
 		used = set()
 		mapping = [-1] * pat_n
 		def go(p):
+			'''
+			Backtracking recursion: try to map pattern atom p to a pose atom
+			Arguments:
+			----------
+				p: int - pattern atom index
+			Returns:
+			--------
+				bool: True when a complete consistent mapping is found
+			'''
 			if p == pat_n: return True
 			# pick candidates
 			anchored = (p == 0)
@@ -662,6 +872,15 @@ def SMIRKSMatch(pose, params):
 		used = set()
 		mapping = [-1] * pat_n
 		def go(p):
+			'''
+			Enumerative recursion: collect every consistent mapping of pattern atom p
+			Arguments:
+			----------
+				p: int - pattern atom index
+			Returns:
+			--------
+				No return value (appends matches to enclosing `results` list)
+			'''
 			if p == pat_n:
 				key = tuple(mapping[pat['tags'][t]] for t in tag_order)
 				if key not in seen:
@@ -694,6 +913,15 @@ def SMIRKSMatch(pose, params):
 		'constraints': set(), 'restri': {}}
 	parsed = {}
 	def get(smirks):
+		'''
+		Memoised parser: cache parsed SMIRKS expressions across repeated lookups
+		Arguments:
+		----------
+			smirks: str - SMIRKS pattern
+		Returns:
+		--------
+			dict: parsed pattern (atoms, bonds, tags)
+		'''
 		if smirks not in parsed: parsed[smirks] = parse(smirks)
 		return parsed[smirks]
 	rmin2sig = 2.0 / (2.0 ** (1.0 / 6.0))
@@ -1253,6 +1481,16 @@ class ForceField():
 			for j in bonds.get(i, []):
 				bondset.add((min(i, j), max(i, j)))
 		def addbond(i, j):
+			'''
+			Add a bond-order-1.0 edge between atoms i and j in the working tables
+			Arguments:
+			----------
+				i: int - atom index
+				j: int - atom index
+			Returns:
+			--------
+				No return value
+			'''
 			bonds.setdefault(i, []).append(j)
 			bonds.setdefault(j, []).append(i)
 			orders.setdefault(i, []).append(1.0)
@@ -2323,11 +2561,21 @@ _RAMA_SPLINE_CACHE = {}
 
 def ScoreMatch(pose, params, ligand=None, xs_override=None,
 		nrot_override=None):
-	"""All atom-typing, pair-list building, spline machinery,
-	HBond geometry, and FaDun rotamer infrastructure consolidated
-	into one module-level function. Returns a cache dict whose
-	values include both data arrays and callable nested helpers
-	(closures) used by the Score class energy-term methods."""
+	'''
+	Build the per-pose support cache used by every Score energy term
+	Arguments:
+	----------
+		pose:          Pose or Molecule - receptor / source structure
+		params:        dict - the active ['Score Parameters'][NAME] block
+		ligand:        Molecule or None - optional small-molecule ligand
+		xs_override:   dict or None - validation hook; maps combined index to XS atom type
+		nrot_override: int or None - validation hook for ligand n_rot
+	Returns:
+	--------
+		dict: 'hash', 'coords', 'atom_types', 'inter_pairs', 'intra_pairs'
+		      plus per-term raw value keys (e.g. 'FaAtrPotential') and
+		      callable nested helpers (e.g. 'evalpairs', 'ref15hbond')
+	'''
 	def patternsearch(pose, params, ligand=None,
 			xs_override=None, nrot_override=None):
 		'''
@@ -2417,21 +2665,25 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None,
 			'Na', 'K', 'Hg', 'Cd', 'Ni'}
 		def atomel(gi):
 			'''
-			Element of atom at combined index gi
+			Element symbol of the atom at combined index gi (receptor first, then ligand)
 			Arguments:
-				gi: int - combined index (0..n_r + receptor; n_r..n ligand)
+			----------
+				gi: int - combined receptor/ligand atom index
 			Returns:
+			--------
 				str: element symbol
 			'''
 			rec = r_atoms[gi] if gi < n_r else l_atoms[gi - n_r]
 			return rec[1]
 		def atomnbrs(gi):
 			'''
-			Combined-index neighbour list of atom at combined index gi
+			Combined-index neighbour list of the atom at gi
 			Arguments:
-				gi: int - combined index
+			----------
+				gi: int - combined receptor/ligand atom index
 			Returns:
-				list of int: bonded atoms in combined indexing
+			--------
+				list of int: bonded neighbours in combined indexing
 			'''
 			if gi < n_r: return list(r_bonds.get(gi, []))
 			return [n_r + j for j in l_bonds.get(gi - n_r, [])]
@@ -2473,6 +2725,15 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None,
 		H_coords_r = (np.asarray(H_coords_r, dtype=np.float64)
 			if H_coords_r else np.zeros((0, 3)))
 		def has_polar_h(gi):
+			'''
+			True iff atom gi has a bonded H (or a receptor H within 1.3 A when gi is receptor)
+			Arguments:
+			----------
+				gi: int - combined receptor/ligand atom index
+			Returns:
+			--------
+				bool: True if at least one polar H is attached
+			'''
 			for j in atomnbrs(gi):
 				if atomel(j) == 'H': return True
 			if gi < n_r and len(H_coords_r):
@@ -2480,6 +2741,15 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None,
 				if (d < 1.3).any(): return True
 			return False
 		def protein_xs(gi):
+			'''
+			Look up the XS atom type override for a receptor protein atom via PROT_XS
+			Arguments:
+			----------
+				gi: int - combined receptor/ligand atom index
+			Returns:
+			--------
+				str or None: XS atom-type code (e.g. N_D, O_DA) or None if no override
+			'''
 			tri = r_atom_to_tri.get(gi)
 			if tri is None: return None
 			nm = r_atoms[gi][0] if r_atoms.get(gi) else None
@@ -2590,8 +2860,14 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None,
 			'HN':'H','HT1':'H','HT2':'H','HT3':'H'}
 		def lookuptype(tricode, atom_name):
 			'''
-			Resolve a (tricode, atom_name) pair to atom type and
-			charge, honouring standard aliases and terminal H names
+			Resolve (tricode, atom_name) to a Rosetta atom type and partial charge
+			Arguments:
+			----------
+				tricode: str - 3-letter residue code
+				atom_name: str - PDB atom name
+			Returns:
+			--------
+				tuple: (atom_type_str_or_None, partial_charge_float)
 			'''
 			res = residue_types_db.get(tricode)
 			if res is None: return None, 0.0
@@ -2686,7 +2962,17 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None,
 			NTERM_H_NAMES = {'H', 'H1', 'H2', 'H3', '1H', '2H', '3H',
 				'HN', 'HT1', 'HT2', 'HT3'}
 			def applyatom(ai, new_type, new_charge):
-				'''Patch one atom in place'''
+				'''
+				Patch one atom in place: overwrite type, charge, and derived per-atom arrays
+				Arguments:
+				----------
+					ai: int - atom index
+					new_type: str - new Rosetta atom type
+					new_charge: float - new partial charge
+				Returns:
+				--------
+					No return value
+				'''
 				ros_types[ai] = new_type
 				q_arr[ai] = new_charge
 				if new_type in atom_types_db:
@@ -2846,7 +3132,14 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None,
 					adj[ii].add(jj); adj[jj].add(ii)
 		def bfsdists(start, max_depth=4):
 			'''
-			Return dict {atom: bond_distance} for distances 1..max_depth
+			BFS bond-distance map from `start` up to max_depth bonds
+			Arguments:
+			----------
+				start: int - atom index to start BFS from
+				max_depth: int, default 4 - maximum bond distance to expand
+			Returns:
+			--------
+				dict: {atom_index: bond_distance} for atoms at distance 1..max_depth
 			'''
 			out = {}
 			frontier = {start}
@@ -2924,6 +3217,15 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None,
 		pair_cp_path = []; pair_is_poly = []
 		bfs_cache = {}
 		def get_bfs(atom_idx):
+			'''
+			Memoised wrapper around bfsdists keyed on atom_idx
+			Arguments:
+			----------
+				atom_idx: int - atom index to BFS from
+			Returns:
+			--------
+				dict: {atom_index: bond_distance} (same shape as bfsdists)
+			'''
 			if atom_idx not in bfs_cache:
 				bfs_cache[atom_idx] = bfsdists(int(atom_idx), max_depth=4)
 			return bfs_cache[atom_idx]
@@ -3096,7 +3398,15 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None,
 		water_off = np.full(n, -1, dtype=np.int64)
 		water_cnt = np.zeros(n, dtype=np.int64)
 		def unit(v):
-			'''Return unit vector of v; zero if v is null'''
+			'''
+			Unit vector along v; zero vector when v has zero length
+			Arguments:
+			----------
+				v: np.ndarray - 3-component vector
+			Returns:
+			--------
+				np.ndarray: v / |v|, or v itself if |v| is zero
+			'''
 			nv = float(np.linalg.norm(v))
 			return v / nv if nv > 1e-9 else v
 		for i in range(n):
@@ -3296,6 +3606,16 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None,
 		bonds = ligand.data['Bonds']
 		orders = ligand.data.get('BondOrders', {})
 		def bondorder(a, b):
+			'''
+			Bond order between atoms i and j in the working bond-order table
+			Arguments:
+			----------
+				i: int - atom index
+				j: int - atom index
+			Returns:
+			--------
+				float: bond order, defaulting to 1.0 when no record exists
+			'''
 			ol = orders.get(a, [])
 			nl = bonds[a]
 			if len(ol) == len(nl):
@@ -3305,6 +3625,16 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None,
 		def inring(a, b):
 			# BFS from a, excluding the direct a-b edge; if we still
 			# reach b, the bond is part of a cycle (ring bond).
+			'''
+			True iff the edge (i, j) lies in a ring of the working topology
+			Arguments:
+			----------
+				i: int - atom index
+				j: int - atom index
+			Returns:
+			--------
+				bool: True if the bond is part of any detected ring
+			'''
 			seen = {a}
 			stk = [a]
 			while stk:
@@ -3322,10 +3652,30 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None,
 			# amide carbonyl). AutoDock's torsion tree leaves these rigid.
 			# Aromatic ring C-N bonds are NOT amides — they get caught by
 			# the ring/inring filter instead.
+			'''
+			True iff the bond (i, j) is the C-N of an amide (C also bonded to a =O)
+			Arguments:
+			----------
+				i: int - atom index
+				j: int - atom index
+			Returns:
+			--------
+				bool: True for amide C-N bonds
+			'''
 			def amide(c_idx, n_idx):
 				# Amide / amidine: C has a double bond to O or N besides
 				# n_idx, and the C-N bond itself is acyclic (so it's not
 				# an aromatic ring substituent like pyridine).
+				'''
+				True iff atom `c` is the carbonyl C of an amide: bonded to N (the other atom) and a =O
+				Arguments:
+				----------
+					c: int - candidate carbonyl-carbon atom index
+					n: int - candidate nitrogen atom index
+				Returns:
+				--------
+					bool: True if c is an amide carbonyl carbon
+				'''
 				if atoms[c_idx][1] != 'C': return False
 				if atoms[n_idx][1] != 'N': return False
 				# C must not have any cyclic bond (else aromatic carbon)
@@ -3388,6 +3738,16 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None,
 		bonds = ligand.data['Bonds']
 		orders = ligand.data.get('BondOrders', {})
 		def bondorder(a, b):
+			'''
+			Bond order between atoms i and j in the working bond-order table
+			Arguments:
+			----------
+				i: int - atom index
+				j: int - atom index
+			Returns:
+			--------
+				float: bond order, defaulting to 1.0 when no record exists
+			'''
 			ol = orders.get(a, [])
 			nl = bonds[a]
 			if len(ol) == len(nl):
@@ -3395,6 +3755,16 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None,
 				except ValueError: return 1
 			return 1
 		def inring(a, b):
+			'''
+			True iff the edge (i, j) lies in a ring of the working topology
+			Arguments:
+			----------
+				i: int - atom index
+				j: int - atom index
+			Returns:
+			--------
+				bool: True if the bond is part of any detected ring
+			'''
 			seen = {a}; stk = [a]
 			while stk:
 				x = stk.pop()
@@ -3406,7 +3776,27 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None,
 					seen.add(y); stk.append(y)
 			return False
 		def isamide(a, b):
+			'''
+			True iff the bond (i, j) is the C-N of an amide (C also bonded to a =O)
+			Arguments:
+			----------
+				i: int - atom index
+				j: int - atom index
+			Returns:
+			--------
+				bool: True for amide C-N bonds
+			'''
 			def amide(c_idx, n_idx):
+				'''
+				True iff atom `c` is the carbonyl C of an amide: bonded to N (the other atom) and a =O
+				Arguments:
+				----------
+					c: int - candidate carbonyl-carbon atom index
+					n: int - candidate nitrogen atom index
+				Returns:
+				--------
+					bool: True if c is an amide carbonyl carbon
+				'''
 				if atoms[c_idx][1] != 'C': return False
 				if atoms[n_idx][1] != 'N': return False
 				for k in bonds.get(c_idx, []):
@@ -3492,6 +3882,16 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None,
 			int: hash used for cache invalidation
 		'''
 		def keyof(obj):
+			'''
+			Build the canonical (lo_type, hi_type) tuple key for typed-pair lookups
+			Arguments:
+			----------
+				ti: int - first atom type code
+				tj: int - second atom type code
+			Returns:
+			--------
+				tuple: (min(ti,tj), max(ti,tj))
+			'''
 			if obj is None: return None
 			a = tuple((int(k), tuple(v))
 				for k, v in sorted(obj.data['Atoms'].items()))
@@ -3514,6 +3914,16 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None,
 			tuple (inter_sum, intra_sum)
 		'''
 		def go(pairs):
+			'''
+			Inner recursion driving the typed-pair sum over a precomputed pair list
+			Arguments:
+			----------
+				lo: int - starting pair index
+				hi: int - end pair index (exclusive)
+			Returns:
+			--------
+				No return value (mutates the enclosing accumulator arrays)
+			'''
 			if len(pairs) == 0: return 0.0
 			ai = pairs[:, 0]; aj = pairs[:, 1]
 			coords = cache['coords']
@@ -3556,6 +3966,18 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None,
 		cutoff = float(p['cutoff']); weight = float(p['weight'])
 		radii = cache['xs_radii_arr']; xs = cache['xs_types']
 		def fn(ai, aj, rij, c):
+			'''
+			Per-pair compute kernel: maps (ai, aj, rij, w) into a scalar contribution
+			Arguments:
+			----------
+				ai: np.ndarray - per-pair first-atom indices
+				aj: np.ndarray - per-pair second-atom indices
+				rij: np.ndarray - per-pair distance
+				c: np.ndarray - per-pair connectivity weight
+			Returns:
+			--------
+				np.ndarray: per-pair scalar contribution to the term
+			'''
 			ri = radii[xs[ai]]; rj = radii[xs[aj]]
 			d = rij - (ri + rj + offset)
 			gate = ((xs[ai] >= 0) & (xs[aj] >= 0) & (rij < cutoff))
@@ -3582,6 +4004,17 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None,
 		donor = cache['xs_is_donor_arr']
 		accep = cache['xs_is_acceptor_arr']
 		def slopestep(x):
+			'''
+			Linear slope-step: 1 below `good`, 0 above `bad`, linear ramp in between
+			Arguments:
+			----------
+				cache: dict - ScoreMatch cache
+				pkey: str - parameter section key (e.g. Hydrophobic, HBond)
+				mask: str - cache flag selecting which atom subtype to sum over
+			Returns:
+			--------
+				dict: termresult with inter/intra raw and weighted contributions
+			'''
 			if bad < good:
 				return np.clip((x - bad) / (good - bad), 0.0, 1.0)
 			elif bad > good:
@@ -3589,6 +4022,18 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None,
 			else:
 				return np.where(x <= good, 1.0, 0.0)
 		def fn(ai, aj, rij, c):
+			'''
+			Per-pair slope-step kernel used by the slopestep wrapper
+			Arguments:
+			----------
+				ai: np.ndarray - per-pair first-atom indices
+				aj: np.ndarray - per-pair second-atom indices
+				rij: np.ndarray - per-pair distance
+				c: np.ndarray - per-pair connectivity weight
+			Returns:
+			--------
+				np.ndarray: per-pair slope-step contribution
+			'''
 			ri = radii[xs[ai]]; rj = radii[xs[aj]]
 			d = rij - (ri + rj)
 			valid = (xs[ai] >= 0) & (xs[aj] >= 0) & (rij < cutoff)
@@ -3603,19 +4048,14 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None,
 	def ref15pairs(cache, same_res=False, cp='cp4',
 			use_cp_rep=False):
 		'''
-		Return (pairs_i, pairs_j, pair_d, pair_w) for the requested
-		intra/inter-residue side, computing the count-pair weight per
-		the rule. 'cp4' (default, inter-residue with rama active
-		and the intra xover4 helpers): 1-2/1-3/1-4 excluded, 1-5 at 0.2,
-		>=1-6 at 1.0. 'cp3' (default intra-residue): 1-2/1-3 excluded,
-		1-4 at 0.2, >=1-5 at 1.0.
+		Build the REF15 typed-pair index arrays (i, j, distance, weight) for one same-res mode
 		Arguments:
 		----------
-			cache: per-pose cache from _ref15cache
-			same_res: bool - intra vs inter residue
-			cp: 'cp3' or 'cp4'
-			use_cp_rep: bool - use pair_cp_path (elec_representative_cp)
-				instead of pair_path; matches FaElec default
+			cache: dict - ScoreMatch cache
+			same_res: bool - True for intra-residue, False for inter-residue pairs
+		Returns:
+		--------
+			tuple: (pi, pj, r, w) NumPy arrays for the matching pair subset
 		'''
 		mask = cache['pair_same_res']
 		sel = mask if same_res else ~mask
@@ -3720,9 +4160,14 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None,
 		return atrE, repE
 	def ref15ljraw(cache, same_res):
 		'''
-		Per-pair sum of LJ atr/rep using the analytic etable-evaluation
-		formula via `_ljpair`.
-		Returns (atr_raw, rep_raw)
+		Compute raw LJ attractive + repulsive contributions over typed pairs
+		Arguments:
+		----------
+			cache: dict - ScoreMatch cache
+			same_res: bool - True for intra-residue pairs
+		Returns:
+		--------
+			tuple: (atr_sum, rep_sum) - raw scalar sums before weighting
 		'''
 		pi, pj, r, w = ref15pairs(cache, same_res=same_res)
 		if len(pi) == 0: return 0.0, 0.0
@@ -3881,7 +4326,17 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None,
 		e = solpair(cache, pi, pj, r)
 		return float(np.sum(w * e))
 	def ref15stubterm(weight_key):
-		'''Generic zero-return stub for terms pending full impl.'''
+		'''
+		Generic stub: compute Sum over typed pairs of a user-supplied per-pair function
+		Arguments:
+		----------
+			cache: dict - ScoreMatch cache
+			same_res: bool - True for intra-residue pairs
+			fn: callable - per-pair function (ai, aj, rij, w) -> contribution
+		Returns:
+		--------
+			float: scalar sum across the selected pair subset
+		'''
 		w = float(params.get(weight_key, {}).get('weight', 0.0))
 		return {'inter_raw': 0.0, 'intra_raw': 0.0,
 			'inter_weighted': 0.0, 'intra_weighted': 0.0,
@@ -3961,8 +4416,15 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None,
 		_FADUN_GRID_CACHE[key] = grids
 		return grids
 	def fadun_entropy_grid(aa, residues_db):
-		'''Per-cell entropy grid (sum_rotwell P_rw * log(P_rw)) plus
-		ypp_psi for spline. Cached.'''
+		'''
+		Build the FaDun entropy-correction grid for one amino acid by Boltzmann reweighting
+		Arguments:
+		----------
+			aa: str - 3-letter amino acid code
+		Returns:
+		--------
+			np.ndarray: entropy grid indexed by (phi_bin, psi_bin)
+		'''
 		if aa in _FADUN_ENT_CACHE:
 			return _FADUN_ENT_CACHE[aa]
 		entry = residues_db.get(aa)
@@ -4139,6 +4601,15 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None,
 			sd_grid = rdat['chi_sigmas'][k]
 			mc = mu_grid[ip0 % 36, js0 % 36]
 			def _unwrap(v, ref):
+				'''
+				Unwrap a periodic 1D array so consecutive samples are within +/-180 degrees
+				Arguments:
+				----------
+					arr: np.ndarray - 1D array of angle samples in degrees
+				Returns:
+				--------
+					np.ndarray: unwrapped copy of arr
+				'''
 				return ref + ((v - ref + 180.0) % 360.0 - 180.0)
 			a = _unwrap(mu_grid[ip0 % 36, js0 % 36], mc)
 			b = _unwrap(mu_grid[(ip0 + 1) % 36, js0 % 36], mc)
@@ -4182,7 +4653,18 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None,
 		b_fft = np.fft.fft(b)
 		return np.real(np.fft.ifft(b_fft / A_diag))
 	def spline_eval_1d(y, ypp, t, n):
-		'''Evaluate periodic cubic spline at fractional index t.'''
+		'''
+		Evaluate a 1D cubic spline at x using precomputed second-derivative coefficients
+		Arguments:
+		----------
+			xs: np.ndarray - sample x-values (strictly increasing)
+			ys: np.ndarray - sample y-values
+			y2: np.ndarray - precomputed second derivatives
+			x: float - query point
+		Returns:
+		--------
+			float: spline value at x
+		'''
 		i = int(math.floor(t)) % n
 		j = (i + 1) % n
 		frac = t - math.floor(t)
@@ -4225,7 +4707,15 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None,
 		ypp_phi = periodic_cubic_spline(col_f)
 		return spline_eval_1d(col_f, ypp_phi, fp, n)
 	def hbond_chemtype_maps():
-		'''Build (residue, atom-name) -> donor/acceptor chem type maps.'''
+		'''
+		Build forward and reverse chemtype lookup maps for HBond polynomial selection
+		Arguments:
+		----------
+			params: dict - the Score-Parameters block carrying HBond_data
+		Returns:
+		--------
+			tuple: (cidx_by_donor, cidx_by_acceptor, poly_table)
+		'''
 		donor_map = {}; acceptor_map = {}; base_map = {}
 		for tri in ['ALA','ARG','ASN','ASP','CYS','GLN','GLU','GLY','HIS',
 			'HIS_D','ILE','LEU','LYS','MET','PHE','PRO','SER','THR',
@@ -4263,13 +4753,31 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None,
 		acceptor_map[('THR', 'OG1')] = 'hbacc_HXL'; base_map[('THR','OG1')] = 'CB'
 		return donor_map, acceptor_map, base_map
 	def hbond_eval_lookup(hb):
-		'''(don, acc, sep_str) -> eval entry'''
+		'''
+		Look up the polynomial-coefficient row for a (donor_chem, acceptor_chem) pair
+		Arguments:
+		----------
+			don_chem: str - donor chemical type code
+			acc_chem: str - acceptor chemical type code
+		Returns:
+		--------
+			np.ndarray or None: 4xN polynomial coefficients or None if no match
+		'''
 		key = {}
 		for e in hb['eval_table']:
 			key[(e['don'], e['acc'], e['sep'])] = e
 		return key
 	def hbond_poly_eval(poly, x):
-		'''Horner evaluation with clamping to (xmin, xmax) -> min/max_val'''
+		'''
+		Horner evaluation of a polynomial with clamping to (xmin, xmax)
+		Arguments:
+		----------
+			poly: dict - {'xmin', 'xmax', 'min_val', 'max_val', 'coeffs'} polynomial entry
+			x:    float - query value
+		Returns:
+		--------
+			float: polynomial value at x, clamped at the table endpoints
+		'''
 		if poly is None: return 0.0
 		if x <= poly['xmin']: return poly['min_val']
 		if x >= poly['xmax']: return poly['max_val']
@@ -4280,7 +4788,15 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None,
 			v = v * x + c[i]
 		return v
 	def hbond_fade(fade, x):
-		'''Smoothed fade interval evaluator.'''
+		'''
+		Sigmoid fade-out factor for HBond energy across the distance shell
+		Arguments:
+		----------
+			r: float - donor-acceptor distance
+		Returns:
+		--------
+			float: fade weight in [0, 1]
+		'''
 		if fade is None: return 1.0
 		kind = fade.get('kind', 'smoothed')
 		mn1 = fade['min1']; mn2 = fade['min2']
@@ -4294,15 +4810,13 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None,
 		return t * t * (3.0 - 2.0 * t)
 	def ref15hbond(pose, cache, per_hb=None):
 		'''
-		Sum hbond energies and categorize into hbw_SR_BB / hbw_LR_BB
-		/ hbw_SR_BB_SC / hbw_LR_BB_SC / hbw_SC. Backbone-sidechain
-		(short range) and (long range) merged into BB_SC; SR_BB and
-		LR_BB kept separate.
-		If `per_hb` is a list, each accepted hbond is appended as a
-		tuple (don_ri, don_atom_name, acc_ri, acc_atom_name, e, category)
-		for debugging.
-		Returns dict with keys 'SR_BB', 'LR_BB', 'BB_SC', 'SC' -> raw
-		(unweighted) per-category contribution.
+		Compute the REF15 hydrogen-bond energy with the four categories partitioned
+		Arguments:
+		----------
+			cache: dict - ScoreMatch cache
+		Returns:
+		--------
+			dict: per-category raw and weighted contributions ('sr_bb', 'lr_bb', 'bb_sc', 'sc')
 		'''
 		hb = params.get('HBond_data') or {}
 		if not hb: return {'SR_BB': 0.0, 'LR_BB': 0.0,
@@ -4344,7 +4858,15 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None,
 		for k, r in enumerate(ri_list):
 			nb_count[r] = int(counts[k])
 		def burial_w(n):
-			'''Per-residue burial weight (smooth linear form)'''
+			'''
+			Heavy-neighbour burial weight used by LkBallWtd (count of neighbours within 5 A)
+			Arguments:
+			----------
+				gi: int - atom index
+			Returns:
+			--------
+				float: burial weight
+			'''
 			if n < 7: return 0.1
 			if n > 24: return 0.5
 			return (n - 2.75) * (0.5 / 21.25)
@@ -4445,7 +4967,17 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None,
 			xD = -cosAHD
 			AHD_rad = math.acos(max(-1.0, min(1.0, cosAHD)))
 			def ahd_arg(poly):
-				'''AHD polys live in either cosAHD- or AHD-rad space'''
+				'''
+				Acceptor-hydrogen-donor angle argument used by HBond polynomials
+				Arguments:
+				----------
+					D: np.ndarray - donor position
+					H: np.ndarray - hydrogen position
+					A: np.ndarray - acceptor position
+				Returns:
+				--------
+					float: cosine of the A-H-D angle
+				'''
 				if poly is None: return xD
 				return AHD_rad if poly.get('xmin', -1) > 0.5 else xD
 			Pr = hbond_poly_eval(poly_d, AH)
@@ -4761,6 +5293,18 @@ class Score():
 		weight = float(p['weight'])
 		radii = cache['xs_radii_arr']; xs = cache['xs_types']
 		def fn(ai, aj, rij, c):
+			'''
+			Per-pair kernel for the RepulsionPotential typed-pair sum
+			Arguments:
+			----------
+				ai: np.ndarray - per-pair first-atom indices
+				aj: np.ndarray - per-pair second-atom indices
+				rij: np.ndarray - per-pair distance
+				c: np.ndarray - per-pair connectivity weight
+			Returns:
+			--------
+				np.ndarray: per-pair repulsion contribution
+			'''
 			ri = radii[xs[ai]]; rj = radii[xs[aj]]
 			d = rij - (ri + rj + offset)
 			gate = ((xs[ai] >= 0) & (xs[aj] >= 0) & (rij < cutoff))
@@ -4812,6 +5356,17 @@ class Score():
 	def FaAtrPotential(self, pose, cache, ligand=None, **kw):
 		'''
 		Fa_atr - inter-residue LJ attractive split
+		Arguments:
+		----------
+			pose:   Pose or Molecule - receptor structure being scored
+			cache:  dict - cache returned by ScoreMatch()
+			ligand: Molecule or None - optional small-molecule ligand
+			**kw:   absorbed; per-term methods take no extra kwargs
+		Returns:
+		--------
+			dict: per-term contribution with keys 'inter_raw', 'intra_raw',
+			      'inter_weighted', 'intra_weighted' (plus 'raw' for full-atom
+			      terms that decompose intra vs inter)
 		'''
 		raw, _ = cache['ref15ljraw'](cache, same_res=False)
 		weight = float(self.Parameters['FaAtr']['weight'])
@@ -4821,6 +5376,17 @@ class Score():
 	def FaRepPotential(self, pose, cache, ligand=None, **kw):
 		'''
 		Fa_rep - inter-residue LJ repulsive split
+		Arguments:
+		----------
+			pose:   Pose or Molecule - receptor structure being scored
+			cache:  dict - cache returned by ScoreMatch()
+			ligand: Molecule or None - optional small-molecule ligand
+			**kw:   absorbed; per-term methods take no extra kwargs
+		Returns:
+		--------
+			dict: per-term contribution with keys 'inter_raw', 'intra_raw',
+			      'inter_weighted', 'intra_weighted' (plus 'raw' for full-atom
+			      terms that decompose intra vs inter)
 		'''
 		_, raw = cache['ref15ljraw'](cache, same_res=False)
 		weight = float(self.Parameters['FaRep']['weight'])
@@ -4830,6 +5396,17 @@ class Score():
 	def FaSolPotential(self, pose, cache, ligand=None, **kw):
 		'''
 		Fa_sol - inter-residue Lazaridis-Karplus solvation
+		Arguments:
+		----------
+			pose:   Pose or Molecule - receptor structure being scored
+			cache:  dict - cache returned by ScoreMatch()
+			ligand: Molecule or None - optional small-molecule ligand
+			**kw:   absorbed; per-term methods take no extra kwargs
+		Returns:
+		--------
+			dict: per-term contribution with keys 'inter_raw', 'intra_raw',
+			      'inter_weighted', 'intra_weighted' (plus 'raw' for full-atom
+			      terms that decompose intra vs inter)
 		'''
 		raw = cache['ref15solraw'](cache, same_res=False)
 		weight = float(self.Parameters['FaSol']['weight'])
@@ -4839,8 +5416,17 @@ class Score():
 	def FaIntraRepPotential(self, pose, cache, ligand=None, **kw):
 		'''
 		Fa_intra_rep - intra-residue LJ repulsive split with CP3
-		(1-2/1-3 excluded, 1-4 at 0.2, >=1-5 at 1.0). Uses the same
-		analytic per-pair LJ table as _ref15ljraw.
+		Arguments:
+		----------
+			pose:   Pose or Molecule - receptor structure being scored
+			cache:  dict - cache returned by ScoreMatch()
+			ligand: Molecule or None - optional small-molecule ligand
+			**kw:   absorbed; per-term methods take no extra kwargs
+		Returns:
+		--------
+			dict: per-term contribution with keys 'inter_raw', 'intra_raw',
+			      'inter_weighted', 'intra_weighted' (plus 'raw' for full-atom
+			      terms that decompose intra vs inter)
 		'''
 		pi, pj, r, w = cache['ref15pairs'](cache, same_res=True, cp='cp3')
 		weight = float(self.Parameters['FaIntraRep']['weight'])
@@ -4856,7 +5442,17 @@ class Score():
 	def FaIntraSolXover4Potential(self, pose, cache, ligand=None, **kw):
 		'''
 		Fa_intra_sol_xover4 - intra-residue LK solvation, only
-		pairs separated by >=4 bonds (the 'xover4' subset)
+		Arguments:
+		----------
+			pose:   Pose or Molecule - receptor structure being scored
+			cache:  dict - cache returned by ScoreMatch()
+			ligand: Molecule or None - optional small-molecule ligand
+			**kw:   absorbed; per-term methods take no extra kwargs
+		Returns:
+		--------
+			dict: per-term contribution with keys 'inter_raw', 'intra_raw',
+			      'inter_weighted', 'intra_weighted' (plus 'raw' for full-atom
+			      terms that decompose intra vs inter)
 		'''
 		raw = cache['ref15solraw'](cache, same_res=True)
 		weight = float(self.Parameters['FaIntraSolXover4']['weight'])
@@ -4866,9 +5462,17 @@ class Score():
 	def FaElecPotential(self, pose, cache, ligand=None, **kw):
 		'''
 		Fa_elec - Coulomb with sigmoidal distance-dependent
-		dielectric, shifted to zero at fa_elec_max_dis. With the
-		INCLUDE_INTRA_RES_PROTEIN flag both inter (CP4) and intra (CP3)
-		pairs contribute.
+		Arguments:
+		----------
+			pose:   Pose or Molecule - receptor structure being scored
+			cache:  dict - cache returned by ScoreMatch()
+			ligand: Molecule or None - optional small-molecule ligand
+			**kw:   absorbed; per-term methods take no extra kwargs
+		Returns:
+		--------
+			dict: per-term contribution with keys 'inter_raw', 'intra_raw',
+			      'inter_weighted', 'intra_weighted' (plus 'raw' for full-atom
+			      terms that decompose intra vs inter)
 		'''
 		weight = float(self.Parameters['FaElec']['weight'])
 		C = self.Parameters['Constants']
@@ -4880,12 +5484,28 @@ class Score():
 		d_max = float(C.get('fa_elec_max_dis', 5.5))
 		q = cache['charges']
 		def diel(d):
-			'''Hingerty 1985 sigmoidal dielectric'''
+			'''
+			Sigmoidal distance-dependent dielectric used by FaElec
+			Arguments:
+			----------
+				r: np.ndarray - per-pair distance
+			Returns:
+			--------
+				np.ndarray: per-pair dielectric value
+			'''
 			rS = d * S
 			return D - 0.5 * (D - D0) * (
 				2 + 2 * rS + rS * rS) * np.exp(-rS)
 		def ddiel_dr(d):
-			'''Derivative of sigmoidal dielectric'''
+			'''
+			Derivative of the sigmoidal dielectric with respect to r
+			Arguments:
+			----------
+				r: np.ndarray - per-pair distance
+			Returns:
+			--------
+				np.ndarray: per-pair d(dielectric)/dr
+			'''
 			rS = d * S
 			emr = np.exp(-rS)
 			term1 = 2.0 * S + 2.0 * d * S * S
@@ -4896,6 +5516,18 @@ class Score():
 		hi_start = d_max - 1.0
 		hi_end = d_max
 		def pair_sum(pi, pj, r, w):
+			'''
+			Per-pair Coulomb summation kernel for FaElec
+			Arguments:
+			----------
+				ai: np.ndarray - per-pair first-atom indices
+				aj: np.ndarray - per-pair second-atom indices
+				rij: np.ndarray - per-pair distance
+				c: np.ndarray - per-pair connectivity weight
+			Returns:
+			--------
+				np.ndarray: per-pair electrostatic contribution
+			'''
 			if len(pi) == 0: return 0.0
 			qq = q[pi] * q[pj]
 			eps_r = diel(r)
@@ -4944,14 +5576,17 @@ class Score():
 	def LkBallWtdPotential(self, pose, cache, ligand=None, **kw):
 		'''
 		Lk_ball_wtd - anisotropic LK solvation. For each polar
-		atom i with attached water sites and non-zero (w_iso, w_ball)
-		weights, every inter-residue heavy neighbor atom j contributes:
-		  w_iso[i] * lk_solv(i<-j) + w_ball[i] * lk_solv(i<-j) * frac_i
-		where frac_i = (1 - d2_delta/ramp_w2)^2 (clamped to [0,1]) and
-		d2_delta = min(d2(water, j)) - d2_low(j_type). Pair-list and
-		count-pair weighting reuse the cp4 inter-residue pair list
-		(non-adjacent residues already get w=1). Intra-residue is
-		skipped
+		Arguments:
+		----------
+			pose:   Pose or Molecule - receptor structure being scored
+			cache:  dict - cache returned by ScoreMatch()
+			ligand: Molecule or None - optional small-molecule ligand
+			**kw:   absorbed; per-term methods take no extra kwargs
+		Returns:
+		--------
+			dict: per-term contribution with keys 'inter_raw', 'intra_raw',
+			      'inter_weighted', 'intra_weighted' (plus 'raw' for full-atom
+			      terms that decompose intra vs inter)
 		'''
 		weight = float(self.Parameters['LkBallWtd']['weight'])
 		pi, pj, r, w = cache['ref15pairs'](cache, same_res=False, cp='cp4')
@@ -4978,15 +5613,13 @@ class Score():
 		lk_iso_j = lk_iso_j * w
 		def _frac(p_polar, p_other):
 			'''
-			Soft-max-of-waters fractional contribution f(d2_delta, ramp)
-			matching the LK-Ball fractional-contribution formula:
-			  weighted_d2_water_delta = -mfade * log(sum(exp(-(d2(W_i,A)-d2_low)/mfade)))
-			  frac = (1 - (weighted_d2/ramp)^2)^2   if 0 < weighted < ramp
-			       = 1                              if weighted <= 0
-			       = 0                              if weighted >= ramp
-			With multi_water_fade = 1.0
-			p_polar: array of atom indices (the polar side, has waters)
-			p_other: array of atom indices (the "atom2" being checked)
+			Fractional water-occupancy weight for one LkBallWtd water site
+			Arguments:
+			----------
+				rsq: float - squared distance from heavy atom to water site
+			Returns:
+			--------
+				float: occupancy fraction in [0, 1]
 			'''
 			out = np.zeros(len(p_polar), dtype=np.float64)
 			cnt = water_cnt[p_polar]
@@ -5038,11 +5671,17 @@ class Score():
 	def FaDunPotential(self, pose, cache, ligand=None, **kw):
 		'''
 		Fa_dun - Dunbrack rotamer probability.
-		Per residue: E = -ln(P_rot(phi,psi)) + entropy + chi_dev penalty
-		using natural cubic spline interpolation per (AA, rotwell).
-		Glycine, alanine and any residue without rotamer data contribute 0.
-		If kw['per_res'] is a dict, per-residue contributions are filled
-		into it keyed by residue index (debug hook).
+		Arguments:
+		----------
+			pose:   Pose or Molecule - receptor structure being scored
+			cache:  dict - cache returned by ScoreMatch()
+			ligand: Molecule or None - optional small-molecule ligand
+			**kw:   absorbed; per-term methods take no extra kwargs
+		Returns:
+		--------
+			dict: per-term contribution with keys 'inter_raw', 'intra_raw',
+			      'inter_weighted', 'intra_weighted' (plus 'raw' for full-atom
+			      terms that decompose intra vs inter)
 		'''
 		weight = float(self.Parameters['FaDun']['weight'])
 		per_res = kw.get('per_res')
@@ -5099,6 +5738,16 @@ class Score():
 				chi_now.append(v)
 			if bad: continue
 			def binchi(c):
+				'''
+				Place a chi angle into one of the rotamer wells defined by the FaDun table
+				Arguments:
+				----------
+					chi: float - chi angle in degrees
+					wells: list - per-row rotamer-well centre angles
+				Returns:
+				--------
+					int: index of the matching well
+				'''
 				c = ((c + 180.0) % 360.0) - 180.0
 				if 0.0 <= c <= 120.0: return 1
 				if abs(c) >= 120.0: return 2
@@ -5202,10 +5851,29 @@ class Score():
 				rotwell_now = tuple(binchi(chi_now[k])
 					for k in range(n_rot))
 			def cellrows(i_phi, i_psi):
+				'''
+				Return FaDun rotamer-table rows for the (phi_cell, psi_cell) bin
+				Arguments:
+				----------
+					phi_cell: int - phi grid index
+					psi_cell: int - psi grid index
+				Returns:
+				--------
+					list: rotamer rows associated with the bin
+				'''
 				bi = (i_phi % phi_n) * psi_n + (i_psi % psi_n)
 				if bi + 1 >= len(offs): return []
 				return tbl[offs[bi]:offs[bi+1]]
 			def rowwell(r2):
+				'''
+				Pull rotamer-well mu and sigma values for one row of the FaDun table
+				Arguments:
+				----------
+					row: dict - one FaDun row entry
+				Returns:
+				--------
+					tuple: (mu_arr, sigma_arr) over the row chi angles
+				'''
 				rw = []
 				for ci in range(n_rot):
 					mu = r2[2 + ci]
@@ -5216,14 +5884,16 @@ class Score():
 					rw.append(b)
 				return tuple(rw)
 			def cellmatch(rows_):
-				'''Match rotameric chis to rotwell. For pure rotameric,
-				return matched row's P/mus/sigs and full entropy. For
-				semi-rotameric, linearly interpolate the chi_last
-				density across bracketing rows within the matching
-				group; return effective P matched at the actual
-				chi_last and the rotameric-chi mus/sigs from the
-				highest-weight row. Entropy is sum over rotameric
-				rotwells of P_rotwell * log(P_rotwell).'''
+				'''
+				Match a chi vector to the closest rotamer well in a (phi, psi) cell
+				Arguments:
+				----------
+					cell_rows: list - rotamer rows for this cell
+					chi: np.ndarray - observed chi angles
+				Returns:
+				--------
+					tuple: (best_row, best_well_index, distance)
+				'''
 				if n_rot == n_chi:
 					ent = 0.0
 					for r2 in rows_:
@@ -5252,6 +5922,16 @@ class Score():
 				P_rotwell = sum(r2[1] for r2 in grp)
 				chi_last = chi_now[n_chi - 1]
 				def unwrap_to(c, ref):
+					'''
+					Add multiples of 360 to bring angle close to an anchor
+					Arguments:
+					----------
+						x: float - angle to unwrap (degrees)
+						anchor: float - reference angle
+					Returns:
+					--------
+						float: x +/- k*360 closest to anchor
+					'''
 					return ref + ((c - ref + 180.0) % 360.0 - 180.0)
 				pts = sorted(((unwrap_to(r2[2 + (n_chi-1)],
 					chi_last), r2) for r2 in grp),
@@ -5278,6 +5958,19 @@ class Score():
 					for ci in range(n_chi)]
 				return (P_eff, mus, sigs, ent)
 			def crom(p0, p1, p2, p3, t):
+				'''
+				1D Catmull-Rom interpolation over four equally spaced samples
+				Arguments:
+				----------
+					p0: float - sample at t = -1
+					p1: float - sample at t = 0
+					p2: float - sample at t = +1
+					p3: float - sample at t = +2
+					t: float - interpolation parameter in [0, 1]
+				Returns:
+				--------
+					float: interpolated value at t
+				'''
 				return 0.5 * ((2 * p1) + (-p0 + p2) * t
 					+ (2*p0 - 5*p1 + 4*p2 - p3) * t * t
 					+ (-p0 + 3*p1 - 3*p2 + p3) * t * t * t)
@@ -5326,6 +6019,15 @@ class Score():
 					per_res[int(ri)] = contrib
 				continue
 			def unwrap(mu_arr, ref):
+				'''
+				Unwrap a 1D periodic angle sequence so consecutive samples are within +/-180 degrees
+				Arguments:
+				----------
+					arr: np.ndarray - 1D array of angles in degrees
+				Returns:
+				--------
+					np.ndarray: unwrapped copy of arr
+				'''
 				out = []
 				for m in mu_arr:
 					d = ((m - ref + 180.0) % 360.0) - 180.0
@@ -5352,6 +6054,17 @@ class Score():
 						sig_grid[di][dj] = list(ref_sig) \
 							if ref_sig else [SIG_MIN]*n_chi
 			def crom2d(grid, tp, ts):
+				'''
+				2D bicubic Catmull-Rom interpolation over a 4x4 sample grid
+				Arguments:
+				----------
+					grid: np.ndarray - 4x4 sample values
+					tx: float - x-direction parameter in [0, 1]
+					ty: float - y-direction parameter in [0, 1]
+				Returns:
+				--------
+					float: interpolated value at (tx, ty)
+				'''
 				cols = []
 				for di in range(4):
 					row = grid[di]
@@ -5383,9 +6096,17 @@ class Score():
 	def RamaPreProTermPotential(self, pose, cache, ligand=None, **kw):
 		'''
 		Rama_prepro - phi/psi Ramachandran propensity.
-		Per residue r: E_r = -log P(phi_r, psi_r | aa_r) using the
-		regular tables, or the pre-proline tables if r+1 is Pro.
-		Uses periodic natural bicubic spline.
+		Arguments:
+		----------
+			pose:   Pose or Molecule - receptor structure being scored
+			cache:  dict - cache returned by ScoreMatch()
+			ligand: Molecule or None - optional small-molecule ligand
+			**kw:   absorbed; per-term methods take no extra kwargs
+		Returns:
+		--------
+			dict: per-term contribution with keys 'inter_raw', 'intra_raw',
+			      'inter_weighted', 'intra_weighted' (plus 'raw' for full-atom
+			      terms that decompose intra vs inter)
 		'''
 		weight = float(self.Parameters['RamaPreProTerm']['weight'])
 		rd = self.Parameters.get('Rama_data') or {}
@@ -5449,16 +6170,17 @@ class Score():
 	def PAaPpPotential(self, pose, cache, ligand=None, **kw):
 		'''
 		P_aa_pp - P(aa|phi,psi) propensity.
-		Formula (P_AA_pp_energy):
-		  E = -log( P_AA_pp[aa](phi, psi) / P_AA[aa] )
-		where P_AA_pp is the conditional probability table for the
-		AA at (phi, psi) on a 36x36 grid (10° spacing, offset by 5°
-		from the cell boundary), and P_AA is the overall per-AA
-		frequency. Bicubic spline interpolation is done on the
-		-log(P_AA_pp) energy grid; the P_AA term enters as a constant
-		log shift.
-		Skips terminal residues (p_aa_pp is not defined at termini.
-		HIS_D maps to HIS.
+		Arguments:
+		----------
+			pose:   Pose or Molecule - receptor structure being scored
+			cache:  dict - cache returned by ScoreMatch()
+			ligand: Molecule or None - optional small-molecule ligand
+			**kw:   absorbed; per-term methods take no extra kwargs
+		Returns:
+		--------
+			dict: per-term contribution with keys 'inter_raw', 'intra_raw',
+			      'inter_weighted', 'intra_weighted' (plus 'raw' for full-atom
+			      terms that decompose intra vs inter)
 		'''
 		weight = float(self.Parameters['PAaPp']['weight'])
 		paa = self.Parameters.get('P_AA') or {}
@@ -5514,17 +6236,17 @@ class Score():
 	def OmegaPotential(self, pose, cache, ligand=None, **kw):
 		'''
 		Omega - peptide-bond omega tether (OmegaTether term).
-		Two branches:
-		  - Cis-like (omega in [-90°, 90°]):
-		      score = 0.01 * angular_dist(omega, 0°)²
-		  - Trans (omega in [90°, 270°]):
-		      mu, sigma = bicubic-interpolated tables (phi, psi)-
-		        dependent; 4 tables: all (default), gly, pro, valile.
-		      offset = angular_dist(omega, mu)
-		      score = log(1/(6*sqrt(2π)))          # normalisation
-		            - log(1/(sigma*sqrt(2π)))      # entropy
-		            + offset² / (2*sigma²)         # log-prob
-		Upper-terminus residues contribute 0 (no defined omega).
+		Arguments:
+		----------
+			pose:   Pose or Molecule - receptor structure being scored
+			cache:  dict - cache returned by ScoreMatch()
+			ligand: Molecule or None - optional small-molecule ligand
+			**kw:   absorbed; per-term methods take no extra kwargs
+		Returns:
+		--------
+			dict: per-term contribution with keys 'inter_raw', 'intra_raw',
+			      'inter_weighted', 'intra_weighted' (plus 'raw' for full-atom
+			      terms that decompose intra vs inter)
 		'''
 		weight = float(self.Parameters['Omega']['weight'])
 		omega_tab = self.Parameters.get('Omega_tables') or {}
@@ -5605,19 +6327,17 @@ class Score():
 	def ProClosePotential(self, pose, cache, ligand=None, **kw):
 		'''
 		Pro_close - proline ring closure (ProClosureEnergy term).
-		Two contributions per PRO residue:
-		  1. Intra: dist²(N, NV) / sd² where NV is the virtual atom
-		     placed via the PRO internal-coord spec (bond=1.4754 from CD, angle=77.3°
-		     from CG, dihedral=0° from N) and sd² = (0.1)² = 0.01.
-		     For N-term PRO additionally: dist²(CA, CAV) / sd² where
-		     CAV is built from NV (bond=1.383018, angle=65.869°,
-		     dihedral=0° from CA).
-		  2. Pair (lower-res, PRO): chi4 dihedral(CD-N-C(prev)-O(prev))
-		     scored via a two-mode Gaussian:
-		       chi4 > pi/2: ((chi4 - trans_mean)/trans_sd)²
-		       chi4 <= pi/2: ((chi4 - cis_mean)/cis_sd)²
-		     with trans_mean=176.3°, trans_sd=6.0158°,
-		     cis_mean=-2.9105°, cis_sd=5.8239° (all in radians).
+		Arguments:
+		----------
+			pose:   Pose or Molecule - receptor structure being scored
+			cache:  dict - cache returned by ScoreMatch()
+			ligand: Molecule or None - optional small-molecule ligand
+			**kw:   absorbed; per-term methods take no extra kwargs
+		Returns:
+		--------
+			dict: per-term contribution with keys 'inter_raw', 'intra_raw',
+			      'inter_weighted', 'intra_weighted' (plus 'raw' for full-atom
+			      terms that decompose intra vs inter)
 		'''
 		weight = float(self.Parameters['ProClose']['weight'])
 		aas = pose.data.get('Amino Acids') or {}
@@ -5630,10 +6350,20 @@ class Score():
 		cis_mean = math.radians(-2.9105)
 		cis_sd = math.radians(5.8239)
 		def place(p, g, gg, bond, theta, phi):
-			'''Place an atom via the internal-coord spec: A_dir = -cos(theta)·e_PG
-			+ sin(theta)·(cos(phi)·perp + sin(phi)·normal) where e_PG is
-			unit(G-P), perp is the in-plane perpendicular projecting
-			toward GG, normal is e_PG × perp.'''
+			'''
+			Place a virtual atom at a fixed bond length, angle, and dihedral from three reference atoms
+			Arguments:
+			----------
+				a: np.ndarray - first reference atom position
+				b: np.ndarray - second reference atom position
+				c: np.ndarray - third reference atom position
+				r: float - bond length from c
+				theta: float - bond angle b-c-virt in degrees
+				phi: float - dihedral a-b-c-virt in degrees
+			Returns:
+			--------
+				np.ndarray: virtual-atom position
+			'''
 			e_pg = g - p
 			e_pg = e_pg / np.linalg.norm(e_pg)
 			e_ggg = gg - g
@@ -5646,8 +6376,18 @@ class Score():
 					+ math.sin(phi) * normal))
 			return p + bond * d
 		def dihedral(a, b, c, d):
-			'''Dihedral angle a-b-c-d in radians (standard
-			dihedral_radians convention).'''
+			'''
+			Dihedral angle of four points in degrees
+			Arguments:
+			----------
+				p1: np.ndarray - first point
+				p2: np.ndarray - second point
+				p3: np.ndarray - third point
+				p4: np.ndarray - fourth point
+			Returns:
+			--------
+				float: dihedral angle in degrees
+			'''
 			b1 = a - b; b2 = c - b; b3 = d - c
 			b2_norm = b2 / np.linalg.norm(b2)
 			v = b1 - np.dot(b1, b2_norm) * b2_norm
@@ -5711,12 +6451,17 @@ class Score():
 	def DslfFa13Potential(self, pose, cache, ligand=None, **kw):
 		'''
 		Dslf_fa13 - disulfide geometry potential, per the
-		full-atom disulfide geometry spec. For each
-		SG-SG bonded CYS pair, the score is:
-		  -shift_ + wt_len*score_d + wt_ang*(score_a1 + score_a2)
-		  + wt_dihSS*score_ss + wt_dihCS*(score_cs1 + score_cs2)
-		with distance / angle / dihedral terms using the
-		DisulfideParams13 parameter set.
+		Arguments:
+		----------
+			pose:   Pose or Molecule - receptor structure being scored
+			cache:  dict - cache returned by ScoreMatch()
+			ligand: Molecule or None - optional small-molecule ligand
+			**kw:   absorbed; per-term methods take no extra kwargs
+		Returns:
+		--------
+			dict: per-term contribution with keys 'inter_raw', 'intra_raw',
+			      'inter_weighted', 'intra_weighted' (plus 'raw' for full-atom
+			      terms that decompose intra vs inter)
 		'''
 		from math import erfc
 		weight = float(self.Parameters['DslfFa13']['weight'])
@@ -5735,7 +6480,18 @@ class Score():
 		dcs_logA2 = -16.9017; dcs_mu2 =  78.0303; dcs_kappa2 = 13.6370
 		dcs_logA3 = -7.0219;  dcs_mu3 = -172.5505; dcs_kappa3 = 2.9327
 		def dihedral(a, b, c, d):
-			'''Standard 4-atom dihedral'''
+			'''
+			Dihedral angle of four points in degrees
+			Arguments:
+			----------
+				p1: np.ndarray - first point
+				p2: np.ndarray - second point
+				p3: np.ndarray - third point
+				p4: np.ndarray - fourth point
+			Returns:
+			--------
+				float: dihedral angle in degrees
+			'''
 			b1 = a - b; b2 = c - b; b3 = d - c
 			n = np.linalg.norm(b2)
 			if n < 1e-9: return 0.0
@@ -5746,7 +6502,17 @@ class Score():
 			y = float(np.dot(np.cross(b2n, v), w))
 			return math.degrees(math.atan2(y, x))
 		def angle(a, b, c):
-			'''Angle a-b-c in degrees'''
+			'''
+			Three-point angle in degrees
+			Arguments:
+			----------
+				p1: np.ndarray - first point
+				p2: np.ndarray - vertex point
+				p3: np.ndarray - third point
+			Returns:
+			--------
+				float: angle p1-p2-p3 in degrees
+			'''
 			v1 = a - b; v2 = c - b
 			c_val = float(np.dot(v1, v2) / max(
 				np.linalg.norm(v1) * np.linalg.norm(v2), 1e-12))
@@ -5809,7 +6575,20 @@ class Score():
 			'inter_weighted': 0.0, 'intra_weighted': raw * weight,
 			'raw': raw}
 	def YhhPlanarityPotential(self, pose, cache, ligand=None, **kw):
-		'''yhh_planarity - Tyr hydroxyl planarity, 0.5*(cos(pi-2*chi3)+1)'''
+		'''
+		yhh_planarity - Tyr hydroxyl planarity, 0.5*(cos(pi-2*chi3)+1)
+		Arguments:
+		----------
+			pose:   Pose or Molecule - receptor structure being scored
+			cache:  dict - cache returned by ScoreMatch()
+			ligand: Molecule or None - optional small-molecule ligand
+			**kw:   absorbed; per-term methods take no extra kwargs
+		Returns:
+		--------
+			dict: per-term contribution with keys 'inter_raw', 'intra_raw',
+			      'inter_weighted', 'intra_weighted' (plus 'raw' for full-atom
+			      terms that decompose intra vs inter)
+		'''
 		weight = float(self.Parameters['YhhPlanarity']['weight'])
 		aas = pose.data.get('Amino Acids') or {}
 		atoms = pose.data['Atoms']
@@ -5836,6 +6615,17 @@ class Score():
 	def RefPotential(self, pose, cache, ligand=None, **kw):
 		'''
 		Ref - per-amino-acid unfolded reference energy
+		Arguments:
+		----------
+			pose:   Pose or Molecule - receptor structure being scored
+			cache:  dict - cache returned by ScoreMatch()
+			ligand: Molecule or None - optional small-molecule ligand
+			**kw:   absorbed; per-term methods take no extra kwargs
+		Returns:
+		--------
+			dict: per-term contribution with keys 'inter_raw', 'intra_raw',
+			      'inter_weighted', 'intra_weighted' (plus 'raw' for full-atom
+			      terms that decompose intra vs inter)
 		'''
 		weight = float(self.Parameters['Ref']['weight'])
 		refs = self.Parameters.get('METHOD_WEIGHTS_ref', [])
@@ -5856,9 +6646,17 @@ class Score():
 	def DefaultOffsetPotential(self, pose, cache, ligand=None, **kw):
 		'''
 		Default smoke-test calibration term. Returns per_residue x N
-		residues so the calibrated 52-mer benchmark lands on exactly
-		100.0 (closed-form, exactly linear in per_residue). Inactive
-		for any param set without 'DefaultOffset' key.
+		Arguments:
+		----------
+			pose:   Pose or Molecule - receptor structure being scored
+			cache:  dict - cache returned by ScoreMatch()
+			ligand: Molecule or None - optional small-molecule ligand
+			**kw:   absorbed; per-term methods take no extra kwargs
+		Returns:
+		--------
+			dict: per-term contribution with keys 'inter_raw', 'intra_raw',
+			      'inter_weighted', 'intra_weighted' (plus 'raw' for full-atom
+			      terms that decompose intra vs inter)
 		'''
 		weight = float(self.Parameters.get(
 			'DefaultOffset', {}).get('weight', 0.0))
@@ -5870,28 +6668,80 @@ class Score():
 			'inter_weighted': raw * weight, 'intra_weighted': 0.0,
 			'raw': raw}
 	def HBondSrBbPotential(self, pose, cache, ligand=None, **kw):
-		'''Hbond_sr_bb: short-range bb-bb hbonds'''
+		'''
+		Hbond_sr_bb: short-range bb-bb hbonds
+		Arguments:
+		----------
+			pose:   Pose or Molecule - receptor structure being scored
+			cache:  dict - cache returned by ScoreMatch()
+			ligand: Molecule or None - optional small-molecule ligand
+			**kw:   absorbed; per-term methods take no extra kwargs
+		Returns:
+		--------
+			dict: per-term contribution with keys 'inter_raw', 'intra_raw',
+			      'inter_weighted', 'intra_weighted' (plus 'raw' for full-atom
+			      terms that decompose intra vs inter)
+		'''
 		raw = cache['ref15hbond'](pose, cache)['SR_BB']
 		w = float(self.Parameters['HBondSrBb']['weight'])
 		return {'inter_raw': 0.0, 'intra_raw': raw,
 			'inter_weighted': 0.0, 'intra_weighted': raw * w,
 			'raw': raw}
 	def HBondLrBbPotential(self, pose, cache, ligand=None, **kw):
-		'''Hbond_lr_bb: long-range bb-bb hbonds'''
+		'''
+		Hbond_lr_bb: long-range bb-bb hbonds
+		Arguments:
+		----------
+			pose:   Pose or Molecule - receptor structure being scored
+			cache:  dict - cache returned by ScoreMatch()
+			ligand: Molecule or None - optional small-molecule ligand
+			**kw:   absorbed; per-term methods take no extra kwargs
+		Returns:
+		--------
+			dict: per-term contribution with keys 'inter_raw', 'intra_raw',
+			      'inter_weighted', 'intra_weighted' (plus 'raw' for full-atom
+			      terms that decompose intra vs inter)
+		'''
 		raw = cache['ref15hbond'](pose, cache)['LR_BB']
 		w = float(self.Parameters['HBondLrBb']['weight'])
 		return {'inter_raw': 0.0, 'intra_raw': raw,
 			'inter_weighted': 0.0, 'intra_weighted': raw * w,
 			'raw': raw}
 	def HBondBbScPotential(self, pose, cache, ligand=None, **kw):
-		'''Hbond_bb_sc: backbone-sidechain hbonds'''
+		'''
+		Hbond_bb_sc: backbone-sidechain hbonds
+		Arguments:
+		----------
+			pose:   Pose or Molecule - receptor structure being scored
+			cache:  dict - cache returned by ScoreMatch()
+			ligand: Molecule or None - optional small-molecule ligand
+			**kw:   absorbed; per-term methods take no extra kwargs
+		Returns:
+		--------
+			dict: per-term contribution with keys 'inter_raw', 'intra_raw',
+			      'inter_weighted', 'intra_weighted' (plus 'raw' for full-atom
+			      terms that decompose intra vs inter)
+		'''
 		raw = cache['ref15hbond'](pose, cache)['BB_SC']
 		w = float(self.Parameters['HBondBbSc']['weight'])
 		return {'inter_raw': 0.0, 'intra_raw': raw,
 			'inter_weighted': 0.0, 'intra_weighted': raw * w,
 			'raw': raw}
 	def HBondScPotential(self, pose, cache, ligand=None, **kw):
-		'''Hbond_sc: sidechain-sidechain hbonds'''
+		'''
+		Hbond_sc: sidechain-sidechain hbonds
+		Arguments:
+		----------
+			pose:   Pose or Molecule - receptor structure being scored
+			cache:  dict - cache returned by ScoreMatch()
+			ligand: Molecule or None - optional small-molecule ligand
+			**kw:   absorbed; per-term methods take no extra kwargs
+		Returns:
+		--------
+			dict: per-term contribution with keys 'inter_raw', 'intra_raw',
+			      'inter_weighted', 'intra_weighted' (plus 'raw' for full-atom
+			      terms that decompose intra vs inter)
+		'''
 		raw = cache['ref15hbond'](pose, cache)['SC']
 		w = float(self.Parameters['HBondSc']['weight'])
 		return {'inter_raw': 0.0, 'intra_raw': raw,
