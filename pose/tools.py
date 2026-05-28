@@ -2382,6 +2382,7 @@ def Port(name='openff'):
 	key     = str(name).upper()
 	here    = os.path.dirname(os.path.abspath(__file__))
 	db_path = os.path.join(here, 'database.json')
+	import gzip
 	def download(url):
 		'''
 		Fetch the text of a pinned GitHub raw URL
@@ -2597,11 +2598,9 @@ def Port(name='openff'):
 				'bonds': [[a, b] for a, b in bonds]}
 		return templates
 	with open(db_path) as f: db = json.load(f)
-	ep = db.setdefault('Energy Parameters', {})
-	# ============================================================
-	# OpenFF Sage 2.3.0
-	# ============================================================
-	if key == 'OPENFF':
+	def openff():
+		'''Port OpenFF Sage 2.3.0 into db['Energy Parameters']'''
+		ep = db.setdefault('Energy Parameters', {})
 		commit = 'edd7724103a558328c358a9e35462334c4a45b6f'
 		url = ('https://raw.githubusercontent.com/openforcefield/'
 			'openff-forcefields/' + commit
@@ -2670,14 +2669,10 @@ def Port(name='openff'):
 		}
 		if nagl is not None: block['AM1BCC'] = nagl
 		ep.pop('OpenFF', None)
-		db_key  = 'OpenFF'
-		suffix  = '.sdf'
-		targets = {'CFF': -526.798, 'AMX': 288.644, 'SUR': 617.480,
-			'GLU': 240.001, 'PEN': 165.780}
-	# ============================================================
-	# AMBER ff19SB  (proteins + DNA OL15 + RNA OL3)
-	# ============================================================
-	elif key == 'FF19SB':
+		ep['OpenFF'] = block
+	def ff19sb():
+		'''Port AMBER ff19SB into db['Energy Parameters']'''
+		ep = db.setdefault('Energy Parameters', {})
 		commit = 'f7fa0c27c1f8d943c339d67b3bf22f026d0bd8b5'
 		base = ('https://raw.githubusercontent.com/openmm/openmm/'
 			+ commit + '/wrappers/python/openmm/app/data/')
@@ -2806,15 +2801,10 @@ def Port(name='openff'):
 			],
 		}
 		ep.pop('AMBER ff19SB', None)
-		db_key  = 'ff19SB'
-		suffix  = '.pdb'
-		targets = {'1YN3': -3749.609, '1UBQ': -7251.245,
-			'1L2Y': -1680.192, '1CRN': -4169.046, '2GB1': -103.132,
-			'1BNA': 5927.131, '1RNA': 19196.876}
-	# ============================================================
-	# CHARMM36  (proteins)
-	# ============================================================
-	elif key == 'CHARMM36':
+		ep['ff19SB'] = block
+	def charmm36():
+		'''Port CHARMM36 into db['Energy Parameters']'''
+		ep = db.setdefault('Energy Parameters', {})
 		commit = 'f7fa0c27c1f8d943c339d67b3bf22f026d0bd8b5'
 		xml_url = ('https://raw.githubusercontent.com/openmm/openmm/'
 			+ commit + '/wrappers/python/openmm/app/data/charmm36.xml')
@@ -2940,20 +2930,1310 @@ def Port(name='openff'):
 				['CMAPPotential',            {'alg': 'openmm'}],
 			],
 		}
-		db_key  = 'CHARMM36'
-		suffix  = '.pdb'
-		targets = {'1YN3': 4104.856, '1UBQ': -2687.538,
-			'1L2Y': 140.922, '1CRN': -401.309, '2GB1': 4225.107}
-	else:
+		ep['CHARMM36'] = block
+	def vina():
+		'''Port AutoDock Vina into db['Score Parameters']'''
+		sp = db.setdefault('Score Parameters', {})
+		KCAL_TO_KJ = 4.184
+		BASE = ('https://raw.githubusercontent.com/'
+			'ccsb-scripps/AutoDock-Vina/develop/src/lib/')
+		FILES = ('potentials.h', 'vina.h',
+			'scoring_function.h', 'atom_constants.h')
+		def fetch(name):
+			'''
+			Download one upstream source file as a UTF-8 string
+			Arguments:
+			----------
+				name: str - file name under src/lib/ (e.g. 'vina.h')
+			Returns:
+			--------
+				str: the file contents
+			'''
+			url = BASE + name
+			with urllib.request.urlopen(url, timeout=120) as r:
+				return r.read().decode('utf-8')
+		src = {n: fetch(n) for n in FILES}
+		# 1. Default weights from vina.h set_vina_weights signature.
+		m = re.search(
+			r'set_vina_weights\s*\(\s*'
+			r'double\s+weight_gauss1\s*=\s*(-?[\d.]+)\s*,\s*'
+			r'double\s+weight_gauss2\s*=\s*(-?[\d.]+)\s*,\s*'
+			r'double\s+weight_repulsion\s*=\s*(-?[\d.]+)\s*,\s*'
+			r'double\s+weight_hydrophobic\s*=\s*(-?[\d.]+)\s*,\s*'
+			r'double\s+weight_hydrogen\s*=\s*(-?[\d.]+)\s*,\s*'
+			r'double\s+weight_glue\s*=\s*(-?[\d.]+)\s*,\s*'
+			r'double\s+weight_rot\s*=\s*(-?[\d.]+)\s*\)',
+			src['vina.h'])
+		if m is None:
+			raise Exception('Vina: could not parse weights from vina.h')
+		w_gauss1, w_gauss2, w_rep, w_hyd = (float(m.group(i))
+			for i in (1, 2, 3, 4))
+		w_hbond, w_glue, w_rot = (float(m.group(i)) for i in (5, 6, 7))
+		# 2. Term constructor args from scoring_function.h.
+		#    The Vina branch is the first one in ScoringFunction's switch.
+		sf = src['scoring_function.h']
+		def first(pat):
+			'''
+			Return the float-group tuple of the first regex match
+			Arguments:
+				pat: str - a regex with capture groups
+			Returns:
+				tuple of floats
+			'''
+			mm = re.search(pat, sf)
+			if mm is None:
+				raise Exception('Vina: missing pattern '+pat)
+			return tuple(float(g) for g in mm.groups())
+		# vina_gaussian(offset, width, cutoff) -- two of them in order
+		gpat = r'new\s+vina_gaussian\(\s*(-?[\d.]+)\s*,\s*(-?[\d.]+)\s*,\s*(-?[\d.]+)\s*\)'
+		gs = re.findall(gpat, sf)
+		if len(gs) < 2:
+			raise Exception('Vina: did not find two vina_gaussian entries')
+		g1_off, g1_w, g1_cut = (float(x) for x in gs[0])
+		g2_off, g2_w, g2_cut = (float(x) for x in gs[1])
+		rep_off, rep_cut = first(
+			r'new\s+vina_repulsion\(\s*(-?[\d.]+)\s*,\s*(-?[\d.]+)\s*\)')
+		hyd_good, hyd_bad, hyd_cut = first(
+			r'new\s+vina_hydrophobic\(\s*(-?[\d.]+)\s*,\s*(-?[\d.]+)\s*,\s*(-?[\d.]+)\s*\)')
+		hb_good, hb_bad, hb_cut = first(
+			r'new\s+vina_non_dir_h_bond\(\s*(-?[\d.]+)\s*,\s*(-?[\d.]+)\s*,\s*(-?[\d.]+)\s*\)')
+		# 3. XS atom-type table + predicates from atom_constants.h.
+		ac = src['atom_constants.h']
+		# XS_TYPE_<NAME> = <index>; collect in declaration order
+		xs_decl = re.findall(
+			r'^\s*const\s+sz\s+XS_TYPE_([A-Za-z0-9_]+)\s*=\s*(\d+)\s*;',
+			ac, re.M)
+		if not xs_decl:
+			raise Exception('Vina: no XS_TYPE_* found in atom_constants.h')
+		xs_idx_to_name = {}
+		for nm, i in xs_decl:
+			if nm in ('SIZE',): continue
+			xs_idx_to_name[int(i)] = nm
+		# xs_vdw_radii[] = { v1, // name1\n v2, // name2 ... };
+		rad_block = re.search(
+			r'const\s+fl\s+xs_vdw_radii\s*\[\s*\]\s*=\s*\{([^}]*)\}\s*;',
+			ac, re.S)
+		if rad_block is None:
+			raise Exception('Vina: xs_vdw_radii block not found')
+		rad_vals = []
+		for line in rad_block.group(1).split('\n'):
+			mm = re.match(r'\s*(-?[\d.]+)\s*,', line)
+			if mm: rad_vals.append(float(mm.group(1)))
+		# predicates: extract the XS_TYPE_* names listed in each function body
+		def grab(name):
+			'''
+			Extract the XS type names mentioned in one xs_is_* predicate
+			Arguments:
+				name: str - 'xs_is_hydrophobic', 'xs_is_acceptor', or
+					'xs_is_donor'
+			Returns:
+				set of str: XS type names (without the XS_TYPE_ prefix)
+			'''
+			body = re.search(
+				r'inline\s+bool\s+' + re.escape(name) + r'\s*\([^)]*\)\s*\{([^}]*)\}',
+				ac, re.S)
+			if body is None:
+				raise Exception('Vina: predicate '+name+' not found')
+			return set(re.findall(r'XS_TYPE_([A-Za-z0-9_]+)', body.group(1)))
+		hphob = grab('xs_is_hydrophobic')
+		accept = grab('xs_is_acceptor')
+		donor = grab('xs_is_donor')
+		# 4. Conf-independent num_tors_div weight (the user-facing weight_rot).
+		#    Verified: stored raw weight = 5*weight_rot/0.1 - 1, and the
+		#    eval applies weight = 0.1*(raw+1), giving effective denominator
+		#    1 + weight_rot*Nrot.
+		# 5. Assemble the parameter block. Numeric values in kJ/mol-equiv:
+		#    weights are multiplied by 4.184 from the published kcal-scale
+		#    so internal storage is uniform with the rest of database.json.
+		#    A 'scale' constant (1/4.184) is applied at Score.__call__ exit
+		#    to return native kcal/mol.
+		xs_types = {}
+		for i in sorted(xs_idx_to_name):
+			nm = xs_idx_to_name[i]
+			if i >= len(rad_vals): continue
+			xs_types[nm] = {
+				'radius':      rad_vals[i],
+				'hydrophobic': nm in hphob,
+				'acceptor':    nm in accept,
+				'donor':       nm in donor}
+		block = {
+			'Constants': {
+				'scale':  1.0 / KCAL_TO_KJ,
+				'cutoff': float(g1_cut),
+				'nrot_w': w_rot,
+				'glue_w': w_glue * KCAL_TO_KJ},
+			'XS_atom_types': xs_types,
+			'Gauss1': {
+				'offset': g1_off, 'width': g1_w, 'cutoff': g1_cut,
+				'weight': w_gauss1 * KCAL_TO_KJ},
+			'Gauss2': {
+				'offset': g2_off, 'width': g2_w, 'cutoff': g2_cut,
+				'weight': w_gauss2 * KCAL_TO_KJ},
+			'Repulsion': {
+				'offset': rep_off, 'cutoff': rep_cut,
+				'weight': w_rep * KCAL_TO_KJ},
+			'Hydrophobic': {
+				'good': hyd_good, 'bad': hyd_bad, 'cutoff': hyd_cut,
+				'weight': w_hyd * KCAL_TO_KJ},
+			'HBond': {
+				'good': hb_good, 'bad': hb_bad, 'cutoff': hb_cut,
+				'weight': w_hbond * KCAL_TO_KJ},
+			'Terms': [
+				['Gauss1Potential',      {}],
+				['Gauss2Potential',      {}],
+				['RepulsionPotential',   {}],
+				['HydrophobicPotential', {}],
+				['HBondPotential',       {}],
+				['TorsionalPenalty',     {}]]}
+		sp['AutoDock Vina'] = block
+	def ref15():
+		'''Port Rosetta REF15 into db['Score Parameters'] + top-level Rotamer Library / FaDunNrchiDensities / EtablePairParams'''
+		sp = db.setdefault('Score Parameters', {})
+		ETABLE_ATOM_TYPES = [
+			'CNH2', 'COO', 'CH0', 'CH1', 'CH2', 'CH3', 'aroC', 'Ntrp',
+			'Nhis', 'NtrR', 'NH2O', 'Nlys', 'Narg', 'Npro', 'OH', 'ONH2',
+			'OOC', 'Oaro', 'S', 'SH1', 'Nbb', 'CAbb', 'CObb', 'OCbb',
+			'Hpol', 'Hapo', 'Haro', 'HNbb', 'HOH']
+
+		def _parsehbonddata(raw):
+			'''
+			Parse the bundled Rosetta hbond CSVs into a compact JSON-friendly
+			dict for use by Score('REF15')'s HBond* term methods
+			Arguments:
+			----------
+				raw: dict of {filename: str contents}
+			Returns:
+			--------
+				dict: keys 'polynomials', 'fade_intervals', 'eval_table',
+					'donor_strengths', 'acceptor_strengths', 'acc_hybridization',
+					'seq_sep_names', 'weight_type_names', 'donor_chem_names',
+					'acceptor_chem_names'
+			'''
+			def csvrows(text):
+				'''Iterate CSV rows ignoring trailing blank fields'''
+				for line in text.splitlines():
+					s = line.rstrip()
+					if not s or s.startswith('#'): continue
+					yield s.split(',')
+			# polynomials
+			polys = {}
+			for r in csvrows(raw.get('HBPoly1D.csv', '')):
+				if len(r) < 11: continue
+				try:
+					pid = int(r[0])
+				except ValueError: continue
+				name = r[1]
+				dim = r[3]
+				try:
+					xmin = float(r[4]); xmax = float(r[5])
+					min_v = float(r[6]); max_v = float(r[7])
+					root1 = float(r[8])
+					# root2 column is sometimes empty (poly_AHD_1[h..k], etc.)
+					root2 = float(r[9]) if r[9] else 0.0
+					degree = int(r[10])
+				except ValueError: continue
+				coeffs = []
+				for k in range(11, 11 + degree):
+					if k >= len(r) or r[k] == '': break
+					try: coeffs.append(float(r[k]))
+					except ValueError: break
+				polys[name] = {'id': pid, 'dim': dim, 'xmin': xmin,
+					'xmax': xmax, 'min_val': min_v, 'max_val': max_v,
+					'root1': root1, 'root2': root2, 'degree': degree,
+					'coeffs': coeffs}
+			# fade intervals
+			fades = {}
+			for r in csvrows(raw.get('HBFadeIntervals.csv', '')):
+				if len(r) < 7: continue
+				try:
+					fid = int(r[0])
+					min1 = float(r[3]); min2 = float(r[4])
+					max1 = float(r[5]); max2 = float(r[6])
+				except ValueError: continue
+				fades[r[1]] = {'id': fid, 'kind': r[2], 'min1': min1,
+					'min2': min2, 'max1': max1, 'max2': max2}
+			# evaluation table
+			eval_table = []
+			for r in csvrows(raw.get('HBEval.csv', '')):
+				if len(r) < 16: continue
+				# Skip the trailing $... id and surplus columns
+				entry = {
+					'don':           r[0],
+					'acc':           r[1],
+					'sep':           r[2],
+					'fade_AHdist':   r[3],
+					'fade_cosBAH_short': r[4],
+					'fade_cosBAH_long':  r[5],
+					'fade_cosBAH_chi':   r[6],
+					'fade_cosAHD_short': r[7],
+					'fade_cosAHD_long':  r[8],
+					'poly_AHdist':       r[9],
+					'poly_cosBAH_short': r[10],
+					'poly_cosBAH_long':  r[11],
+					'poly_cosBAH_chi':   r[12],
+					'poly_cosAHD_short': r[13],
+					'poly_cosAHD_long':  r[14],
+					'weight':            r[15]}
+				eval_table.append(entry)
+			# strengths
+			don_str = {}
+			for r in csvrows(raw.get('DonStrength.csv', '')):
+				if len(r) < 2: continue
+				try: don_str[r[0]] = float(r[1])
+				except ValueError: pass
+			acc_str = {}
+			for r in csvrows(raw.get('AccStrength.csv', '')):
+				if len(r) < 2: continue
+				try: acc_str[r[0]] = float(r[1])
+				except ValueError: pass
+			# acceptor hybridization
+			acc_hyb = {}
+			for r in csvrows(raw.get('HBAccHybridization.csv', '')):
+				if len(r) < 2: continue
+				acc_hyb[r[0]] = r[1]
+			# Names tables (id -> name lookup for parsing other tables)
+			def nametable(text, name_col=1):
+				out = []
+				for r in csvrows(text):
+					if not r: continue
+					out.append(r[name_col] if len(r) > name_col else '')
+				return out
+			return {
+				'polynomials':       polys,
+				'fade_intervals':    fades,
+				'eval_table':        eval_table,
+				'donor_strengths':   don_str,
+				'acceptor_strengths': acc_str,
+				'acc_hybridization': acc_hyb}
+
+		def _parseparams(txt):
+			'''
+			Parse one Rosetta .params residue-topology file
+			Arguments:
+			----------
+				txt: str - the file contents
+			Returns:
+			--------
+				dict: {'atoms': {pdb_name: {'type':..., 'mm_type':...,
+					'charge':...}}, 'bonds': [(a,b,bond_order_or_1), ...],
+					'name': str, 'aa': str, 'aliases': {pdb_alias: pdb_name}}
+			'''
+			atoms = {}
+			bonds = []
+			aliases = {}
+			name = None; aa = None
+			for line in txt.splitlines():
+				line = line.split('#', 1)[0].rstrip()
+				if not line.strip(): continue
+				toks = line.split()
+				if toks[0] == 'NAME':
+					name = toks[1] if len(toks) > 1 else None
+				elif toks[0] == 'AA':
+					aa = toks[1] if len(toks) > 1 else None
+				elif toks[0] == 'ATOM' and len(toks) >= 5:
+					pdb_nm = toks[1]
+					ros_type = toks[2]
+					mm_type = toks[3]
+					try: charge = float(toks[4])
+					except ValueError: charge = 0.0
+					atoms[pdb_nm] = {
+						'type': ros_type, 'mm_type': mm_type,
+						'charge': charge}
+				elif toks[0] == 'ATOM_ALIAS' and len(toks) >= 3:
+					tgt = toks[1]
+					for alias in toks[2:]:
+						aliases[alias] = tgt
+				elif toks[0] in ('BOND', 'BOND_TYPE') and len(toks) >= 3:
+					a, b = toks[1], toks[2]
+					bo = 1
+					if toks[0] == 'BOND_TYPE' and len(toks) >= 4:
+						try: bo = int(toks[3])
+						except ValueError: bo = 1
+					bonds.append([a, b, bo])
+				elif toks[0] == 'CUT_BOND' and len(toks) >= 3:
+					bonds.append([toks[1], toks[2], 1])
+			return {'name': name, 'aa': aa, 'atoms': atoms,
+				'bonds': bonds, 'aliases': aliases}
+
+		def _splineddy2(x0, y0, dy0, x1, y1, dy1):
+			'''
+			Second derivatives at the two endpoints of a natural cubic spline
+			that passes through (x0, y0) and (x1, y1) with prescribed first
+			derivatives dy0 at x0 and dy1 at x1. Derived from Rosetta's
+			`spline_second_derivative` (numeric/interpolation/spline/
+			spline_functions.cc) specialized to n=2 segments.
+			Arguments:
+			----------
+				x0, y0, dy0: lower endpoint position, value, first deriv
+				x1, y1, dy1: upper endpoint position, value, first deriv
+			Returns:
+			--------
+				tuple (y2_lo, y2_hi): second derivatives at the two endpoints
+			'''
+			h = x1 - x0
+			dy = (y1 - y0) / h
+			u1 = (3.0 / h) * (dy - dy0)
+			un = (3.0 / h) * (dy1 - dy)
+			y2_hi = (un - 0.5 * u1) / 0.75
+			y2_lo = -0.5 * y2_hi + u1
+			return (y2_lo, y2_hi)
+
+		def _cubicfromspline(xlo, xhi, ylo, yhi, y2lo, y2hi):
+			'''
+			Convert spline (yvals, second-derivs) to cubic polynomial c0..c3
+			matching Rosetta's `cubic_polynomial_from_spline`.
+			Arguments:
+			----------
+				xlo, xhi: x-range
+				ylo, yhi: function values
+				y2lo, y2hi: second derivatives
+			Returns:
+			--------
+				list [c0, c1, c2, c3] of the cubic polynomial evaluated as
+				c3*x^3 + c2*x^2 + c1*x + c0
+			'''
+			a, b = xlo, xhi
+			c, d = yhi, ylo
+			e, f = y2hi, y2lo
+			c0 = (((b*b*b*f - a*a*a*e)/(b-a) + (a*e - b*f)*(b-a)) / 6
+				+ (b*d - a*c) / (b-a))
+			c1 = ((3*a*a*e/(b-a) - e*(b-a) + f*(b-a) - 3*b*b*f/(b-a)) / 6
+				+ (c - d) / (b-a))
+			c2 = (3*b*f - 3*a*e) / (6*(b-a))
+			c3 = (e - f) / (6*(b-a))
+			return [c0, c1, c2, c3]
+
+		def _etableparams(atom_types):
+			'''
+			Pure-Python re-implementation of Rosetta's EtableParamsOnePair
+			initialization (source/src/core/scoring/etable/Etable.cc). For each
+			pair of atom types in ETABLE_ATOM_TYPES, computes the 30 analytic
+			parameters used by FaAtr / FaRep / FaSol / LkBallWtd / FaIntraRep
+			in Pose's energy.py.
+
+			Algorithm:
+			1) Build the pair sigma matrix with hbond / water-radius overrides.
+			2) precalc_etable_coefficients: closed-form per-pair LJ + LK coeffs.
+			3) For each pair, tabulate ljatr/ljrep/fasol1/fasol2/derivatives on
+			   721 distance bins (bins_per_A2=20, max_dis=6.0, dis(i) =
+			   sqrt((i-1)/20)).
+			4) modify_pot_one_pair: OCbb-OCbb extra rep, carbon-carbon
+			   close-flat fasol.
+			5) zero_hydrogen_and_water_ljatr: zero attr+fasol for H pairs.
+			6) smooth_etables_one_pair: spline-smooth ljatr at max_dis, fasol
+			   close and far regions; extract Hermite cubic c0..c3.
+
+			Arguments:
+			----------
+				atom_types: dict from ref15.py atom_properties parsing - per
+				atom-name dict with LJ_RADIUS, LJ_WDEPTH, LK_DGFREE, LK_LAMBDA,
+				LK_VOLUME plus donor/acceptor/polar_h/h2o flags
+			Returns:
+			--------
+				dict matching `database.json['EtablePairParams']`:
+				{atom_types: [list of 29 names], n_types: 29, pairs: [841 dicts]}
+			'''
+			import math as _math
+			# Rosetta constants (REF15 defaults from EtableOptions.cc)
+			BINS_PER_A2     = 20
+			MAX_DIS         = 6.0
+			MAX_DIS2        = MAX_DIS * MAX_DIS
+			W_RADIUS        = 1.0
+			LJ_SWITCH_D2S   = 0.6
+			LJ_HBOND_DIS    = 3.0  # hardcoded in Etable.cc
+			LJ_HBOND_OH_DIS = 2.6
+			LJ_HBOND_HDIS   = 1.75
+			LK_MIN_DIS2S    = 0.89
+			LJ_SLOPE_ICEPT  = 0.0
+			NTYPES          = len(ETABLE_ATOM_TYPES)
+			ETABLE_DISBINS  = int(MAX_DIS2 * BINS_PER_A2) + 1   # 721
+			# Per-type LJ/LK arrays (atom-type-name to scalar)
+			LJ_R = [atom_types[n]['LJ_RADIUS'] for n in ETABLE_ATOM_TYPES]
+			LJ_W = [atom_types[n]['LJ_WDEPTH'] for n in ETABLE_ATOM_TYPES]
+			LK_DG = [atom_types[n]['LK_DGFREE'] for n in ETABLE_ATOM_TYPES]
+			LK_L  = [atom_types[n]['LK_LAMBDA'] for n in ETABLE_ATOM_TYPES]
+			LK_V  = [atom_types[n]['LK_VOLUME'] for n in ETABLE_ATOM_TYPES]
+			IS_ACC  = [atom_types[n]['acceptor']    for n in ETABLE_ATOM_TYPES]
+			IS_DON  = [atom_types[n]['donor']       for n in ETABLE_ATOM_TYPES]
+			IS_POLH = [atom_types[n]['polar_h']     for n in ETABLE_ATOM_TYPES]
+			IS_H2O  = [n == 'HOH' for n in ETABLE_ATOM_TYPES]
+			# Hydrogens (used to zero out attractive LJ and fasol)
+			HYDRO = set(n for n in ETABLE_ATOM_TYPES
+				if atom_types[n].get('element') == 'H')
+			# Carbon types for the close-flat fasol linearization. Rosetta
+			# uses ONLY (CH1, CH2, CH3, aroC) - not all carbon atom types
+			# (Etable.cc:initialize_carbontypes_to_linearize_fasol).
+			CARBON = {'CH1', 'CH2', 'CH3', 'aroC'}
+			# OCbb pair-special-case
+			OCBB_IDX = ETABLE_ATOM_TYPES.index('OCbb')
+			# Derived switch constants
+			LJ_S2D = 1.0 / LJ_SWITCH_D2S
+			LJ_V2W = LJ_S2D**12 - 2.0 * LJ_S2D**6
+			LJ_S2W = -12.0 * (LJ_S2D**13 - LJ_S2D**7)
+			# Distance bin lookup (dis array)
+			DIS = [_math.sqrt((i) / float(BINS_PER_A2))
+				for i in range(ETABLE_DISBINS)]
+			# Build sigma matrix
+			sigma = [[0.0]*NTYPES for _ in range(NTYPES)]
+			for i in range(NTYPES):
+				ni = ETABLE_ATOM_TYPES[i]
+				for j in range(NTYPES):
+					nj = ETABLE_ATOM_TYPES[j]
+					s = W_RADIUS * (LJ_R[i] + LJ_R[j])
+					if s < 1e-9: s = 1e-9
+					# hbond radius override
+					if ((IS_ACC[i] and IS_DON[j]) or
+							(IS_DON[i] and IS_ACC[j])):
+						oh_donor = (
+							(IS_DON[j] and nj[:2] in ('OH', 'OW')) or
+							(IS_DON[i] and ni[:2] in ('OH', 'OW')) or
+							(IS_DON[j] and nj == 'Oet3') or
+							(IS_DON[i] and ni == 'Oet3'))
+						s = LJ_HBOND_OH_DIS if oh_donor else LJ_HBOND_DIS
+					elif ((IS_ACC[i] and IS_POLH[j]) or
+							(IS_POLH[i] and IS_ACC[j])):
+						s = LJ_HBOND_HDIS
+					# water radius override (lj_water_dis=3.0, lj_water_hdis=1.95)
+					if ((IS_ACC[i] or IS_DON[i]) and IS_H2O[j]) or \
+							((IS_ACC[j] or IS_DON[j]) and IS_H2O[i]):
+						s = 3.0
+					elif (IS_POLH[i] and IS_H2O[j]) or \
+							(IS_POLH[j] and IS_H2O[i]):
+						s = 1.95
+					sigma[i][j] = s
+			# precalc_etable_coefficients: closed-form fields
+			inv_neg2_pi_sqrt_pi = -0.089793561062583294
+			lk_inv_lambda2 = [(1.0 / LK_L[i])**2 for i in range(NTYPES)]
+			lk_coeff_tmp = [inv_neg2_pi_sqrt_pi * LK_DG[i] / LK_L[i]
+				for i in range(NTYPES)]
+			lj_r6  = [[0.0]*NTYPES for _ in range(NTYPES)]
+			lj_r12 = [[0.0]*NTYPES for _ in range(NTYPES)]
+			lj_si  = [[0.0]*NTYPES for _ in range(NTYPES)]
+			lj_ss  = [[0.0]*NTYPES for _ in range(NTYPES)]
+			lk_coeff = [[0.0]*NTYPES for _ in range(NTYPES)]
+			lk_min_dis2sigma_value = [[0.0]*NTYPES for _ in range(NTYPES)]
+			for i in range(NTYPES):
+				for j in range(NTYPES):
+					s = sigma[i][j]
+					s6 = s**6
+					s12 = s6 * s6
+					wd = _math.sqrt(LJ_W[i] * LJ_W[j])
+					lj_r6[i][j]  = -2.0 * wd * s6
+					lj_r12[i][j] = wd * s12
+					# Rosetta default lj_use_lj_deriv_slope = true (Etable.cc:100)
+					lj_ss[i][j] = (wd / s) * LJ_S2W
+					lj_si[i][j] = wd * LJ_V2W - lj_ss[i][j] * s * LJ_SWITCH_D2S
+					lk_coeff[i][j] = lk_coeff_tmp[i] * LK_V[j]
+					# lk_min_dis2sigma_value at the switchover
+					thresh_dis = LK_MIN_DIS2S * s
+					inv_t2 = 1.0 / (thresh_dis * thresh_dis)
+					dis_rad = thresh_dis - LJ_R[i]
+					x_thresh = (dis_rad * dis_rad) * lk_inv_lambda2[i]
+					lk_min_dis2sigma_value[i][j] = (
+						_math.exp(-x_thresh) * lk_coeff[i][j] * inv_t2)
+			# Per-pair LJ tabulation + smoothing + cubic fits
+			pairs = [None] * (NTYPES * NTYPES)
+			for is_ in range(NTYPES):
+				ni = ETABLE_ATOM_TYPES[is_]
+				for io_ in range(NTYPES):
+					nj = ETABLE_ATOM_TYPES[io_]
+					# Canonical at1 = lower index of (is_, io_); poly1 refers
+					# to at1's desolvation regardless of arg order.
+					# But pyrosetta's `analytic_params_for_pair` already
+					# canonicalizes; we mirror that by computing (i, j)
+					# where i = min, j = max, and then assigning self-vs-other
+					# based on the (is_, io_) caller pair.
+					i = min(is_, io_); j = max(is_, io_)
+					s_ij = sigma[i][j]
+					self_is_at1 = (is_ <= io_)
+					pair = _etableonepair(
+						i, j, is_, io_, ni, nj, self_is_at1,
+						s_ij, LJ_R, LJ_W, LK_DG, LK_L, LK_V,
+						IS_ACC, IS_DON, IS_POLH, IS_H2O,
+						HYDRO, CARBON, OCBB_IDX,
+						lj_r6, lj_r12, lj_si, lj_ss, lk_coeff,
+						lk_inv_lambda2, lk_min_dis2sigma_value,
+						DIS, ETABLE_DISBINS, BINS_PER_A2, MAX_DIS,
+						MAX_DIS2, LJ_SWITCH_D2S, LK_MIN_DIS2S)
+					pairs[is_ * NTYPES + io_] = pair
+			return {'atom_types': list(ETABLE_ATOM_TYPES),
+				'n_types': NTYPES, 'pairs': pairs}
+
+		def _etableonepair(at1, at2, self_idx, other_idx, name_self, name_other,
+				self_is_at1, sigma_pair, LJ_R, LJ_W, LK_DG, LK_L, LK_V,
+				IS_ACC, IS_DON, IS_POLH, IS_H2O, HYDRO, CARBON, OCBB_IDX,
+				lj_r6, lj_r12, lj_si, lj_ss, lk_coeff, lk_inv_lambda2,
+				lk_min_dis2sigma_value, DIS, ETABLE_DISBINS, BINS_PER_A2,
+				MAX_DIS, MAX_DIS2, LJ_SWITCH_D2S, LK_MIN_DIS2S):
+			'''
+			Compute one pair's EtableParamsOnePair fields. See _etableparams
+			docstring for the algorithm overview.
+			'''
+			import math as _math
+			# 1) Tabulate raw ljatr/ljrep/fasol1/fasol2 at all 721 distance bins
+			# Bin 0 corresponds to dis=0 (Rosetta's dis(1)); the LJ uses the
+			# linear ramp (intercept) and the LK uses the clamp value, so set
+			# them explicitly rather than computing 1/dis at dis=0.
+			ljatr  = [0.0] * ETABLE_DISBINS
+			dljatr = [0.0] * ETABLE_DISBINS
+			ljrep  = [0.0] * ETABLE_DISBINS
+			dljrep = [0.0] * ETABLE_DISBINS
+			fasol1 = [0.0] * ETABLE_DISBINS
+			fasol2 = [0.0] * ETABLE_DISBINS
+			dfasol1_arr = [0.0] * ETABLE_DISBINS
+			# Bin 0: dis=0, dis2sigma=0 < LJ_SWITCH_D2S so linear ramp; LK clamp
+			lj0 = lj_si[at1][at2]  # ljE at dis=0 = 0 * slope + intercept
+			if lj0 < 0.0:
+				ljatr[0] = lj0; dljatr[0] = lj_ss[at1][at2]
+			else:
+				ljrep[0] = lj0; dljrep[0] = lj_ss[at1][at2]
+			fasol1[0] = lk_min_dis2sigma_value[at1][at2]
+			fasol2[0] = lk_min_dis2sigma_value[at2][at1]
+			for k in range(1, ETABLE_DISBINS):
+				dis = DIS[k]
+				inv_dis = 1.0 / dis
+				inv_dis2 = inv_dis * inv_dis
+				dis2sigma = dis / sigma_pair
+				if dis2sigma < LJ_SWITCH_D2S:
+					d_ljE = lj_ss[at1][at2]
+					ljE = dis * d_ljE + lj_si[at1][at2]
+				else:
+					inv6  = inv_dis2**3
+					inv7  = inv6 * inv_dis
+					inv12 = inv6 * inv6
+					inv13 = inv12 * inv_dis
+					ljE = lj_r12[at1][at2] * inv12 + lj_r6[at1][at2] * inv6
+					d_ljE = (-12.0 * lj_r12[at1][at2] * inv13
+						- 6.0 * lj_r6[at1][at2] * inv7)
+				if ljE < 0.0:
+					ljatr[k] = ljE
+					dljatr[k] = d_ljE
+				else:
+					ljrep[k] = ljE
+					dljrep[k] = d_ljE
+				# LK solvation
+				if dis2sigma < LK_MIN_DIS2S:
+					fasol1[k] = lk_min_dis2sigma_value[at1][at2]
+					fasol2[k] = lk_min_dis2sigma_value[at2][at1]
+					dfasol1_arr[k] = 0.0
+				else:
+					dr1 = dis - LJ_R[at1]
+					x1 = (dr1 * dr1) * lk_inv_lambda2[at1]
+					s1 = _math.exp(-x1) * lk_coeff[at1][at2] * inv_dis2
+					fasol1[k] = s1
+					dr2 = dis - LJ_R[at2]
+					x2 = (dr2 * dr2) * lk_inv_lambda2[at2]
+					s2 = _math.exp(-x2) * lk_coeff[at2][at1] * inv_dis2
+					fasol2[k] = s2
+					ds1 = -2.0 * s1 * (
+						(dis - LJ_R[at1]) * lk_inv_lambda2[at1] + inv_dis)
+					dfasol1_arr[k] = ds1
+			# Disbin 0 (dis2=0): set to min_dis2 values (Rosetta clamps via
+			# `if dis2 < min_dis2_ dis2 = min_dis2_`; default min_dis = 0).
+			# For min_dis = 0 the formulas blow up; in practice bin 0 is
+			# never used at scoring time. Leave at 0.
+			# 2) modify_pot_one_pair: REF15 uses unmodifypot=true so the
+			#    OCbb-OCbb extra quadratic repulsion is DISABLED. The xr fields
+			#    remain at zero (pyrosetta returns zero with REF15 default).
+			# Carbon-carbon close-flat fasol mod is still applied.
+			ljrep_xr = {
+				'xlo': 0.0, 'xhi': 0.0, 'slope': 0.0,
+				'extrapolated_slope': 0.0, 'ylo': 0.0}
+			# Carbon-carbon close-flat fasol mod (dis < 4.2 -> fasol fixed at
+			# value at dis=4.2). Rosetta loops k=1..disbins which corresponds
+			# to my k=0..disbins-1; include bin 0 since Rosetta does.
+			if (name_self in CARBON) and (name_other in CARBON):
+				ibin = int((4.2 * 4.2 / 0.05) + 1.0)
+				f1_at_ibin = fasol1[ibin - 1]
+				f2_at_ibin = fasol2[ibin - 1]
+				for k in range(0, ETABLE_DISBINS):
+					d = DIS[k]
+					if d < 4.2:
+						fasol1[k] = f1_at_ibin
+						fasol2[k] = f2_at_ibin
+						dfasol1_arr[k] = 0.0
+			# REF15 default: fa_hatr=true, so zero_hydrogen_and_water_ljatr is
+			# NOT called - hydrogens contribute attractive LJ normally and
+			# hydrogen_interaction stays False, final_weight stays 1.0.
+			hydrogen_pair = False
+			# 3) smooth_etables_one_pair, part 1: find the LJ minimum bin
+			min_atr = 0.0; which_min = -1
+			for i in range(1, ETABLE_DISBINS):
+				if ljatr[i] < min_atr:
+					min_atr = ljatr[i]
+					which_min = i
+			if which_min != -1:
+				lj_minimum = sigma_pair
+				lj_val_at_minimum = -_math.sqrt(LJ_W[at1] * LJ_W[at2])
+			else:
+				lj_minimum = MAX_DIS
+				lj_val_at_minimum = 0.0
+			# Transfer ljatr to ljrep below the minimum
+			if min_atr < 0.0 and which_min != -1:
+				for i in range(1, which_min + 1):
+					ljrep[i]  += ljatr[i] - min_atr
+					dljrep[i] += dljatr[i]
+					ljatr[i] = ljatr[i] - (ljatr[i] - min_atr)  # = min_atr
+					dljatr[i] = 0.0
+			# Compute start bin for ljatr cubic fit:
+			# start = max(bin_of_dis((max_dis-1.5)*10), minima_bin_index+1)
+			# bin_of_dis(i) = int((i/10)^2 * 20 + 1) for i in [1, etable_disbins]
+			def _binofdis(ii):
+				d = ii / 10.0
+				return int(d * d * BINS_PER_A2 + 1)
+			bod = _binofdis(int((MAX_DIS - 1.5) * 10.0))  # = 406 for max_dis=6
+			start = max(bod, (which_min if which_min != -1 else 0) + 1)
+			lbx = DIS[start - 1]  # dis(start) in 1-based = DIS[start-1] in 0-based
+			ubx = DIS[ETABLE_DISBINS - 1]
+			lby = ljatr[start - 1]
+			lbdy = dljatr[start - 1]
+			# Compute ljatr_cubic_poly via Hermite fit
+			y2lo_atr, y2hi_atr = _splineddy2(lbx, lby, lbdy, ubx, 0.0, 0.0)
+			ljatr_cp = _cubicfromspline(lbx, ubx, lby, 0.0, y2lo_atr, y2hi_atr)
+			# Apply the spline to ljatr from start to end (so the smoothed
+			# ljatr is used for fasol smoothing later — but fasol is
+			# independent so this doesn't matter for the rest. We don't need
+			# to overwrite ljatr.)
+			# 4) Determine fasol close (S1, E1) and far (S2, E2) spline ranges
+			S2 = bod  # 406 for max_dis=6
+			E2 = ETABLE_DISBINS  # 721
+			fasol_far_xlo = DIS[S2 - 1]
+			fasol_far_xhi = DIS[E2 - 1]
+			# SWTCH: first bin where fasol1 != fasol1(1) or fasol2 != fasol2(1)
+			# (i.e., first bin where solvation departs from its constant
+			# clamped value).
+			SWTCH = ETABLE_DISBINS + 1
+			for k in range(1, ETABLE_DISBINS):
+				if fasol1[k] != fasol1[0] or fasol2[k] != fasol2[0]:
+					SWTCH = k + 1  # match 1-based "bin index"
+					break
+			if SWTCH > ETABLE_DISBINS:
+				# fasol constant everywhere - flat poly
+				close_start = fasol_far_xhi
+				close_end = fasol_far_xhi + 1.0
+				close_flat = 0.0
+				close_cp = _cubicfromspline(close_start, close_end,
+					0.0, 0.0, 0.0, 0.0)
+				far_cp = _cubicfromspline(fasol_far_xlo, fasol_far_xhi,
+					0.0, 0.0, 0.0, 0.0)
+				close_flat_self = 0.0
+				close_cp_self = list(close_cp)
+				far_cp_self = list(far_cp)
+				final_weight = 1.0
+				# Build the cell with all-zero LK-related fields
+			else:
+				S1 = max(1, SWTCH - 30)
+				E1 = min(SWTCH + 20, 406)
+				close_start = DIS[S1 - 1]
+				close_end = DIS[E1 - 1]
+				# Compute the close spline (combined fasol1 + fasol2 at E1).
+				# Derivative at E1: forward diff (fasol1+fasol2)(E1+1) -
+				# (fasol1+fasol2)(E1) / (DIS[E1] - DIS[E1-1]).
+				dE1_d1 = ((fasol1[E1] - fasol1[E1 - 1])
+					/ (DIS[E1] - DIS[E1 - 1]))
+				dE1_d2 = ((fasol2[E1] - fasol2[E1 - 1])
+					/ (DIS[E1] - DIS[E1 - 1]))
+				dE1_total = dE1_d1 + dE1_d2
+				ylo_c = fasol1[S1 - 1] + fasol2[S1 - 1]
+				yhi_c = fasol1[E1 - 1] + fasol2[E1 - 1]
+				y2lo_c, y2hi_c = _splineddy2(
+					close_start, ylo_c, 0.0, close_end, yhi_c, dE1_total)
+				close_flat = ylo_c
+				close_cp = _cubicfromspline(close_start, close_end,
+					ylo_c, yhi_c, y2lo_c, y2hi_c)
+				# Compute per-direction (atom 1 and atom 2) close splines.
+				# Boundary deriv at E1 = analytic dlk_solv(dis(E1)) for each.
+				dis_E1 = DIS[E1 - 1]
+				def _lksolvderiv(at_self, at_other, d):
+					inv_d = 1.0 / d
+					inv_d2 = inv_d * inv_d
+					dr = d - LJ_R[at_self]
+					x = (dr * dr) * lk_inv_lambda2[at_self]
+					s = _math.exp(-x) * lk_coeff[at_self][at_other] * inv_d2
+					ds = -2.0 * s * (
+						(d - LJ_R[at_self]) * lk_inv_lambda2[at_self] + inv_d)
+					return ds
+				dsE1_1 = _lksolvderiv(at1, at2, dis_E1)
+				dsE1_2 = _lksolvderiv(at2, at1, dis_E1)
+				# Close poly for atom1's desolvation
+				y2lo_1c, y2hi_1c = _splineddy2(
+					close_start, fasol1[S1 - 1], 0.0,
+					close_end, fasol1[E1 - 1], dsE1_1)
+				close_flat_1 = fasol1[S1 - 1]
+				close_cp_1 = _cubicfromspline(close_start, close_end,
+					fasol1[S1 - 1], fasol1[E1 - 1], y2lo_1c, y2hi_1c)
+				# Close poly for atom2's desolvation
+				y2lo_2c, y2hi_2c = _splineddy2(
+					close_start, fasol2[S1 - 1], 0.0,
+					close_end, fasol2[E1 - 1], dsE1_2)
+				close_flat_2 = fasol2[S1 - 1]
+				close_cp_2 = _cubicfromspline(close_start, close_end,
+					fasol2[S1 - 1], fasol2[E1 - 1], y2lo_2c, y2hi_2c)
+				# Far spline: from S2 to E2. Rosetta uses FORWARD-DIFFERENCE
+				# derivatives at S2 (see Etable.cc:987-989). The combined
+				# far spline takes dfasol(S2) = dsolv1s2 + dsolv2s2 where
+				# dsolv*s2 = (fasol*(S2) - fasol*(S2-1)) / (dis(S2)-dis(S2-1)).
+				dis_S2 = DIS[S2 - 1]
+				dsS2_1 = ((fasol1[S2 - 1] - fasol1[S2 - 2])
+					/ (DIS[S2 - 1] - DIS[S2 - 2]))
+				dsS2_2 = ((fasol2[S2 - 1] - fasol2[S2 - 2])
+					/ (DIS[S2 - 1] - DIS[S2 - 2]))
+				dfasolS2 = dsS2_1 + dsS2_2
+				ylo_f = fasol1[S2 - 1] + fasol2[S2 - 1]
+				y2lo_f, y2hi_f = _splineddy2(
+					fasol_far_xlo, ylo_f, dfasolS2,
+					fasol_far_xhi, 0.0, 0.0)
+				far_cp = _cubicfromspline(fasol_far_xlo, fasol_far_xhi,
+					ylo_f, 0.0, y2lo_f, y2hi_f)
+				# Per-direction far splines use analytic LK derivative at S2
+				# (Etable.cc:1111: lk_solv_energy_and_deriv(at, at, dis(S2)))
+				dsS2_1_a = _lksolvderiv(at1, at2, dis_S2)
+				dsS2_2_a = _lksolvderiv(at2, at1, dis_S2)
+				y2lo_1f, y2hi_1f = _splineddy2(
+					fasol_far_xlo, fasol1[S2 - 1], dsS2_1_a,
+					fasol_far_xhi, 0.0, 0.0)
+				far_cp_1 = _cubicfromspline(fasol_far_xlo, fasol_far_xhi,
+					fasol1[S2 - 1], 0.0, y2lo_1f, y2hi_1f)
+				y2lo_2f, y2hi_2f = _splineddy2(
+					fasol_far_xlo, fasol2[S2 - 1], dsS2_2_a,
+					fasol_far_xhi, 0.0, 0.0)
+				far_cp_2 = _cubicfromspline(fasol_far_xlo, fasol_far_xhi,
+					fasol2[S2 - 1], 0.0, y2lo_2f, y2hi_2f)
+				# Assign per-direction polys: self vs other
+				if self_is_at1:
+					close_flat_self = close_flat_1
+					close_cp_self = close_cp_1
+					far_cp_self = far_cp_1
+					lkc_self = lk_coeff[at1][at2]
+				else:
+					close_flat_self = close_flat_2
+					close_cp_self = close_cp_2
+					far_cp_self = far_cp_2
+					lkc_self = lk_coeff[at2][at1]
+				final_weight = 1.0
+			# Hydrogen-pair / water-pair: zero ljatr_final_weight & fasol_final
+			ljatr_final_weight = 0.0 if hydrogen_pair else 1.0
+			fasol_final_weight = 0.0 if hydrogen_pair else 1.0
+			# Pick lkc/lambda/R for self
+			at_self = self_idx
+			at_other = other_idx
+			lkc_self = lk_coeff[at_self][at_other]
+			lam_self = LK_L[at_self]
+			R_self = LJ_R[at_self]
+			# ljrep_linear_ramp_d2_cutoff
+			ljrep_lr_d2 = (LJ_SWITCH_D2S * sigma_pair) ** 2
+			# ljrep_from_negcrossing: not implemented (REPLS atom types are
+			# excluded from ETABLE_ATOM_TYPES). hydrogen_interaction true if
+			# either atom is H.
+			cell = {
+				'close_start': close_start,
+				'close_end':   close_end,
+				'close_flat':  close_flat_self,
+				'close_poly':  close_cp_self,
+				'far_poly':    far_cp_self,
+				'lk_coeff':    lkc_self,
+				'lambda_self': lam_self,
+				'R_self':      R_self,
+				'final_weight': fasol_final_weight,
+				'close_flat_comb':  close_flat,
+				'close_poly_comb':  list(close_cp),
+				'far_poly_comb':    list(far_cp),
+				# LJ:
+				'lj_minimum':         lj_minimum,
+				'lj_r12_coeff':       lj_r12[at1][at2],
+				'lj_r6_coeff':        lj_r6[at1][at2],
+				'lj_switch_intercept': lj_si[at1][at2],
+				'lj_switch_slope':    lj_ss[at1][at2],
+				'lj_val_at_minimum':  lj_val_at_minimum,
+				'lj_min_dis2sigma_value': 0.0,
+				'ljatr_cubic_poly':      list(ljatr_cp),
+				'ljatr_cubic_poly_xhi':  ubx,
+				'ljatr_cubic_poly_xlo':  lbx,
+				'ljatr_final_weight':    ljatr_final_weight,
+				'ljrep_linear_ramp_d2_cutoff': ljrep_lr_d2,
+				'ljrep_from_negcrossing': False,
+				'hydrogen_interaction':   hydrogen_pair,
+				'ljrep_xr_xlo':    ljrep_xr['xlo'],
+				'ljrep_xr_xhi':    ljrep_xr['xhi'],
+				'ljrep_xr_slope':  ljrep_xr['slope'],
+				'ljrep_xr_extrapolated_slope':
+					ljrep_xr['extrapolated_slope'],
+				'ljrep_xr_ylo':    ljrep_xr['ylo']}
+			return cell
+
+		KCAL_TO_KJ = 4.184
+		# Pin to the Rosetta commit that pyrosetta 2026.03 was built from
+		# so data is consistent across all REF15 tables (atom_properties,
+		# residue topologies, hbond CSVs, rama tables, rotamer libs, etc.).
+		# main HEAD has drifted from this commit for HBond/Rama tables.
+		REPO = ('https://raw.githubusercontent.com/'
+			'RosettaCommons/rosetta/'
+			'5e498f1409c68ade56c8ce5842bf79e1b02e8db4/database/')
+		def fetch(path):
+			'''
+			Download one repository file as a UTF-8 string
+			Arguments:
+			----------
+				path: str - path under the database/ root
+			Returns:
+			--------
+				str: file contents
+			'''
+			with urllib.request.urlopen(REPO + path, timeout=120) as r:
+				return r.read().decode('utf-8')
+		def fetchgz(path):
+			'''
+			Download one repository .gz file and return decompressed text
+			Arguments:
+			----------
+				path: str - path under the database/ root
+			Returns:
+			--------
+				str: decompressed file contents
+			'''
+			with urllib.request.urlopen(REPO + path, timeout=120) as r:
+				return gzip.decompress(r.read()).decode('utf-8')
+		# 1. atom_properties.txt -> per-Rosetta-type LJ/LK parameters
+		props_txt = fetch(
+			'chemical/atom_type_sets/fa_standard/atom_properties.txt')
+		atom_types = {}
+		# Fixed-width columns sometimes have adjacent numbers run together
+		# (e.g. "0.161725-20.864641"); extract numbers with regex so a
+		# missing space doesn't drop the line.
+		for line in props_txt.splitlines():
+			s = line.split('#', 1)[0]
+			if not s.strip() or s.startswith('NAME'): continue
+			toks = s.split()
+			if len(toks) < 2: continue
+			name = toks[0]
+			nums = re.findall(r'[+-]?\d+\.\d+', s)
+			if len(nums) < 5: continue
+			try:
+				lj_r, lj_w, lk_dG, lk_lam, lk_V = (float(x) for x in nums[:5])
+			except ValueError: continue
+			# Reconstruct flag list by stripping the numeric prefix.
+			# Take everything after the LK_VOLUME number on the line.
+			idx = 0
+			for k in range(5):
+				pos = s.find(nums[k], idx)
+				if pos < 0: break
+				idx = pos + len(nums[k])
+			flags = set(t.upper() for t in s[idx:].split()
+				if t and not t.startswith('#'))
+			atom_types[name] = {
+				'element':   toks[1],
+				'LJ_RADIUS': lj_r,
+				'LJ_WDEPTH': lj_w,
+				'LK_DGFREE': lk_dG,
+				'LK_LAMBDA': lk_lam,
+				'LK_VOLUME': lk_V,
+				'acceptor':  'ACCEPTOR' in flags,
+				'donor':     'DONOR' in flags,
+				'aromatic':  'AROMATIC' in flags,
+				'sp2':       'SP2_HYBRID' in flags,
+				'sp3':       'SP3_HYBRID' in flags,
+				'ring':      'RING_HYBRID' in flags,
+				'orbitals':  'ORBITALS' in flags,
+				'polar_h':   'POLAR_HYDROGEN' in flags}
+		# 2. ref2015.wts -> weight list + METHOD_WEIGHTS ref values
+		wts_txt = fetch('scoring/weights/ref2015.wts')
+		weights = {}
+		method_ref = []
+		for line in wts_txt.splitlines():
+			s = line.strip()
+			if not s or s.startswith('#'): continue
+			if s.startswith('METHOD_WEIGHTS'):
+				toks = s.split()
+				if toks[1].lower() == 'ref':
+					method_ref = [float(x) for x in toks[2:]]
+				continue
+			if s in ('INCLUDE_INTRA_RES_PROTEIN', 'NO_HB_ENV_DEP'): continue
+			toks = s.split()
+			if len(toks) >= 2:
+				try: weights[toks[0]] = float(toks[1])
+				except ValueError: pass
+		# 3. residue topologies for the 20 standard amino acids (l-caa/).
+		#    Each gives, per atom: rosetta-type + partial charge, plus bond
+		#    list. Terminal variants and HIS_D added; nucleic-acid topology
+		#    deferred until Phase 4 of the plan.
+		AAS = ['ALA','ARG','ASN','ASP','CYS','GLN','GLU','GLY','HIS','ILE',
+			'LEU','LYS','MET','PHE','PRO','SER','THR','TRP','TYR','VAL']
+		residues = {}
+		for aa in AAS:
+			txt = fetch(
+				'chemical/residue_type_sets/fa_standard/residue_types/'
+				'l-caa/%s.params' % aa)
+			residues[aa] = _parseparams(txt)
+		# HIS protonation variant (Rosetta HIS_D)
+		try:
+			txt = fetch(
+				'chemical/residue_type_sets/fa_standard/residue_types/'
+				'l-caa/HIS_D.params')
+			residues['HIS_D'] = _parseparams(txt)
+		except Exception:
+			pass
+		# 3b. Hbond polynomial / chem-type / eval / fade tables
+		hb_dir = 'scoring/score_functions/hbonds/ref2015_params/'
+		hb_files = ('HBPoly1D.csv', 'HBEval.csv', 'HBFadeIntervals.csv',
+			'HBDonChemType.csv', 'HBAccChemType.csv',
+			'HBAccHybridization.csv', 'HBSeqSep.csv', 'DonStrength.csv',
+			'AccStrength.csv', 'HBondWeightType.csv', 'HybridizationType.csv')
+		hb_raw = {}
+		for fname in hb_files:
+			try: hb_raw[fname] = fetch(hb_dir + fname)
+			except Exception: hb_raw[fname] = ''
+		hb_data = _parsehbonddata(hb_raw)
+		# 3c. Rama tables (all + prepro). REF15 uses scoring/score_functions/
+		# rama/fd/ (NOT fd_beta_nov2016 — that's for beta_nov16 score fn).
+		rama_dir = 'scoring/score_functions/rama/fd/'
+		rama_data = {}
+		for kind, fname in (('all', 'all.ramaProb'),
+				('prepro', 'prepro.ramaProb')):
+			try:
+				txt = fetch(rama_dir + fname)
+				# Parse: each row "AA phi psi prob -log(prob)"
+				# Build {aa: [[phi_idx][psi_idx]: -log(prob)]}
+				table = {}
+				for line in txt.splitlines():
+					toks = line.split()
+					if len(toks) < 5: continue
+					aa = toks[0]
+					try:
+						phi = int(float(toks[1]))
+						psi = int(float(toks[2]))
+						nE = float(toks[4])
+					except ValueError: continue
+					# (phi, psi) on a 36x36 grid, -180..170 step 10
+					i_phi = (phi + 180) // 10
+					i_psi = (psi + 180) // 10
+					if 0 <= i_phi < 36 and 0 <= i_psi < 36:
+						t = table.setdefault(aa,
+							[[0.0]*36 for _ in range(36)])
+						t[i_phi][i_psi] = nE
+				rama_data[kind] = table
+			except Exception:
+				rama_data[kind] = {}
+		# 3d. Omega tables (mu/sigma per phi-psi cell, 4 sub-tables)
+		omega_dir = 'scoring/score_functions/omega/'
+		omega_tables = {}
+		for kind in ('all', 'gly', 'pro', 'valile'):
+			txt = fetch(omega_dir + 'omega_ppdep.' + kind + '.txt')
+			mu = [[0.0] * 36 for _ in range(36)]
+			sig = [[0.0] * 36 for _ in range(36)]
+			for line in txt.splitlines():
+				toks = line.split()
+				if len(toks) < 6: continue
+				try:
+					ip = int(toks[0]); js = int(toks[1])
+					mu_v = float(toks[4]); sig_v = float(toks[5])
+				except ValueError: continue
+				if 0 <= ip < 36 and 0 <= js < 36:
+					mu[ip][js] = mu_v
+					sig[ip][js] = sig_v
+			omega_tables[kind] = {'mu': mu, 'sigma': sig}
+		# 3e. P_AA (per-AA marginal frequency, scalar per AA)
+		paa_txt = fetch('scoring/score_functions/P_AA_pp/P_AA')
+		p_aa = {}
+		for line in paa_txt.splitlines():
+			toks = line.split()
+			if len(toks) >= 2:
+				try: p_aa[toks[0]] = float(toks[1])
+				except ValueError: pass
+		# 3g. Rotamer Library (Shapovalov StpDwn_0-0-0 BBDEP2010). 18 AAs
+		# (everything except ALA / GLY). Pure-rotameric or semi-rotameric
+		# distinction is preserved via packed rotwell indexing.
+		# AA -> (n_chi_total, T = rotameric_chi_count, is_semirot)
+		ROTLIB_AA = {
+			'ARG': (4, 4, False), 'ASN': (2, 1, True),
+			'ASP': (2, 1, True),  'CYS': (1, 1, False),
+			'GLN': (3, 2, True),  'GLU': (3, 2, True),
+			'HIS': (2, 1, True),  'ILE': (2, 2, False),
+			'LEU': (2, 2, False), 'LYS': (4, 4, False),
+			'MET': (3, 3, False), 'PHE': (2, 1, True),
+			'PRO': (3, 3, False), 'SER': (1, 1, False),
+			'THR': (1, 1, False), 'TRP': (2, 1, True),
+			'TYR': (2, 1, True),  'VAL': (1, 1, False)}
+		def packrot(rotwell, n_chi, is_semirot, T):
+			'''Pack the rotwell tuple into a single int matching the
+			database CSR row encoding: fully rotameric pads to 4 digits;
+			semi-rotameric uses T digits.'''
+			if is_semirot:
+				acc = 0
+				for k in range(T):
+					acc = acc * 10 + rotwell[k]
+				return acc
+			acc = 0
+			for k in range(4):
+				acc = acc * 10 + rotwell[k]
+			return acc
+		def parserotamers(txt, n_chi, T, is_semirot):
+			'''Parse one bbdep.rotamers.lib text into a CSR table.'''
+			rows_per_cell = [[] for _ in range(36 * 36)]
+			for ln in txt.splitlines():
+				s = ln.strip()
+				if not s or s.startswith('#'): continue
+				parts = s.split()
+				# Cols: T  Phi  Psi  Count  r1 r2 r3 r4 Probabil -log(P)
+				#       chi1..chi4  sig1..sig4
+				phi = float(parts[1]); psi = float(parts[2])
+				if phi == -180.0 or psi == -180.0: continue
+				rotwell = [int(parts[4 + k]) for k in range(4)]
+				P = float(parts[8])
+				mus = [float(parts[10 + k]) for k in range(n_chi)]
+				sigs = [float(parts[14 + k]) for k in range(n_chi)]
+				rot_idx = packrot(rotwell, n_chi, is_semirot, T)
+				pi = int(round((phi + 180.0) / 10.0))
+				ps = int(round((psi + 180.0) / 10.0))
+				if pi >= 36: pi -= 36
+				if ps >= 36: ps -= 36
+				cell = pi * 36 + ps
+				rows_per_cell[cell].append([rot_idx, P] + mus + sigs)
+			bin_offsets = [0]
+			table = []
+			for rows in rows_per_cell:
+				table.extend(rows)
+				bin_offsets.append(len(table))
+			return {'bin_offsets': bin_offsets, 'table': table}
+		rotamer_db = {}
+		for aa3, (n_chi, T, is_semirot) in ROTLIB_AA.items():
+			gz_path = ('rotamer/shapovalov/StpDwn_0-0-0/'
+				+ aa3.lower() + '.bbdep.rotamers.lib.gz')
+			txt = fetchgz(gz_path)
+			rotamer_db[aa3] = parserotamers(txt, n_chi, T, is_semirot)
+		# 3h. FaDunNrchiDensities (8 semi-rotameric AAs).
+		# Schema documented in former port_nrchi.py.
+		NRCHI_AA = [
+			('ASN', 2, 1), ('ASP', 2, 1), ('GLN', 3, 2), ('GLU', 3, 2),
+			('HIS', 2, 1), ('PHE', 2, 1), ('TRP', 2, 1), ('TYR', 2, 1)]
+		def parsenrchi(txt, n_chi, n_disc_chi):
+			'''Parse one bbdep.densities.lib text into the per-rotwell
+			36x36 grid layout expected by FaDunPotential.'''
+			chi_last_low = None
+			chi_last_step = None
+			chi_last_n = None
+			rows_by_rot = {}
+			chi_cols_count = None
+			for ln in txt.splitlines():
+				s = ln.strip()
+				if not s: continue
+				if s.startswith('#'):
+					if ('chi%d interval' % n_chi) in s:
+						b1 = s.find('['); b2 = s.find(']')
+						lo, _ = s[b1+1:b2].split(',')
+						chi_last_low = float(lo)
+					elif ('chi%d step' % n_chi) in s:
+						tabs = s.split('\t')
+						chi_last_step = float(tabs[-1])
+					continue
+				parts = s.split('\t')
+				if len(parts) < 4:
+					parts = s.split()
+				phi = float(parts[1]); psi = float(parts[2])
+				rot_idx = []
+				off = 4
+				for k in range(n_disc_chi):
+					rot_idx.append(int(parts[off + k]))
+				off += n_disc_chi
+				P_rot = float(parts[off]); off += 1
+				negP_rot = float(parts[off]); off += 1
+				chi_means = [float(parts[off + k])
+					for k in range(n_disc_chi)]
+				off += n_disc_chi
+				chi_sigmas = [float(parts[off + k])
+					for k in range(n_disc_chi)]
+				off += n_disc_chi
+				densities = [float(x) for x in parts[off:]]
+				if chi_cols_count is None:
+					chi_cols_count = len(densities)
+					chi_last_n = chi_cols_count
+				rows_by_rot.setdefault(tuple(rot_idx), []).append(
+					(phi, psi, P_rot, negP_rot, chi_means,
+						chi_sigmas, densities))
+			MAXE = 13.815510557964274
+			per_rot = {}
+			for rot_key, rows in rows_by_rot.items():
+				P_rot_grid = [0.0] * (36 * 36)
+				neglogP_rot_grid = [MAXE] * (36 * 36)
+				chi_mean_grid = [[0.0] * (36 * 36)
+					for _ in range(n_disc_chi)]
+				chi_sigma_grid = [[1.0] * (36 * 36)
+					for _ in range(n_disc_chi)]
+				dens_grid = [0.0] * (36 * 36 * chi_last_n)
+				for phi, psi, P_rot, neg_P, cmeans, csigmas, dens in rows:
+					pi = int(round((phi + 180.0) / 10.0)) % 36
+					ps = int(round((psi + 180.0) / 10.0)) % 36
+					cell = pi * 36 + ps
+					P_rot_grid[cell] = P_rot
+					neglogP_rot_grid[cell] = neg_P
+					for k in range(n_disc_chi):
+						chi_mean_grid[k][cell] = cmeans[k]
+						chi_sigma_grid[k][cell] = csigmas[k]
+					for j, d_val in enumerate(dens):
+						dens_grid[cell * chi_last_n + j] = d_val
+				rot_key_str = ','.join(str(x) for x in rot_key)
+				per_rot[rot_key_str] = {
+					'P_rot':       P_rot_grid,
+					'neglogP_rot': neglogP_rot_grid,
+					'chi_means':   [x for sub in chi_mean_grid for x in sub],
+					'chi_sigmas':  [x for sub in chi_sigma_grid for x in sub],
+					'densities':   dens_grid}
+			return {
+				'chi_last_low':  chi_last_low,
+				'chi_last_step': chi_last_step,
+				'chi_last_n':    chi_last_n,
+				'n_chi':         n_chi,
+				'n_disc_chi':    n_disc_chi,
+				'rotwells':      sorted(per_rot.keys()),
+				'phi_step': 10.0, 'psi_step': 10.0,
+				'phi_n': 36, 'psi_n': 36,
+				'per_rot': per_rot}
+		nrchi_db = {}
+		for aa3, n_chi, n_disc_chi in NRCHI_AA:
+			gz_path = ('rotamer/shapovalov/StpDwn_0-0-0/'
+				+ aa3.lower() + '.bbdep.densities.lib.gz')
+			txt = fetchgz(gz_path)
+			nrchi_db[aa3] = parsenrchi(txt, n_chi, n_disc_chi)
+		# 3f. P_AA_pp (Shapovalov a20.prop, 10° kappa=131 propensities)
+		# Format per row: "phi\tpsi\tAA\tprop\t-log(prop)" with phi/psi in
+		# [-180, 170] step 10° (grid starts at -180).
+		prop_txt = fetch('scoring/score_functions/P_AA_pp/shapovalov/'
+			'10deg/kappa131/a20.prop')
+		p_aa_pp = {}
+		for line in prop_txt.splitlines():
+			if line.startswith('#'): continue
+			toks = line.split()
+			if len(toks) < 4: continue
+			try:
+				phi = float(toks[0]); psi = float(toks[1])
+				aa = toks[2]; prop = float(toks[3])
+			except ValueError: continue
+			ip = int(round((phi + 180.0) / 10.0))
+			js = int(round((psi + 180.0) / 10.0))
+			if ip >= 36: ip -= 36
+			if js >= 36: js -= 36
+			if 0 <= ip < 36 and 0 <= js < 36:
+				t = p_aa_pp.setdefault(aa,
+					[[0.0] * 36 for _ in range(36)])
+				t[ip][js] = prop
+		# 4. Assemble the parameter block. All numeric weights x4.184 so
+		#    internal storage is uniform kJ/mol; a Constants.scale of
+		#    1/4.184 is applied at Score.__call__ exit to return REU.
+		def w(key, dflt=0.0):
+			return weights.get(key, dflt) * KCAL_TO_KJ
+		block = {
+			'Constants': {
+				'scale':           1.0 / KCAL_TO_KJ,
+				'fa_max_dis':      6.0,
+				'fa_elec_max_dis': 5.5,
+				'fa_elec_min_dis': 1.6,
+				'fa_atr_short':    4.5,
+				'fa_atr_long':     6.0,
+				'lj_hbond_OH':     0.6,
+				'eps_core':        6.0,
+				'eps_solvent':     80.0,
+				'coulomb_C0':      322.0637,
+				'sigmoidal_D':     80.0,
+				'sigmoidal_D0':    6.0,
+				'sigmoidal_S':     0.4,
+				'connectivity_weight': {'3': 0.0, '4': 0.2, '5+': 1.0}},
+			'Atom_types':    atom_types,
+			'Residue_types': residues,
+			'HBond_data':    hb_data,
+			'Rama_data':     rama_data,
+			'Omega_tables':  omega_tables,
+			'P_AA':          p_aa,
+			'P_AA_pp':       p_aa_pp,
+			'P_AA_pp_grid_start': -180.0,
+			'METHOD_WEIGHTS_ref': method_ref,
+			'FaAtr':              {'weight': w('fa_atr',              1.000)},
+			'FaRep':              {'weight': w('fa_rep',              0.550)},
+			'FaSol':              {'weight': w('fa_sol',              1.000)},
+			'FaIntraRep':         {'weight': w('fa_intra_rep',        0.005)},
+			'FaIntraSolXover4':   {'weight': w('fa_intra_sol_xover4', 1.000)},
+			'LkBallWtd':          {'weight': w('lk_ball_wtd',         1.000)},
+			'FaElec':             {'weight': w('fa_elec',             1.000)},
+			'HBondSrBb':          {'weight': w('hbond_sr_bb',         1.000)},
+			'HBondLrBb':          {'weight': w('hbond_lr_bb',         1.000)},
+			'HBondBbSc':          {'weight': w('hbond_bb_sc',         1.000)},
+			'HBondSc':            {'weight': w('hbond_sc',            1.000)},
+			'DslfFa13':           {'weight': w('dslf_fa13',           1.250)},
+			'Omega':              {'weight': w('omega',               0.400)},
+			'FaDun':              {'weight': w('fa_dun',              0.700)},
+			'PAaPp':              {'weight': w('p_aa_pp',             0.600)},
+			'YhhPlanarity':       {'weight': w('yhh_planarity',       0.625)},
+			'Ref':                {'weight': w('ref',                 1.000)},
+			'RamaPreProTerm':     {'weight': w('rama_prepro',         0.450)},
+			'ProClose':           {'weight': w('pro_close',           1.250)},
+			# 0-weight inactive terms exposed in the schema (user spec)
+			'FaIntraAtr':         {'weight': 0.0},
+			'LkBallIso':          {'weight': 0.0},
+			'LkBallBridge':       {'weight': 0.0},
+			'CartBonded':         {'weight': 0.0},
+			# Phase 2 implements the physics block only; later phases add the
+			# rest of the methods. The Terms list is the same shape as
+			# ForceField/Score - it drives __call__'s dispatch.
+			'Terms': [
+				['FaAtrPotential',                {}],
+				['FaRepPotential',                {}],
+				['FaSolPotential',                {}],
+				['FaIntraRepPotential',           {}],
+				['FaIntraSolXover4Potential',     {}],
+				['LkBallWtdPotential',            {}],
+				['FaElecPotential',               {}],
+				['HBondSrBbPotential',            {}],
+				['HBondLrBbPotential',            {}],
+				['HBondBbScPotential',            {}],
+				['HBondScPotential',              {}],
+				['FaDunPotential',                {}],
+				['RamaPreProTermPotential',       {}],
+				['PAaPpPotential',                {}],
+				['OmegaPotential',                {}],
+				['ProClosePotential',             {}],
+				['DslfFa13Potential',             {}],
+				['YhhPlanarityPotential',         {}],
+				['RefPotential',                  {}]]}
+		sp['REF15'] = block
+		# Top-level: rotamer library and nrchi densities (consumed by
+		# FaDunPotential). Preserve any other top-level structure
+		# (Nucleotides / Amino Acids / Energy Parameters / EtablePairParams)
+		# via read-modify-write — only update REF15-owned keys.
+		rl = db.setdefault('Rotamer Library', {})
+		rl.setdefault('format', 'BBDEP2010-shapovalov-StpDwn_0-0-0')
+		rl.setdefault('version', '0-0-0')
+		rl.setdefault('phi_start', -180.0)
+		rl.setdefault('phi_step',  10.0)
+		rl.setdefault('phi_n',     36)
+		rl.setdefault('psi_start', -180.0)
+		rl.setdefault('psi_step',  10.0)
+		rl.setdefault('psi_n',     36)
+		residues_rl = rl.setdefault('residues', {})
+		for aa3, (n_chi, T, is_semirot) in ROTLIB_AA.items():
+			entry = residues_rl.setdefault(aa3, {})
+			entry['n_chi'] = n_chi
+			entry['rotamers'] = rotamer_db[aa3]
+		db['FaDunNrchiDensities'] = nrchi_db
+		# Top-level: EtablePairParams (pure-Python LJ/LK analytic fit).
+		db['EtablePairParams'] = _etableparams(atom_types)
+	dispatch = {
+		'OPENFF':        openff,
+		'FF19SB':        ff19sb,
+		'CHARMM36':      charmm36,
+		'AUTODOCK VINA': vina,
+		'REF15':         ref15,
+	}
+	if key not in dispatch:
 		raise ValueError(
-			"port: name must be 'openff', 'ff19SB' or 'charmm36' "
-			f'(got {name!r})')
-	ep[db_key] = block
-	with open(db_path, 'w') as f:
-		json.dump(db, f, separators=(',', ':'))
-	print(f'[port] wrote {db_key} block: {len(block.get("Bonds", {}))} '
-		f'bonds, {len(block.get("Angles", {}))} angles, '
-		f'{len(block.get("ProperTorsions", {}))} propers, '
-		f'{len(block.get("ImproperTorsions", {}))} impropers, '
-		f'{len(block.get("vdW", {}))} vdW', file=sys.stderr)
+			'Port: unknown name=%r (available: %r)'
+			% (name, sorted(dispatch)))
+	dispatch[key]()
+	tmp = db_path + '.tmp'
+	try:
+		with open(tmp, 'w') as f:
+			json.dump(db, f, separators=(',', ':'))
+		os.replace(tmp, db_path)
+	except BaseException:
+		if os.path.exists(tmp): os.remove(tmp)
+		raise
+	try: DBLoad.cache_clear()
+	except Exception: pass
 	return True
