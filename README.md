@@ -195,6 +195,8 @@ Each class have similar methods and data structure, but with slight differences 
 | `p.ReBuild(sequence=None, mirror=False, _mutated=None)`    | Rebuild the polypeptide or nucleic acid. Use `sequence='AGLMTSWVLVA'` to rebuild the structure with multiple bulk mutations on chain A. Use `sequence={'A':'MSLKLSTVVA', 'B':'ASLKSWFWVA'}` to perform mutations at multiple chains at the same time. Use `mirror=True` to rebuild a protein and convert L-amino acids → D-amino acids and D-amino acids → L-amino acids. Running `p.ReBuild(sequence=None)` will add missing Hydrogens. For DNA and RNA, the `sequence=''` length must match exactly the original sequence length, otherwise an error will be raised |
 | `p.Mutate(1, 'V', fast=True)`                              | Mutate a single monomer. For proteins: `p.Mutate(1, 'V')` = residue 1 → L-Valine, `p.Mutate(1, 'v')` = residue 1 → D-Valine. For DNA: `p.Mutate(0, 'T')` = nucleotide 0 → Thymine. For RNA: `p.Mutate(0, 'U')` = nucleotide 0 → Uracil. For double-stranded nucleic acids, the complementary base is also updated automatically. The `fast=True` argument means the mutation is performed by vector addition without ensuring the stability of the backbone (also the `CalcDSSP(), CalcSASA, and CalcRg()` etc.. are not re-computed) so these needs to be called after the mutation, in return the mutation is very fast, ideal for large mutation simulations. If `fast=False` the mutated residue is added to the structure and the entire structure rebuilt using ReBuild(), this is more accurate but very slow for large simulations |
 
+> Note: `Import()` will not import broken structures such as broken chains or missing backbone atoms. The structure needs to be complete. If it is not complete, then re-generate it to fill in the missing sections.
+
 ### Measurements
 
 | Method                                       | Description |
@@ -272,58 +274,43 @@ A hash of the bond graph + atom records + amino-acid assignments is cached, so r
 
 > **Charge model**: under `OpenFF`, partial charges are computed by `ForceField.NAGLCharges(pose)`, a NumPy reimplementation of the [`openff-gnn-am1bcc-1.0.0`](https://github.com/openforcefield/openff-nagl-models) graph neural network released by the [Open Force Field Initiative](https://github.com/openforcefield). Output is bit-equivalent to upstream NAGL float32 inference, with the total constrained to the molecule's formal charge via electronegativity equalisation. NAGL weights live under `[name]['AM1BCC']`; force fields without that sub-key (e.g. `Default`) skip NAGL and fall back to library charges then atom-record charges. SMIRKS pattern assignment for bonded and vdW parameters is done in `pose.energy.SMIRKSMatch(pose, params)`, a pure-NumPy SMIRKS engine. All numerical values in `database.json` are in **kJ/mol** (lengths in Å, angles in degrees).
 
+The `Score()` class is a hybrid physics + statistical scoring function for protein design and small-molecule docking. It is configured by **name** at construction, the name keys into `database.json['Score Parameters'][name]`, which carries the per-term `{weight, …}` blocks, the atom-type / residue-type lookup tables, and the explicit list of energy-term methods to evaluate (under the `Terms` sub-key).
 
+A hash of the bond graph + atom records + amino-acid assignments is cached, so repeated calls during minimisation, MD, or annealing only recompute coordinate-dependent quantities. The cache is built by `pose.energy.ScoreMatch(pose, params, ligand=None)`, the single support function that handles atom typing, pair-list construction, spline grids, and HBond geometry; `Score.__call__` dispatches each term method against that cache.
 
+| Method                                                                | Description |
+|-----------------------------------------------------------------------|-------------|
+| `sc = Score(name='Default', strict=False)`                            | Build a scorer. `name` is the parameter-set name in `database.json['Score Parameters']`. Defaults to `'Default'`. `strict=True` raises on any term dispatch gap; `strict=False` skips missing terms silently |
+| `total = sc(pose)`                                                    | Evaluate the weighted total score over a protein `Pose`. Returns a `float` |
+| `total = sc(pose, ligand=mol)`                                        | Evaluate the weighted total score for a receptor `Pose` + small-molecule `Molecule` complex. The small-molecule pair terms (`Gauss1`, `Gauss2`, `Repulsion`, `Hydrophobic`, `HBond`) compute receptor-ligand atom pairs; the affinity normalisation accounts for ligand rotatable bonds |
+| `total, terms = sc(pose, decompose=True)`                             | Same as the protein call but also return a per-term dict keyed by method name. Useful for term-weight fitting and for diagnosing why a design scores poorly |
+| `sc.FaAtrPotential(pose, cache)`                                      | Full-atom Lennard-Jones attractive term over inter-residue pairs, long-range smoothing between `fa_atr_short` and `fa_atr_long` |
+| `sc.FaRepPotential(pose, cache)`                                      | Full-atom Lennard-Jones repulsive term over inter-residue pairs |
+| `sc.FaSolPotential(pose, cache)`                                      | Pairwise Lazaridis-Karplus implicit-solvent term over inter-residue pairs, using `LK_DGFREE`/`LK_LAMBDA`/`LK_VOLUME` from `Atom_types` |
+| `sc.FaIntraRepPotential(pose, cache)`                                 | Within-residue Lennard-Jones repulsive term, with 1-N count-pair weighting |
+| `sc.FaIntraSolXover4Potential(pose, cache)`                           | Within-residue solvation term with crossover handling at 1-4 pairs |
+| `sc.FaElecPotential(pose, cache)`                                     | Coulomb electrostatics with sigmoidal distance-dependent dielectric (`coulomb_C0`, `sigmoidal_D`, `sigmoidal_D0`, `sigmoidal_S`) |
+| `sc.LkBallWtdPotential(pose, cache)`                                  | Lazaridis-Karplus solvation with weighted directional water sites placed geometrically per donor/acceptor |
+| `sc.HBondSrBbPotential(pose, cache)`                                  | Short-range (helix-range) backbone-backbone hydrogen bond, polynomial in distance × directional functions in three angles, fade-out across the distance shell |
+| `sc.HBondLrBbPotential(pose, cache)`                                  | Long-range (β-sheet-range) backbone-backbone hydrogen bond, same shape as `HBondSrBb` over wider separations |
+| `sc.HBondBbScPotential(pose, cache)`                                  | Backbone-sidechain hydrogen bond |
+| `sc.HBondScPotential(pose, cache)`                                    | Sidechain-sidechain hydrogen bond |
+| `sc.FaDunPotential(pose, cache)`                                      | Backbone-dependent rotamer score, `-log P(χ \| φ, ψ)` from bilinear interpolation over rotamer-well μ/σ grids plus a cyclic cubic spline in the terminal χ for semi-rotameric residues |
+| `sc.RamaPreProTermPotential(pose, cache)`                             | Ramachandran φ/ψ probability with pre-proline special-casing, Catmull-Rom bicubic interpolation, entropy correction |
+| `sc.PAaPpPotential(pose, cache)`                                      | Shapovalov amino-acid probability at given (φ, ψ), Catmull-Rom bicubic interpolation |
+| `sc.OmegaPotential(pose, cache)`                                      | Peptide-bond ω-torsion harmonic penalty around 180° (and 0° for cis), with phi/psi-dependent Gaussian shape |
+| `sc.ProClosePotential(pose, cache)`                                   | Proline ring-closure penalty (N-virtual and Cα-virtual distances plus the χ4 dihedral) |
+| `sc.DslfFa13Potential(pose, cache)`                                   | Disulfide-bond geometry constraint (Sγ-Sγ′ distance, Cα-Cβ-Sγ angles, Cβ-Sγ-Sγ′-Cβ′ dihedrals) |
+| `sc.YhhPlanarityPotential(pose, cache)`                               | Tyrosine hydroxyl rotamer-planarity penalty |
+| `sc.RefPotential(pose, cache)`                                        | Per-amino-acid unfolded-state reference energy, using `METHOD_WEIGHTS_ref` for the residue baseline |
+| `sc.Gauss1Potential(pose, cache, ligand=mol)`                         | Gaussian attractive pair term centred at d=0 Å over receptor-ligand pairs typed via `XS_atom_types` |
+| `sc.Gauss2Potential(pose, cache, ligand=mol)`                         | Gaussian attractive pair term centred at d=3 Å |
+| `sc.RepulsionPotential(pose, cache, ligand=mol)`                      | Overlap-only penalty for receptor-ligand pairs: positive when atoms penetrate, zero otherwise |
+| `sc.HydrophobicPotential(pose, cache, ligand=mol)`                    | Slope-step bonus over hydrophobic-hydrophobic receptor-ligand pairs |
+| `sc.HBondPotential(pose, cache, ligand=mol)`                          | Slope-step bonus over donor-acceptor receptor-ligand pairs |
+| `sc.DefaultOffsetPotential(pose, cache)`                              | Calibration offset: contributes a constant per residue, used to drive `Default` to its regression-sentinel value |
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-The `Score()` class is a hybrid physics + statistical energy function for protein design. Its 'Default' sums eight terms (three reused from `ForceField`, five added) and returns a single design score in kJ/mol-equivalent units. **Score is chirality-aware from line zero**, L-amino acids, D-amino acids, mixed L/D sequences, and non-canonical residues all score correctly with no extra arguments or special-cased call sites.
-
-| Method                                    | Description |
-|-------------------------------------------|-------------|
-| `sc = Score(name='Default')`              | Build a design scorer. `name` is the parameter-set name in `database.json['Energy Parameters']`. Defaults to `'Default'` |
-| `total = sc(pose, decompose=False)`       | Evaluate the weighted total score in kJ/mol. |
-| `total, terms = sc(pose, decompose=True)` | Same as above but also return a per-term dict with keys. Useful for term-weight fitting and for diagnosing why a design scores poorly |
-
-
-
-
-
-
-
-
-
-
-
-
-| Term            | Description
-|-----------------|------------------|
-| 'weights'       |                  |
-
-> `Score()` is the single API surface in this library that is chirality-aware end to end, it produces correct, comparable design scores for D-amino acids, mixed L/D sequences, mirror-image proteins, and non-canonical residues without any extra arguments.
-
-
-
-
-
-
-
-
-
-
-
-
+**Score is chirality-aware**: L-amino acids, D-amino acids, mixed L/D sequences, and non-canonical residues all score correctly with no extra arguments or special-cased call sites.
 
 ### Tools
 
@@ -353,7 +340,7 @@ These are standalone tools (not Pose() class methods) and thus are called on the
 | `Anneal(pose, ff=None, n_steps=10000, T_start=2000.0, T_end=10.0, sigma_small=5.0, sigma_large=30.0, p_large=0.2, p_shear=0.5, target_acc=0.30, adapt_window=100, seed=None, box=None)`               | Simulated annealing over backbone φ/ψ with two Metropolis move types, single-angle (random φ or ψ) and shear (compensating ψᵢ +Δ / φᵢ₊₁ −Δ that leaves residues 0..i−1 unmoved). Each step picks a small (adaptive `sigma_small`) or large (fixed `sigma_large`) Gaussian perturbation; `sigma_small` is updated by Robbins-Monro every `adapt_window` small moves to track `target_acc` ~ 0.30. Geometric cooling from `T_start` to `T_end`. Returns `(E_best, log)` with `'energies'`, `'temperatures'`, `'accepted'`, `'move_types'` (0=single, 1=shear, 2=invalid), `'sigma_history'`, `'best_step'`. The pose is left at the lowest-energy frame |
 | `Pack(pose, score=None, ff=None, n_steps=2000, T_start=10.0, T_end=0.1, patience=400, seed=None, box=None)` | Sidechain repacking via simulated annealing over the **full Rotamer Library ensemble** at each residue's current backbone (φ, ψ). At construction the candidate set per repackable residue is built once from `database.json['Rotamer Library']` (the full list of (μ_χ tuple, P_k) entries at that residue's grid cell, this can be 3 rotamers for Val, up to ~80 for Lys/Arg). The SA loop picks a random repackable residue, samples one of its rotamers k weighted by `P_k` (so dominant rotamers are explored more often but rare ones remain reachable), applies the trial χ tuple, rescores, and accepts via Metropolis: `dE ≤ 0` or `random() < exp(−dE/T)`. Geometric cooling from `T_start` to `T_end`. Tracks the best-scoring configuration seen and restores it before returning. Early-exit if no acceptance occurs in `patience` consecutive steps. `score` is a reusable `Score` instance; if `None`, one is built from `ff` (or a fresh `ForceField` if `ff` is also `None`). Using `Score` rather than the bare force field matters because the statistical terms (rotamer prior, KBP, reference state) discriminate native-like rotamer choices in a way pure-physics forces cannot. D-amino acids handled automatically. Returns `(E_final, log)` where `log` carries `'energies'`, `'temperatures'`, `'accepts'` (bool array of accept/reject per step), `'best_E'`, `'steps_run'`, `'converged'` (True if early-exited via stagnation), `'n_residues'` (count of repackable residues) |
 | `MolecularDynamics(pose, ff=None, n_steps=1000, dt_fs=2.0, T=300.0, thermostat='nve', friction_ps=1.0, constraints='hbonds', shake_tol=1e-8, shake_max=100, seed=None, trajectory_every=0, box=None)` | Velocity-Verlet NVE or BAOAB Langevin NVT integration. Initial velocities are sampled from Maxwell-Boltzmann at `T` with the centre-of-mass momentum zeroed and projected onto the constraint manifold. `thermostat='nve'` runs energy-conserving dynamics; `thermostat='langevin'` runs the BAOAB stochastic splitting at temperature `T` with friction `friction_ps` ps⁻¹. `constraints='hbonds'` enables vectorised SHAKE/RATTLE on every X–H bond (target lengths read from `database.json['Energy Parameters']`), making `dt_fs=2.0` stable; `constraints='none'` disables them. `trajectory_every=k` saves a coordinate snapshot every k steps. Returns `(final_E, log)` with `'energies'`, `'kinetic'`, `'temperatures'`, `'frames'`, `'n_constraints'`, `'dof'` |
-| `Port('openff')`                                                   | Ports the OpenFF Sage 2.3.0 or AMBER ff19SB or CHARMM36 parameters into database.json so you can use these force fields. Arguments are 'openff' or 'ff19sb' or 'charmm36', and they are the same strings that will be used in `ForceField(name='')` |
+| `Port('openff')`                                                   | Ports the OpenFF Sage 2.3.0, or AMBER ff19SB, or CHARMM36 parameters into database.json ['Energy Parameters'] so you can use these force fields. Also ports REF15 and Autodock Vina to database.json ['Score Parameters']. Arguments are 'openff' or 'ff19sb' or 'charmm36' or 'ref15' or 'vina', and they are the same strings that will be used in `ForceField(name='')` or `Score(name='')` |
 
 > BLAST handles sequences beyond the 20 canonical L-amino acids automatically: **D-amino acids**: stored as lowercase letters in `pose.data['FASTA']`. BLAST uppercases both sequences before alignment, treating each D-amino acid as its L-counterpart for scoring purposes. This correctly reflects the chemical reality that D- and L-forms of the same residue have identical side-chain chemistry. **Non-canonical amino acids**: any letter not in the 20-letter BLOSUM62 alphabet falls back to: `+4` for a self-match (equal to the minimum BLOSUM62 diagonal), `−1` for a mismatch. This keeps non-canonical residues visible to the aligner without inflating scores.
 
@@ -590,39 +577,49 @@ D-amino acid handling: the library is keyed on the L-form 3-letter code only. Co
 
 **`Default` (smoke-test / regression FF, 9 terms)**, one broad-wildcard SMIRKS per section (`[*:1]~[*:2]` for bonds, `[*:1]~[*:2]~[*:3]` for angles + UB, etc.). All linear coefficients (`K_b`, `K_theta`, `K_ub`, `K_phi`, `vdW.epsilon`, `CMAP` grid values) were uniformly calibrated so that `ForceField()(Pose().Build('AaBbCcDdEeFfGgHhIiJjKkLlMmNnOoPpQqRrSsTtUuVvWwXxYyZz'))` returns **100.00 kJ/mol** exactly (within float64 ulps). `Electrostatic.q = [0.0]` and `vdW.alpha = 0` by design, so `ElectrostaticPotential` and `PolarisationPotential` both evaluate to 0, this isolates the calibration from quadratic charge-dependent terms. `CMAP` carries a 24×24 constant grid for every A-Z one-letter code. `Default` is not for production; its only purpose is to drive every potential method, every cache path, and every dispatch branch in `ForceField` through a deterministic check.
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 ## Description of score parameters in database.json:
 
-`database['Score Parameters'][NAME]` is a dict of **named score function parameter sets**.
+`database['Score Parameters'][NAME]` is a dict of **named score-function parameter sets**. The canonical default set is `Default` with the following parameters:
 
-| Sub-key            | Value Type | Description |
-|--------------------|------------|-------------|
-| `Constants`        | Dict       | Global constants. `epsilon_r` is the relative dielectric (default 1.0); `f_lj` and `f_elec` are the 1-4 non-bonded scaling factors (LJ = 0.5, electrostatics = 5/6) |
+| Sub-key              | Value Type | Description |
+|----------------------|------------|-------------|
+| `Constants`          | Dict       | Global constants used by multiple terms. Distance cutoffs (`fa_max_dis`, `fa_elec_max_dis`, `fa_elec_min_dis`, `fa_atr_short`, `fa_atr_long`, `cutoff`), dielectric model (`eps_core`, `eps_solvent`, `sigmoidal_D`, `sigmoidal_D0`, `sigmoidal_S`), Coulomb constant (`coulomb_C0`), 1-N connectivity scaling (`connectivity_weight = {'3': 0.0, '4': 0.2, '5+': 1.0}`), and small-molecule affinity scaling (`scale`, `per_residue`, `nrot_w`, `glue_w`). Distances in Å, Coulomb constant in kcal·Å/e² |
+| `Atom_types`         | Dict       | 154 full-atom types keyed by code (`CNH2`, `COO`, `CAbb`, `Nbb`, `Hpol`, …). Each value carries `element`, `LJ_RADIUS` (Å), `LJ_WDEPTH` (kcal/mol), `LK_DGFREE` (kcal/mol), `LK_LAMBDA` (Å), `LK_VOLUME` (Å³), plus boolean `acceptor`/`donor` flags and HBond chemical-type tags. Drives per-atom typing for the pair, solvation, electrostatic, and HBond terms |
+| `XS_atom_types`      | Dict       | 31 small-molecule atom types keyed by code (`C_H`, `C_P`, `N_D`, `N_A`, `N_DA`, `O_A`, `O_DA`, `S_P`, halogens, metals). Each value carries `radius` (Å) and boolean `hydrophobic`/`acceptor`/`donor`. Drives ligand atom typing for the Gauss/Repulsion/Hydrophobic/HBond ligand-pair terms |
+| `Residue_types`      | Dict       | 21 canonical amino-acid templates keyed by 3-letter code. Each carries a per-atom mapping `{N: {type, mm_type, charge}, CA: {…}, …}`. Resolves protein-pose atom names to full-atom types and partial charges |
+| `METHOD_WEIGHTS_ref` | List       | 20-float array of per-amino-acid reference free energies, indexed by 1-letter code in alphabetical order (A, C, D, E, F, G, H, I, K, L, M, N, P, Q, R, S, T, V, W, Y). Consumed by `RefPotential` after multiplying by `Ref.weight` |
+| `FaAtr`              | Dict       | `{weight}`. Pairwise Lennard-Jones attractive component with long-range smoothing between `fa_atr_short` and `fa_atr_long` |
+| `FaRep`              | Dict       | `{weight}`. Pairwise Lennard-Jones repulsive component, dominant under the LJ minimum |
+| `FaSol`              | Dict       | `{weight}`. Pairwise Lazaridis-Karplus implicit-solvent term using `LK_DGFREE`, `LK_LAMBDA`, `LK_VOLUME` from `Atom_types` |
+| `FaIntraRep`         | Dict       | `{weight}`. Within-residue Lennard-Jones repulsive term over 1-4 and longer pairs |
+| `FaIntraAtr`         | Dict       | `{weight}`. Within-residue LJ attractive (declared; not dispatched by `Default`'s `Terms`, reserved for restricted named subsets) |
+| `FaIntraSolXover4`   | Dict       | `{weight}`. Within-residue solvation with crossover handling at 1-4 pairs |
+| `FaElec`             | Dict       | `{weight}`. Pairwise Coulomb electrostatics with sigmoidal distance-dependent dielectric (`coulomb_C0`, `sigmoidal_D`, `sigmoidal_D0`, `sigmoidal_S`) |
+| `LkBallIso`          | Dict       | `{weight}`. Isotropic Lazaridis-Karplus solvation (declared; folded into `LkBallWtd` at runtime) |
+| `LkBallWtd`          | Dict       | `{weight}`. Lazaridis-Karplus solvation with weighted directional water sites placed geometrically per donor/acceptor |
+| `LkBallBridge`       | Dict       | `{weight}`. Bridging-water adjustment (declared; folded into `LkBallWtd` at runtime) |
+| `FaDun`              | Dict       | `{weight}`. Backbone-dependent rotamer score, `-log P(χ \| φ, ψ)` from bilinear interpolation over rotamer-well μ/σ grids plus a cyclic cubic spline in the terminal χ for semi-rotameric residues |
+| `RamaPreProTerm`     | Dict       | `{weight}`. Ramachandran φ/ψ probability with pre-proline special-casing, Catmull-Rom bicubic interpolation, entropy correction |
+| `PAaPp`              | Dict       | `{weight}`. Shapovalov amino-acid probability at given (φ, ψ), Catmull-Rom bicubic interpolation |
+| `Omega`              | Dict       | `{weight}`. Peptide-bond ω-torsion harmonic penalty around 180° (and 0° for cis) |
+| `ProClose`           | Dict       | `{weight}`. Proline-ring closure penalty |
+| `DslfFa13`           | Dict       | `{weight}`. Disulfide-bond geometry constraint (Cβ–Sγ–Sγ′–Cβ′ torsion plus Cα–Cβ–Sγ angles) |
+| `YhhPlanarity`       | Dict       | `{weight}`. Tyrosine hydroxyl rotamer-planarity penalty |
+| `Ref`                | Dict       | `{weight}`. Per-AA reference-energy multiplier; the residue baseline comes from `METHOD_WEIGHTS_ref` |
+| `HBondSrBb`          | Dict       | `{weight}`. Short-range (helix) backbone-backbone hydrogen bond |
+| `HBondLrBb`          | Dict       | `{weight}`. Long-range (β-sheet) backbone-backbone hydrogen bond |
+| `HBondBbSc`          | Dict       | `{weight}`. Backbone-sidechain hydrogen bond |
+| `HBondSc`            | Dict       | `{weight}`. Sidechain-sidechain hydrogen bond |
+| `Gauss1`             | Dict       | `{offset, width, cutoff, weight}`. Gaussian attractive pair term centred at `offset = 0 Å` with half-width `width = 0.5 Å`, evaluated up to `cutoff = 8 Å`; pair selection by `XS_atom_types` |
+| `Gauss2`             | Dict       | `{offset, width, cutoff, weight}`. Second Gaussian, `offset = 3 Å`, `width = 2 Å` |
+| `Repulsion`          | Dict       | `{offset, cutoff, weight}`. Overlap-only penalty: positive when atoms penetrate inside `offset`, zero otherwise; pair selection by `XS_atom_types` |
+| `Hydrophobic`        | Dict       | `{good, bad, cutoff, weight}`. Slope-step bonus over hydrophobic-hydrophobic pairs (XS types marked `hydrophobic`); linear ramp from `good` (full bonus) to `bad` (zero) |
+| `HBond`              | Dict       | `{good, bad, cutoff, weight}`. Slope-step bonus over donor-acceptor pairs (XS types marked `donor`/`acceptor`/`_DA`); same ramp shape as `Hydrophobic` |
+| `CartBonded`         | Dict       | `{weight}`. Cartesian bond/angle/torsion deviation penalty (declared; not dispatched by `Default`'s `Terms`) |
+| `DefaultOffset`      | Dict       | `{weight}`. Calibration anchor: contributes a constant per residue, scaled by `scale / per_residue` from `Constants`. Used as the regression sentinel for `Default` (see calibration paragraph) |
+| `Terms`              | List       | Ordered list of `[method_name, kwargs_dict]` pairs to evaluate. `Score.__call__` iterates this list and dispatches to each named method on `Score`. The `Default` set carries 25 entries — every potential method in the framework |
 
-
-
-
-
-
-
-
-
-
-
+**`Default` (smoke-test / regression set, 25 dispatched terms)**, contains dummy parameter values, it is used as a smoke-test to ensure that all `Score()` methods are correctly working. `Score()(Pose().Build('AaBbCcDdEeFfGgHhIiJjKkLlMmNnOoPpQqRrSsTtUuVvWwXxYyZz'))` returns **100.00** exactly.
 
 ---
 
