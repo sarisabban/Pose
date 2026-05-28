@@ -5166,8 +5166,7 @@ class Score():
 		Arguments:
 		----------
 			name:   str - parameter set under ['Score Parameters']
-				(e.g. 'REF15', 'AutoDock Vina', 'Default');
-				case-insensitive
+				(e.g. 'Default'); case-insensitive
 			strict: bool - reserved for future use
 		Returns:
 		--------
