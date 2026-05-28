@@ -2574,7 +2574,7 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None,
 	--------
 		dict: 'hash', 'coords', 'atom_types', 'inter_pairs', 'intra_pairs'
 		      plus per-term raw value keys (e.g. 'FaAtrPotential') and
-		      callable nested helpers (e.g. 'evalpairs', 'ref15hbond')
+		      callable nested helpers (e.g. 'evalpairs', 'fullatomhbond')
 	'''
 	def patternsearch(pose, params, ligand=None,
 			xs_override=None, nrot_override=None):
@@ -2597,7 +2597,7 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None,
 			'intra_ligand_pairs', 'nrot', 'n_r' (receptor atom count)
 		'''
 		if 'Atom_types' in params and 'Residue_types' in params:
-			out = ref15atomcache(pose, params)
+			out = fullatomcache(pose, params)
 			n_atoms = int(len(out['coords']))
 			out.setdefault('inter_pairs',
 				np.empty((0, 2), dtype=np.int64))
@@ -2613,17 +2613,17 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None,
 			out.setdefault('xs_is_acceptor_arr', np.zeros(0, dtype=bool))
 			return out
 		if 'XS_atom_types' in params:
-			return patternsearchvina(pose, params, ligand,
+			return patternsearchsmall(pose, params, ligand,
 				xs_override, nrot_override)
 		raise Exception(
 			'PatternSearch: unsupported params (no recognised typing system)')
-	def patternsearchvina(pose, params, ligand, xs_override, nrot_override):
+	def patternsearchsmall(pose, params, ligand, xs_override, nrot_override):
 		'''
-		XS atom typing + pair lists for the AutoDock Vina score function
+		XS atom typing + pair lists for the small-molecule docking score function
 		Arguments:
 		----------
 			pose:          Pose or Molecule - receptor
-			params:        dict - the AutoDock Vina param block
+			params:        dict - the small-molecule docking param block
 			ligand:        Molecule or None - the ligand (None for non-docking)
 			xs_override:   dict or None - {combined_index: 'XS_TYPE_NAME', ...}
 			nrot_override: int or None - explicit Nrot
@@ -2837,7 +2837,7 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None,
 			'intra_ligand_pairs': intra_pairs,
 			'nrot': nrot,
 			'n_r': n_r}
-	def ref15atomcache(pose, params):
+	def fullatomcache(pose, params):
 		'''
 		Atom typing + pair lists for the score function
 		Arguments:
@@ -3588,7 +3588,7 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None,
 	def countnrot(ligand):
 		'''
 		Count non-terminal, non-ring, non-amide single bonds in a ligand
-		(Nrot for AutoDock Vina's conf-independent term).
+		(n_rot for the rotational-entropy penalty term).
 		A bond is rotatable iff:
 		  - single bond order
 		  - not a ring (= bridge-edge: removing it disconnects its endpoints)
@@ -3649,7 +3649,7 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None,
 			return False
 		def isamide(a, b):
 			# C-N where the C is acyclic and double-bonded to O (true
-			# amide carbonyl). AutoDock's torsion tree leaves these rigid.
+			# amide carbonyl). The rotatable-bond torsion tree leaves these rigid.
 			# Aromatic ring C-N bonds are NOT amides — they get caught by
 			# the ring/inring filter instead.
 			'''
@@ -3720,19 +3720,19 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None,
 		return nrot
 	def countnumtors(ligand):
 		'''
-		Compute the Vina conf-independent term's "num_tors" input:
+		Compute the rotational-entropy penalty term's "num_tors" input:
 		sum over rotatable bonds of 0.5 from each side, where each side
 		contributes 0.5 only if it has > 1 heavy non-H neighbour. So a
 		regular rotation between two heavy-substituted carbons contributes
 		1.0, while a rotation where one side has only one heavy neighbour
 		(like a carboxyl C-OH) contributes 0.5. This is the actual quantity
-		used in Vina's affinity denominator `1 + 0.05846 * num_tors`.
+		used in the rotational-entropy penalty denominator `1 + 0.05846 * num_tors`.
 		Arguments:
 		----------
 			ligand: Molecule
 		Returns:
 		--------
-			float: Vina num_tors (typically equal to Nrot or Nrot-k/2)
+			float: rotational-entropy num_tors (typically equal to Nrot or Nrot-k/2)
 		'''
 		atoms = ligand.data['Atoms']
 		bonds = ligand.data['Bonds']
@@ -3952,7 +3952,7 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None,
 			'intra_weighted': intra_raw * weight}
 	def gausspair(cache, key):
 		'''
-		Evaluate one Vina gaussian term and pack the result
+		Evaluate one small-molecule Gaussian pair term (XS-typed) and pack the result
 		Arguments:
 		----------
 			cache: dict - PatternSearch result
@@ -4045,7 +4045,7 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None,
 			return np.where(valid & gate, slopestep(d), 0.0)
 		inter_raw, intra_raw = evalpairs(cache, 'both', fn)
 		return termresult(inter_raw, intra_raw, weight)
-	def ref15pairs(cache, same_res=False, cp='cp4',
+	def fullatompairs(cache, same_res=False, cp='cp4',
 			use_cp_rep=False):
 		'''
 		Build the typed-pair index arrays (i, j, distance, weight) for one same-res mode
@@ -4101,7 +4101,7 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None,
 		Final: atrE *= ljatr_final_weight.
 		Arguments:
 		----------
-			cache: per-pose cache from _ref15atomcache
+			cache: per-pose cache from _fullatomcache
 			pi, pj: atom-i and atom-j indices (np.int64)
 			r: pair distances (np.float64)
 		Returns:
@@ -4158,7 +4158,7 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None,
 		atrE = np.where(valid, atrE, 0.0)
 		repE = np.where(valid, repE, 0.0)
 		return atrE, repE
-	def ref15ljraw(cache, same_res):
+	def fullatomljraw(cache, same_res):
 		'''
 		Compute raw LJ attractive + repulsive contributions over typed pairs
 		Arguments:
@@ -4169,7 +4169,7 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None,
 		--------
 			tuple: (atr_sum, rep_sum) - raw scalar sums before weighting
 		'''
-		pi, pj, r, w = ref15pairs(cache, same_res=same_res)
+		pi, pj, r, w = fullatompairs(cache, same_res=same_res)
 		if len(pi) == 0: return 0.0, 0.0
 		atrE, repE = ljpair(cache, pi, pj, r)
 		return float(np.sum(w * atrE)), float(np.sum(w * repE))
@@ -4188,7 +4188,7 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None,
 		(e.g. virtuals or H) return 0 for that pair.
 		Arguments:
 		----------
-			cache: per-pose cache from _ref15atomcache
+			cache: per-pose cache from _fullatomcache
 			pi: atom-i indices (np.int64)
 			pj: atom-j indices (np.int64)
 			r:  pair distances (np.float64)
@@ -4306,7 +4306,7 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None,
 		e = e * fw
 		e = np.where(valid, e, 0.0)
 		return e
-	def ref15solraw(cache, same_res):
+	def fullatomsolraw(cache, same_res):
 		'''
 		Lazaridis-Karplus solvation raw sum, using the
 		per-atom-type-pair etable params (close-poly + far-fade).
@@ -4314,18 +4314,18 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None,
 		weight w.
 		Arguments:
 		----------
-			cache: per-pose cache from _ref15atomcache
+			cache: per-pose cache from _fullatomcache
 			same_res: if True compute intra-residue (xover4) subset,
 				otherwise inter-residue pairs
 		Returns:
 		--------
 			float: raw sum of (lki + lkj) * w over heavy-heavy pairs
 		'''
-		pi, pj, r, w = ref15pairs(cache, same_res=same_res)
+		pi, pj, r, w = fullatompairs(cache, same_res=same_res)
 		if len(pi) == 0: return 0.0
 		e = solpair(cache, pi, pj, r)
 		return float(np.sum(w * e))
-	def ref15stubterm(weight_key):
+	def fullatomstubterm(weight_key):
 		'''
 		Generic stub: compute Sum over typed pairs of a user-supplied per-pair function
 		Arguments:
@@ -4808,7 +4808,7 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None,
 			return t * t * (3.0 - 2.0 * t)
 		t = (mx2 - x) / max(mx2 - mx1, 1e-12)
 		return t * t * (3.0 - 2.0 * t)
-	def ref15hbond(pose, cache, per_hb=None):
+	def fullatomhbond(pose, cache, per_hb=None):
 		'''
 		Compute the hydrogen-bond energy with the four categories partitioned
 		Arguments:
@@ -5114,16 +5114,16 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None,
 		return cat_totals
 	cache = {}
 	if 'XS_atom_types' in params:
-		cache.update(patternsearchvina(pose, params, ligand,
+		cache.update(patternsearchsmall(pose, params, ligand,
 			xs_override, nrot_override))
 	if 'Atom_types' in params:
-		cache.update(ref15atomcache(pose, params))
+		cache.update(fullatomcache(pose, params))
 	if not cache:
 		raise Exception(
 			'ScoreMatch: unsupported params')
 	cache['patternsearch'] = patternsearch
-	cache['patternsearchvina'] = patternsearchvina
-	cache['ref15atomcache'] = ref15atomcache
+	cache['patternsearchsmall'] = patternsearchsmall
+	cache['fullatomcache'] = fullatomcache
 	cache['bfswithin'] = bfswithin
 	cache['countnrot'] = countnrot
 	cache['countnumtors'] = countnumtors
@@ -5133,13 +5133,13 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None,
 	cache['termresult'] = termresult
 	cache['gausspair'] = gausspair
 	cache['slopestep'] = slopestep
-	cache['ref15pairs'] = ref15pairs
+	cache['fullatompairs'] = fullatompairs
 	cache['ljpair'] = ljpair
-	cache['ref15ljraw'] = ref15ljraw
+	cache['fullatomljraw'] = fullatomljraw
 	cache['lkisopair'] = lkisopair
 	cache['solpair'] = solpair
-	cache['ref15solraw'] = ref15solraw
-	cache['ref15stubterm'] = ref15stubterm
+	cache['fullatomsolraw'] = fullatomsolraw
+	cache['fullatomstubterm'] = fullatomstubterm
 	cache['fadun_rotwell_grid'] = fadun_rotwell_grid
 	cache['fadun_entropy_grid'] = fadun_entropy_grid
 	cache['fadun_spline_eval'] = fadun_spline_eval
@@ -5153,7 +5153,7 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None,
 	cache['hbond_eval_lookup'] = hbond_eval_lookup
 	cache['hbond_poly_eval'] = hbond_poly_eval
 	cache['hbond_fade'] = hbond_fade
-	cache['ref15hbond'] = ref15hbond
+	cache['fullatomhbond'] = fullatomhbond
 	return cache
 
 class Score():
@@ -5253,7 +5253,7 @@ class Score():
 		return float(total_native)
 	def Gauss1Potential(self, pose, cache, ligand=None, **kw):
 		'''
-		Vina gaussian-1 attractive term, exp(-(d/0.5)^2)
+		Small-molecule pair Gaussian centred at d=0 Å, exp(-(d/0.5)^2)
 		Arguments:
 		----------
 			pose:   Pose or Molecule - source pose
@@ -5266,7 +5266,7 @@ class Score():
 		return cache['gausspair'](cache, 'Gauss1')
 	def Gauss2Potential(self, pose, cache, ligand=None, **kw):
 		'''
-		Vina gaussian-2 long-range attractive term, exp(-((d-3)/2)^2)
+		Small-molecule pair Gaussian centred at d=3 Å (long-range), exp(-((d-3)/2)^2)
 		Arguments:
 		----------
 			pose:   Pose or Molecule - source pose
@@ -5279,7 +5279,7 @@ class Score():
 		return cache['gausspair'](cache, 'Gauss2')
 	def RepulsionPotential(self, pose, cache, ligand=None, **kw):
 		'''
-		Vina repulsion term, d^2 where d < 0 (atomic overlap)
+		Small-molecule pair repulsion: d^2 where d < 0 (atomic overlap, quadratic penalty)
 		Arguments:
 		----------
 			pose:   Pose or Molecule - source pose
@@ -5314,7 +5314,7 @@ class Score():
 		return cache['termresult'](inter_raw, intra_raw, weight)
 	def HydrophobicPotential(self, pose, cache, ligand=None, **kw):
 		'''
-		Vina hydrophobic contact term, slope_step over hydrophobic pairs
+		Small-molecule hydrophobic-pair slope-step contact (XS-typed hydrophobic pairs)
 		Arguments:
 		----------
 			pose:   Pose or Molecule - source pose
@@ -5327,7 +5327,7 @@ class Score():
 		return cache['slopestep'](cache, 'Hydrophobic', 'hydrophobic')
 	def HBondPotential(self, pose, cache, ligand=None, **kw):
 		'''
-		Vina non-directional hydrogen-bond term over donor-acceptor pairs
+		Small-molecule donor-acceptor slope-step hydrogen bond (non-directional)
 		Arguments:
 		----------
 			pose:   Pose or Molecule - source pose
@@ -5369,7 +5369,7 @@ class Score():
 			      'inter_weighted', 'intra_weighted' (plus 'raw' for full-atom
 			      terms that decompose intra vs inter)
 		'''
-		raw, _ = cache['ref15ljraw'](cache, same_res=False)
+		raw, _ = cache['fullatomljraw'](cache, same_res=False)
 		weight = float(self.Parameters['FaAtr']['weight'])
 		return {'inter_raw': raw, 'intra_raw': 0.0,
 			'inter_weighted': raw * weight, 'intra_weighted': 0.0,
@@ -5389,7 +5389,7 @@ class Score():
 			      'inter_weighted', 'intra_weighted' (plus 'raw' for full-atom
 			      terms that decompose intra vs inter)
 		'''
-		_, raw = cache['ref15ljraw'](cache, same_res=False)
+		_, raw = cache['fullatomljraw'](cache, same_res=False)
 		weight = float(self.Parameters['FaRep']['weight'])
 		return {'inter_raw': raw, 'intra_raw': 0.0,
 			'inter_weighted': raw * weight, 'intra_weighted': 0.0,
@@ -5409,7 +5409,7 @@ class Score():
 			      'inter_weighted', 'intra_weighted' (plus 'raw' for full-atom
 			      terms that decompose intra vs inter)
 		'''
-		raw = cache['ref15solraw'](cache, same_res=False)
+		raw = cache['fullatomsolraw'](cache, same_res=False)
 		weight = float(self.Parameters['FaSol']['weight'])
 		return {'inter_raw': raw, 'intra_raw': 0.0,
 			'inter_weighted': raw * weight, 'intra_weighted': 0.0,
@@ -5429,7 +5429,7 @@ class Score():
 			      'inter_weighted', 'intra_weighted' (plus 'raw' for full-atom
 			      terms that decompose intra vs inter)
 		'''
-		pi, pj, r, w = cache['ref15pairs'](cache, same_res=True, cp='cp3')
+		pi, pj, r, w = cache['fullatompairs'](cache, same_res=True, cp='cp3')
 		weight = float(self.Parameters['FaIntraRep']['weight'])
 		if len(pi) == 0:
 			return {'inter_raw': 0.0, 'intra_raw': 0.0,
@@ -5455,7 +5455,7 @@ class Score():
 			      'inter_weighted', 'intra_weighted' (plus 'raw' for full-atom
 			      terms that decompose intra vs inter)
 		'''
-		raw = cache['ref15solraw'](cache, same_res=True)
+		raw = cache['fullatomsolraw'](cache, same_res=True)
 		weight = float(self.Parameters['FaIntraSolXover4']['weight'])
 		return {'inter_raw': 0.0, 'intra_raw': raw,
 			'inter_weighted': 0.0, 'intra_weighted': raw * weight,
@@ -5568,7 +5568,7 @@ class Score():
 					+ (t3 - 2*t2 + t) * h_hi * d0_hi)
 				e = np.where(in_hi, H, e)
 			return float(np.sum(w * e))
-		pi, pj, r, w = cache['ref15pairs'](cache, same_res=False, cp='cp4',
+		pi, pj, r, w = cache['fullatompairs'](cache, same_res=False, cp='cp4',
 			use_cp_rep=True)
 		raw = pair_sum(pi, pj, r, w)
 		return {'inter_raw': raw, 'intra_raw': 0.0,
@@ -5590,7 +5590,7 @@ class Score():
 			      terms that decompose intra vs inter)
 		'''
 		weight = float(self.Parameters['LkBallWtd']['weight'])
-		pi, pj, r, w = cache['ref15pairs'](cache, same_res=False, cp='cp4')
+		pi, pj, r, w = cache['fullatompairs'](cache, same_res=False, cp='cp4')
 		if len(pi) == 0:
 			return {'inter_raw': 0.0, 'intra_raw': 0.0,
 				'inter_weighted': 0.0, 'intra_weighted': 0.0,
@@ -5693,7 +5693,7 @@ class Score():
 			rl = {}
 		residues_db = rl.get('residues', {})
 		if not residues_db:
-			return cache['ref15stubterm']('FaDun')
+			return cache['fullatomstubterm']('FaDun')
 		phi_start = float(rl.get('phi_start', -180.0))
 		phi_step = float(rl.get('phi_step', 10.0))
 		phi_n = int(rl.get('phi_n', 36))
@@ -6114,7 +6114,7 @@ class Score():
 		all_t = rd.get('all', {})
 		pre_t = rd.get('prepro', {})
 		if not all_t:
-			return cache['ref15stubterm']('RamaPreProTerm')
+			return cache['fullatomstubterm']('RamaPreProTerm')
 		aas = pose.data.get('Amino Acids') or {}
 		raw = 0.0
 		sorted_ris = sorted(int(r) for r in aas.keys())
@@ -6187,7 +6187,7 @@ class Score():
 		paa = self.Parameters.get('P_AA') or {}
 		paapp = self.Parameters.get('P_AA_pp') or {}
 		if not paa or not paapp:
-			return cache['ref15stubterm']('PAaPp')
+			return cache['fullatomstubterm']('PAaPp')
 		aas = pose.data.get('Amino Acids') or {}
 		nterm = set(); cterm = set()
 		if aas:
@@ -6252,7 +6252,7 @@ class Score():
 		weight = float(self.Parameters['Omega']['weight'])
 		omega_tab = self.Parameters.get('Omega_tables') or {}
 		if not omega_tab:
-			return cache['ref15stubterm']('Omega')
+			return cache['fullatomstubterm']('Omega')
 		aas = pose.data.get('Amino Acids') or {}
 		cterm = set()
 		if aas:
@@ -6683,7 +6683,7 @@ class Score():
 			      'inter_weighted', 'intra_weighted' (plus 'raw' for full-atom
 			      terms that decompose intra vs inter)
 		'''
-		raw = cache['ref15hbond'](pose, cache)['SR_BB']
+		raw = cache['fullatomhbond'](pose, cache)['SR_BB']
 		w = float(self.Parameters['HBondSrBb']['weight'])
 		return {'inter_raw': 0.0, 'intra_raw': raw,
 			'inter_weighted': 0.0, 'intra_weighted': raw * w,
@@ -6703,7 +6703,7 @@ class Score():
 			      'inter_weighted', 'intra_weighted' (plus 'raw' for full-atom
 			      terms that decompose intra vs inter)
 		'''
-		raw = cache['ref15hbond'](pose, cache)['LR_BB']
+		raw = cache['fullatomhbond'](pose, cache)['LR_BB']
 		w = float(self.Parameters['HBondLrBb']['weight'])
 		return {'inter_raw': 0.0, 'intra_raw': raw,
 			'inter_weighted': 0.0, 'intra_weighted': raw * w,
@@ -6723,7 +6723,7 @@ class Score():
 			      'inter_weighted', 'intra_weighted' (plus 'raw' for full-atom
 			      terms that decompose intra vs inter)
 		'''
-		raw = cache['ref15hbond'](pose, cache)['BB_SC']
+		raw = cache['fullatomhbond'](pose, cache)['BB_SC']
 		w = float(self.Parameters['HBondBbSc']['weight'])
 		return {'inter_raw': 0.0, 'intra_raw': raw,
 			'inter_weighted': 0.0, 'intra_weighted': raw * w,
@@ -6743,7 +6743,7 @@ class Score():
 			      'inter_weighted', 'intra_weighted' (plus 'raw' for full-atom
 			      terms that decompose intra vs inter)
 		'''
-		raw = cache['ref15hbond'](pose, cache)['SC']
+		raw = cache['fullatomhbond'](pose, cache)['SC']
 		w = float(self.Parameters['HBondSc']['weight'])
 		return {'inter_raw': 0.0, 'intra_raw': raw,
 			'inter_weighted': 0.0, 'intra_weighted': raw * w,
