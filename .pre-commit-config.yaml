@@ -1,0 +1,41 @@
+# Pre-commit hooks for Pose.
+# Install once: pre-commit install
+# Run on all files: pre-commit run --all-files
+#
+# pose/pose.py is excluded from style hooks per constraint C1 (read-only
+# golden core). Style fixes there are the BDFL's prerogative.
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+        exclude: ^(LICENSE|NOTICE)$
+      - id: end-of-file-fixer
+        exclude: ^(LICENSE|NOTICE)$
+      - id: check-yaml
+      - id: check-toml
+      - id: check-json
+        exclude: ^pose/database\.json$
+      - id: check-added-large-files
+        args: ['--maxkb=1024']
+        exclude: ^(pose/Video.*\.gif|pose/database\.json)$
+      - id: check-merge-conflict
+      - id: mixed-line-ending
+        args: ['--fix=lf']
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.15.0
+    hooks:
+      - id: ruff
+        args: [--fix]
+        exclude: ^pose/pose\.py$
+      - id: ruff-format
+        exclude: ^pose/pose\.py$
+
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v1.13.0
+    hooks:
+      - id: mypy
+        files: ^pose/(tools|energy)\.py$
+        additional_dependencies: [numpy]
