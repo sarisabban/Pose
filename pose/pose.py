@@ -1504,7 +1504,8 @@ class Pose():
 		dz = c[:, None, 2] - c[None, :, 2]
 		dm_sq = dx*dx + dy*dy + dz*dz
 		reach_sq = (radii[:, None] + radii[None, :]) ** 2
-		nbr_mask = (dm_sq < reach_sq) & (dm_sq > 0)
+		n_ar = np.arange(n)
+		nbr_mask = (dm_sq < reach_sq) & (n_ar[:, None] != n_ar[None, :])
 		i_idx, j_idx = np.where(nbr_mask)
 		M = i_idx.size
 		buried = np.zeros((n, n_points), dtype=bool)
