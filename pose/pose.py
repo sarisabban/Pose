@@ -1847,7 +1847,7 @@ class Pose():
 					if in_tgt: break
 					in_tgt = False
 					continue
-				if rec != 'ATOM': continue
+				if rec not in ('ATOM', 'HETATM'): continue
 				ch = line[21]
 				if chain and ch not in chain: continue
 				if has_mdl and not in_tgt: continue
