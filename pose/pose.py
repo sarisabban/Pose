@@ -1934,7 +1934,7 @@ class Pose():
 						while j < n and ln[j] not in (' ', '\t'): j += 1
 						f.append(ln[i:j])
 						i = j
-				if f[C['group_PDB']] != 'ATOM': continue
+				if f[C['group_PDB']] not in ('ATOM', 'HETATM'): continue
 				ch = f[C['auth_asym_id']]
 				if chain and ch not in chain: continue
 				if i_mdl is not None:
