@@ -1369,7 +1369,7 @@ class Pose():
 		for i in range(N):
 			for turn, span in [(turn3,4),(turn4,5),(turn5,6)]:
 				if turn[i]:
-					for k in range(i, min(i+span, N)):
+					for k in range(i+1, min(i+span-1, N)):
 						if ss[k] == 'L': ss[k] = 'T'
 		for i in range(N - 1):
 			if turn5[i] and turn5[i + 1]:
