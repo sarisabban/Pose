@@ -1083,7 +1083,7 @@ class Pose():
 			'_atom_site.Cartn_z',
 			'_atom_site.occupancy',
 			'_atom_site.B_iso_or_equiv',
-			'_atom_site.pdbx_formal_charge',
+			'_atom_site.pdbx_partial_charge',
 			'_atom_site.auth_seq_id',
 			'_atom_site.auth_comp_id',
 			'_atom_site.auth_asym_id',
