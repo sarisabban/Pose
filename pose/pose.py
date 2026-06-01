@@ -1856,8 +1856,14 @@ class Pose():
 				alt = line[16:17] if len(line) > 16 else ' '
 				e = line[76:78].strip()
 				if not e:
-					s = a.lstrip('0123456789')
-					e = s[0] if s else a[0]
+					c12 = line[12] if len(line) > 12 else ' '
+					if c12.isalpha() and not c12.isdigit():
+						cand = (c12 + line[13]).capitalize() \
+							if len(line) > 13 else c12
+						e = cand if cand in self.masses else c12.upper()
+					else:
+						s = a.lstrip('0123456789')
+						e = (s[0] if s else a[0]).upper()
 				ic = line[26:27] if len(line) > 26 else ' '
 				occ = float(line[54:60]) if len(line) >= 60 else 1.0
 				bfc = float(line[60:66]) if len(line) >= 66 else 0.0
