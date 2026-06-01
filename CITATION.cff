@@ -12,4 +12,6 @@ version: 1.0.0
 
 date-released: 2023-06-01
 
+license: Apache-2.0
+
 url: "https://github.com/sarisabban/Pose"

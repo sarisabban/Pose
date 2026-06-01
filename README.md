@@ -3,7 +3,7 @@ A bare-metal Python library for building and manipulating protein and nucleic ac
 
 ![Python >= 3](https://img.shields.io/badge/python-%3E%3D3-blue)
 ![NumPy](https://img.shields.io/badge/dependency-NumPy-orange)
-![License: GPL v2](https://img.shields.io/badge/license-GPL%20v2-green)
+![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue.svg)
 
 <img src="pose/Video1.gif" width="25%"/><img src="pose/Video2.gif" width="25%"/><img src="pose/Video3.gif" width="25%"/><img src="pose/Video4.gif" width="25%"/>
 <img src="pose/Video5.gif" width="25%"/><img src="pose/Video6.gif" width="25%"/><img src="pose/Video8.gif" width="25%"/><img src="pose/Video7.gif" width="25%"/>
@@ -643,4 +643,6 @@ If Pose is useful in your research, please cite it. The repository ships a `CITA
 
 ## License
 
-Pose is released under the **GNU General Public License v2.0 (GPL-2.0)**. The full licence text lives in the [`LICENSE`](LICENSE) file at the project root.
+Pose is released under the **Apache License, Version 2.0**. The full licence text lives in the [`LICENSE`](LICENSE) file at the project root, and per Apache-2.0 convention a [`NOTICE`](NOTICE) file records the copyright and attribution.
+
+`SPDX-License-Identifier: Apache-2.0`
