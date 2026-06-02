@@ -1515,7 +1515,7 @@ class ForceField():
 					if np.linalg.norm(coords[i] - coords[j]) <= 2.5:
 						addbond(i, j); added += 1
 		return added
-	def __call__(self, pose, grad=False, box=None):
+	def __call__(self, pose, grad=False, box=None, v=False):
 		'''
 		Calculates the total potential energy summed over configured terms
 		Arguments:
@@ -1591,12 +1591,16 @@ class ForceField():
 			bonds_dict = pose.data['Bonds']
 			nbr_local = {i: [j for j in bonds_dict.get(i, [])
 				if j in atoms_set and j != i] for i in atoms_set}
+			atoms = pose.data['Atoms']
+			def nm(i):
+				ne = ''.join(sorted(atoms[j][1] for j in nbr_local[i]))
+				return f'{atoms[i][0]}/{atoms[i][1]}[{ne}]'
 			gaps = []
 			for i in atoms_set:
 				for j in nbr_local[i]:
 					if i >= j: continue
 					if (int(i), int(j)) not in assigns['bonds']:
-						gaps.append(f'bond ({i}, {j})')
+						gaps.append(f'bond {nm(i)}-{nm(j)}')
 			matched_angles = {(min(t[0], t[2]), t[1], max(t[0], t[2]))
 				for t in assigns['angles']}
 			for j in atoms_set:
@@ -1606,7 +1610,7 @@ class ForceField():
 						i, k = ns[x], ns[y]
 						tup = (min(i, k), j, max(i, k))
 						if tup not in matched_angles:
-							gaps.append(f'angle ({i}, {j}, {k})')
+							gaps.append(f'angle {nm(i)}-{nm(j)}-{nm(k)}')
 			matched_propers = set()
 			for tup in assigns['propers']:
 				ti, tj, tk, tl = tup
@@ -1621,10 +1625,7 @@ class ForceField():
 							if y == i or y == x: continue
 							quad = (x, i, j, y) if i < j else (y, j, i, x)
 							if quad not in matched_propers:
-								gaps.append(f'torsion ({x}, {i}, {j}, {y})')
-			# The "every 3-coordinate atom needs an improper" rule
-			# only holds for SMIRNOFF force fields; AMBER / CHARMM
-			# place impropers on selected centres only.
+								gaps.append(f'torsion {nm(x)}-{nm(i)}-{nm(j)}-{nm(y)}')
 			if self.Parameters.get('improper_style',
 				'smirnoff') == 'smirnoff':
 				matched_centres = {tup[0]
@@ -1634,12 +1635,11 @@ class ForceField():
 				for c in atoms_set:
 					if (len(nbr_local[c]) == 3
 						and c not in matched_centres):
-						gaps.append(f'improper centre {c}')
+						gaps.append(f'improper centre {nm(c)}')
 			for i in atoms_set:
 				if assigns['vdw'].get(i) is None:
-					gaps.append(f'vdW atom {i}')
+					gaps.append(f'vdW atom {nm(i)}')
 			if gaps:
-				atoms = pose.data['Atoms']
 				n_h = sum(1 for i in atoms_set if atoms[i][1] == 'H')
 				if n_h == 0:
 					msg=(f'Force field is missing ~{len(gaps)} H bonded terms. '
@@ -1652,7 +1652,7 @@ class ForceField():
 				if self.strict:
 					raise RuntimeError(msg)
 				if id(pose) not in self._warned_poses:
-					print(f'[Pose] Note: {msg}', file=sys.stderr)
+					if v: print(msg)
 					self._warned_poses.add(id(pose))
 			constraints = assigns.get('constraints', set())
 			bond_Kb = np.zeros(len(pairs)); bond_r0 = np.zeros(len(pairs))
