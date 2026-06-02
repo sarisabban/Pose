@@ -1041,9 +1041,9 @@ class Pose():
 				'{:>1}   '  .format('')              + \
 				'{:>8.3f}'  .format(coord[0])        + \
 				'{:>8.3f}'  .format(coord[1])        + \
-				'{:>8.3f} ' .format(coord[2])        + \
-				'{:>5.2f} ' .format(atom[1][3])      + \
-				('{:>5.2f} '.format(atom[1][4]))[:6] + \
+				'{:>8.3f}'  .format(coord[2])        + \
+				'{:>6.2f}'  .format(atom[1][3])      + \
+				('{:>6.2f}' .format(atom[1][4]))     + \
 				'{:>10}'    .format('')              + \
 				'{:<2}'     .format(atom[1][1])      + \
 				'{:<2}'     .format(atom[1][2])      + \
