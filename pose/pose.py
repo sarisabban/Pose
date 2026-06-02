@@ -467,8 +467,8 @@ class Pose():
 				if v[0] in self.probbatoms: BBi.append(I)
 				else: SCi.append(I)
 				I += 1
-			tri = aa_db[aa_u]['Tricode']
-			if LD: tri = 'D' + tri[1:]
+			codes = aa_db[aa_u]['Tricode']
+			tri = codes[1] if LD else codes[0]
 			ai = aa_start + i
 			self.data['Amino Acids'][ai] = [aa, chain, BBi, SCi, 'L', tri, 0]
 		self.data['Coordinates'] = \
@@ -791,8 +791,8 @@ class Pose():
 		info = AAs[index]
 		info[0] = residue
 		info[3] = list(new_sc_global_idx)
-		tri = new_entry['Tricode']
-		info[5] = ('D' + tri[1:]) if is_dform else tri
+		codes = new_entry['Tricode']
+		info[5] = codes[1] if is_dform else codes[0]
 		if need_add_1h:
 			n_pos = info[2].index(new_n_ai)
 			info[2] = info[2][:n_pos+1] + [h1_gi] + info[2][n_pos+1:]
@@ -2005,8 +2005,9 @@ class Pose():
 		residues = defaultdict(list)
 		for row in rows: residues[(row[2], row[3], row[10])].append(row)
 		resnames = {a[0][1] for a in residues.values()}
-		aa = {v['Tricode'] for v in self.aminoacids.values() if 'Tricode' in v}
-		aa_D = {'D' + t[1:] for t in aa}
+		aa = {v['Tricode'][0] for v in self.aminoacids.values() if 'Tricode' in v}
+		aa_D = {v['Tricode'][1] for v in self.aminoacids.values()
+			if 'Tricode' in v and len(v['Tricode']) > 1}
 		if resnames & (aa | aa_D): mol = 'Protein'
 		elif 'U' in resnames: mol = 'RNA'
 		elif resnames & {'DT', 'DA', 'DG', 'DC', 'T'}: mol = 'DNA'
@@ -2044,21 +2045,14 @@ class Pose():
 				tri = uniq[0][1]
 				sym = next((k for k, v in
 					self.aminoacids.items()
-					if v['Tricode'] == tri), None)
+					if v['Tricode'][0] == tri), None)
 				is_D = False
 				if sym is None:
-					cand = [k for k, v in self.aminoacids.items()
-						if 'Tricode' in v
-						and 'D' + v['Tricode'][1:] == tri]
-					if cand:
-						is_D = True
-						if len(cand) > 1:
-							obs = {r[0] for r in uniq}
-							sym = max(cand, key=lambda c: len(obs & {
-								a[0] for a in
-								self.aminoacids[c].get('Sidechain Atoms', [])}))
-						else:
-							sym = cand[0]
+					sym = next((k for k, v in self.aminoacids.items()
+						if 'Tricode' in v and len(v['Tricode']) > 1
+						and v['Tricode'][1] == tri), None)
+					if sym is not None: is_D = True
+
 				if sym is None: continue
 				hm = {v[0]: v[5] for v in (
 					self.aminoacids[sym].get('Sidechain Atoms',[]) +
@@ -2698,11 +2692,10 @@ class Pose():
 					sym = aa[0]
 					if sym.isupper():
 						aa[0] = sym.lower()
-						tri_L = self.aminoacids[sym]['Tricode']
-						aa[5] = 'D' + tri_L[1:]
+						aa[5] = self.aminoacids[sym]['Tricode'][1]
 					else:
 						aa[0] = sym.upper()
-						aa[5] = self.aminoacids[sym.upper()]['Tricode']
+						aa[5] = self.aminoacids[sym.upper()]['Tricode'][0]
 			self.data['Coordinates'] = coords
 			self.CalcCharge()
 			self.CalcSASA()
