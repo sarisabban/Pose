@@ -796,8 +796,7 @@ class Pose():
 		if need_add_1h:
 			n_pos = info[2].index(new_n_ai)
 			info[2] = info[2][:n_pos+1] + [h1_gi] + info[2][n_pos+1:]
-		self.CalcFASTA()
-		self.CalcSize()
+		self._update()
 	def _mutatefastnucleotides(self, index, base):
 		'''
 		In-place single-nucleotide base swap for DNA/RNA poses
@@ -839,8 +838,7 @@ class Pose():
 					(bp_index, comp.get(new_sym, new_sym)))
 		for idx, sym in targets:
 			self._swap_one_base(idx, sym)
-		self.CalcFASTA()
-		self.CalcSize()
+		self._update()
 	def _swap_one_base(self, index, new_sym):
 		'''
 		Swap a single nucleotide's base atoms in place using the
