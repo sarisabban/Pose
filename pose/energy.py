@@ -1523,6 +1523,7 @@ class ForceField():
 			pose: Pose - molecule source protein, DNA, RNA, or Molecule pose
 			grad: bool - if True, also return per-atom forces (N, 3) array
 			box:  None for no PBC; (3,) for orthorhombic; (3, 3) for triclinic
+			v:    verbosity, if True will print error for missing SMIRKS
 		Returns:
 		--------
 			float: potential energy in kJ/mol  (when grad=False)
@@ -1530,6 +1531,10 @@ class ForceField():
 		'''
 		if len(pose.data.get('Atoms', {})) == 0:
 			return (0.0, np.zeros((0, 3))) if grad else 0.0
+		c = np.asarray(pose.data['Coordinates'], float)
+		if not np.isfinite(c).all():
+			bad = int(np.flatnonzero(~np.isfinite(c).all(1))[0])
+			raise FloatingPointError(f'Non-finite coordinate at atom {bad}')
 		self._repairbonds(pose)
 		bonds_key = tuple((int(k), tuple(sorted(int(j) for j in v)))
 			for k, v in sorted(pose.data['Bonds'].items()))
