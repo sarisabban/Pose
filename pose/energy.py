@@ -923,7 +923,12 @@ def SMIRKSMatch(pose, params):
 		--------
 			dict: parsed pattern (atoms, bonds, tags)
 		'''
-		if smirks not in parsed: parsed[smirks] = parse(smirks)
+		if smirks not in parsed:
+			try:
+				parsed[smirks] = parse(smirks)
+			except ValueError as e:
+				warnings.warn(f'Unparseable SMIRKS {smirks!r}: {e}')
+				raise
 		return parsed[smirks]
 	rmin2sig = 2.0 / (2.0 ** (1.0 / 6.0))
 	# ===============================================================
@@ -1591,7 +1596,9 @@ class ForceField():
 				excl_14 = np.unique(
 					excl_14[excl_14[:, 0] != excl_14[:, 1]], axis=0)
 			cache['excl_14'] = excl_14
-			assigns = SMIRKSMatch(pose, self.mol)
+			with warnings.catch_warnings():
+				warnings.simplefilter('always' if v else 'ignore')
+				assigns = SMIRKSMatch(pose, self.mol)
 			atoms_set = set(pose.data['Atoms'].keys())
 			bonds_dict = pose.data['Bonds']
 			nbr_local = {i: [j for j in bonds_dict.get(i, [])
