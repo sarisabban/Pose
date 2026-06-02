@@ -490,7 +490,7 @@ This information resides in `database['Amino Acids'][AMINO_ACID_UNICODE or BACKB
 | Dictionary Key                        | Value Type     | Description of Values |
 |---------------------------------------|----------------|-----------------------|
 | `Vectors`                             | List of lists  | The position of each atom relative to the N of the backbone. If the N coorinate is X, Y, Z = 0, 0, 0 you will get these vectors. To find the correct vectors position the N at coordinate X, Y, Z = 0, 0, 0, and use the corresponding coordinates of each atom |
-| `Tricode`                             | String         | The three letter code for each amino acid |
+| `Tricode`                             | String         | The three letter code for each amino acid, `[0]` for the L-AA tricode `[1]` for the D-AA tricode |
 | `Fused`                               | Boolian        | True = the sidechain is fused to the backbone |
 | `Backbone Atoms` or `Sidechain Atoms` | List of lists  | The atom identity of each coordinate point, for example: first coordinate point is the nitrogen with symbol N and PDB entry N, next atom is the hydrogen that is bonded to the nitrogen with symbol H and PDB entry 1H etc... Unlike the PDB where all hydrogens are collected after the amino acid, here each atom's hydrogens come right after it. This makes for easier matrix operations. Order is index [0] = PDB atom's name, index [1] = element, index [2] = partial charge, index [3] = occupancy, index [4] = temperature factor, index [5] = hybridisation |
 | `Chi Angle Atoms`                     | List of lists  | The atoms in the sidechain that are contributing to a chi angle |
