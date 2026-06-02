@@ -1810,7 +1810,7 @@ class Pose():
 		a = np.dot(u2, np.cross(c12, c23))
 		b = mag * np.dot(c12, c23)
 		return math.atan2(a, b) * 180 / math.pi
-	def Import(self, filename, chain=None, model=1):
+	def Import(self, filename, chain=None, model=1, strict=True):
 		'''
 		Import a protein or nucleic-acid structure from PDB or mmCIF
 		Arguments:
@@ -1818,6 +1818,7 @@ class Pose():
 			filename: Path to a .pdb or .cif file
 			chain:    Chain id (str), list of chains, None to import all chains
 			model:    Model number to import from multi-model files
+			strict:   Allow importing broken chains (C-N >= 2.5 A) when False
 		Returns:
 		--------
 			self.data fully populated from the file; partial
@@ -2086,6 +2087,7 @@ class Pose():
 						f': missing {sorted(miss)}')
 			keys = sorted(Am)
 			warn = []
+			brk = []
 			for ki, kj in zip(keys[:-1], keys[1:]):
 				if Am[ki][1] != Am[kj][1]: continue
 				ci = next((a for a in Am[ki][2] if At[a][0] == 'C'), None)
@@ -2093,7 +2095,7 @@ class Pose():
 				if ci is None or ni is None: continue
 				d = np.linalg.norm(Co[ci] - Co[ni])
 				if d >= 2.5:
-					err.append(
+					brk.append(
 						f'  {ki} ({Am[ki][5]})'
 						f' \u2192 {kj} ({Am[kj][5]})'
 						f': C\u2013N={d:.2f}\u00c5')
@@ -2104,9 +2106,16 @@ class Pose():
 						f': C\u2013N={d:.2f}\u00c5 (strained)')
 			if err:
 				raise Exception(
-					f'Broken chain in {filename}'
+					f'Missing backbone atoms in {filename}'
 					f' chains {chain}:\n'
 					+ '\n'.join(err))
+			if brk and strict:
+				raise Exception(
+					f'Broken chain in {filename}'
+					f' chains {chain}:\n'
+					+ '\n'.join(brk)
+					+ '\n(pass strict=False to import anyway)')
+			if not strict: warn = brk + warn
 			if warn:
 				print(
 					f'Warning: {filename} has strained peptide'
