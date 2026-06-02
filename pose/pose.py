@@ -2008,10 +2008,15 @@ class Pose():
 		aa = {v['Tricode'][0] for v in self.aminoacids.values() if 'Tricode' in v}
 		aa_D = {v['Tricode'][1] for v in self.aminoacids.values()
 			if 'Tricode' in v and len(v['Tricode']) > 1}
+		mol = None
 		if resnames & (aa | aa_D): mol = 'Protein'
 		elif 'U' in resnames: mol = 'RNA'
 		elif resnames & {'DT', 'DA', 'DG', 'DC', 'T'}: mol = 'DNA'
 		elif resnames & {'A', 'G', 'C'}: mol = 'RNA'
+		if mol is None:
+			raise Exception(
+				f'{filename}: no unrecognized '
+				f'(residue names: {sorted(resnames)})')
 		aa_tri = aa | aa_D
 		has_aa = bool(resnames & aa_tri)
 		nuc_names = {r for r in resnames
