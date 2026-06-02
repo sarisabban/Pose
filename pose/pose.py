@@ -1984,9 +1984,9 @@ class Pose():
 			occ_sum[key3][alt] = occ_sum[key3].get(alt, 0.0) + row[7]
 		winner = {}
 		for key3, d in occ_sum.items():
-			winner[key3] = max(
+			winner[key3] = min(
 				d.items(),
-				key=lambda kv: (kv[1], -ord(kv[0][0])))[0]
+				key=lambda kv: (-kv[1], kv[0]))[0]
 		filtered = []
 		for row in rows:
 			key3 = (row[2], row[3], row[10])
