@@ -366,6 +366,19 @@ def Parameterise(cif_file, rotamer_json_file, tricode, unicode,
 	#     n_chi/rotamers/densities (matching merge_into_database.py);
 	#     the method/metadata fields are stripped on insertion to keep
 	#     database.json compact.
+	def dtricode(ltri, db):
+		taken = set()
+		for ek, e in db.get('Amino Acids', {}).items():
+			if ek == unicode: continue
+			t = e.get('Tricode')
+			if isinstance(t, list): taken.update(t)
+			elif isinstance(t, str): taken.add(t)
+		cands = ['D'+ltri[1:], 'D'+ltri[0]+ltri[2], 'D'+ltri[0:2]]
+		cands += ['D'+chr(65+n//26)+chr(65+n%26) for n in range(676)]
+		for c in cands:
+			if c not in taken: return c
+		raise Exception(f'No free D-tricode for {ltri}')
+	entry['Tricode'] = [tricode, dtricode(tricode, db)]
 	db.setdefault('Amino Acids', {})[unicode] = entry
 	rl_resid[tricode] = {
 		'n_chi':     int(rot_entry['n_chi']),
@@ -1829,7 +1842,7 @@ def Rotamers(index, pose):
 	aa_db = pose.aminoacids.get(aa_u, {})
 	chi_atoms = aa_db.get('Chi Angle Atoms') or []
 	if not chi_atoms: return                # Gly, Ala -- no chis
-	three = aa_db.get('Tricode')
+	three = (aa_db.get('Tricode') or [None])[0]
 	if not three: return
 	phi = pose.GetDihedral(index, 'PHI')
 	psi = pose.GetDihedral(index, 'PSI')
@@ -2131,7 +2144,7 @@ def Pack(pose, score=None, ff=None, n_steps=2000, T_start=10.0, T_end=0.1,
 		aa_db = pose.aminoacids.get(aa_u, {})
 		chi_atoms = aa_db.get('Chi Angle Atoms') or []
 		if not chi_atoms: continue
-		three = aa_db.get('Tricode')
+		three = (aa_db.get('Tricode') or [None])[0]
 		if not three: continue
 		phi = pose.GetDihedral(r, 'PHI')
 		psi = pose.GetDihedral(r, 'PSI')
