@@ -2090,8 +2090,8 @@ def Anneal(pose, ff=None, n_steps=10000, T_start=2000.0, T_end=10.0,
 		'best_step':     int(best_step)}
 	return float(E_best), log
 
-def Pack(pose, score=None, ff=None, n_steps=2000, T_start=10.0, T_end=0.1,
-		patience=400, seed=None, box=None):
+def Pack(pose, score=None, n_steps=2000, T_start=10.0, T_end=0.1,
+		patience=400, seed=None):
 	'''
 	Sidechain repacking via simulated annealing on the full Rotamer Library
 	ensemble at each residue's current backbone (phi, psi).
@@ -2117,14 +2117,12 @@ def Pack(pose, score=None, ff=None, n_steps=2000, T_start=10.0, T_end=0.1,
 	Arguments:
 	----------
 		pose:    Pose - protein pose with Amino Acids dict
-		score:   Score - reusable; built from `ff` if None
-		ff:      ForceField - used only when `score` is None
+		score:   Score - scoring function; defaults to Score('Default')
 		n_steps: int - max number of SA proposals
 		T_start: float - initial temperature (in score units, typically kJ/mol)
 		T_end:   float - final temperature
 		patience:int - early-exit if no acceptance in this many consecutive steps
 		seed:    int or None - RNG seed for reproducibility
-		box:     None for no PBC; (3,) orthorhombic; (3, 3) triclinic
 	Returns:
 	--------
 		tuple: (E_best, log) where log contains 'energies', 'temperatures',
@@ -2132,7 +2130,7 @@ def Pack(pose, score=None, ff=None, n_steps=2000, T_start=10.0, T_end=0.1,
 	'''
 	if score is None:
 		from .energy import Score
-		score = Score(ff=ff, box=box)
+		score = Score()
 	if pose.data.get('Amino Acids') is None:
 		raise ValueError('Pack requires a protein pose with Amino Acids')
 	rng = np.random.default_rng(seed)
