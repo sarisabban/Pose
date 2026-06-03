@@ -2381,17 +2381,14 @@ def MolecularDynamics(pose, ff=None, n_steps=1000, dt_fs=2.0, T=300.0,
 
 def Port(name='openff'):
 	'''
-	Port one force field into database.json and optionally verify it
+	Port one force field into database.json
 	Arguments:
 	----------
 		name:   str - which force field to port; 'openff', 'ff19SB' or
 			'charmm36', matched case-insensitively
-		verify: bool - if True, re-import the force field's benchmark
-			structures and compare each energy against its reference
 	Returns:
 	--------
-		bool: True if the port (and verification, when requested)
-			succeeded; False if any benchmark deviates by > 1e-3 relative
+		bool: True on success; raises on download / parse / write failure
 	'''
 	key     = str(name).upper()
 	here    = os.path.dirname(os.path.abspath(__file__))
@@ -2950,7 +2947,8 @@ def Port(name='openff'):
 		sp = db.setdefault('Score Parameters', {})
 		KCAL_TO_KJ = 4.184
 		BASE = ('https://raw.githubusercontent.com/'
-			'ccsb-scripps/AutoDock-Vina/develop/src/lib/')
+			'ccsb-scripps/AutoDock-Vina/'
+			'3c65c0b3e6c2c1d183f6a175ecb65e3c5ba91645/src/lib/')
 		FILES = ('potentials.h', 'vina.h',
 			'scoring_function.h', 'atom_constants.h')
 		def fetch(name):
