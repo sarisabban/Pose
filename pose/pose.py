@@ -2213,6 +2213,25 @@ class Pose():
 							Bd[n_idx].append(pc)
 							BO[n_idx].append(1.5)
 				prev_res_c[ch] = name_to_idx.get('C')
+			for gi in At:
+				if At[gi][1] != 'H' or Bd.get(gi): continue
+				d = np.linalg.norm(Co - Co[gi], axis=1); d[gi] = 1e18
+				gj = int(np.argmin(d))
+				if d[gj] <= 1.3:
+					Bd.setdefault(gi, []).append(gj)
+					Bd.setdefault(gj, []).append(gi)
+					BO.setdefault(gi, []).append(1.0)
+					BO.setdefault(gj, []).append(1.0)
+			sg = [i for i in At if At[i][0] == 'SG']
+			for a in range(len(sg)):
+				for b in range(a + 1, len(sg)):
+					i, j = sg[a], sg[b]
+					if j in Bd.get(i, []): continue
+					if np.linalg.norm(Co[i] - Co[j]) <= 2.5:
+						Bd.setdefault(i, []).append(j)
+						Bd.setdefault(j, []).append(i)
+						BO.setdefault(i, []).append(1.0)
+						BO.setdefault(j, []).append(1.0)
 			self.data['Bonds'] = Bd
 			self.data['BondOrders'] = BO
 			self.CalcCharge()
