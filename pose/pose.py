@@ -292,11 +292,13 @@ class Pose():
 		Returns:
 		--------
 			set: atom indices on the atom2 side of the pivot bond
-			(BFS over the bond graph, refusing to cross the pivot)
+			(BFS over the bond graph, refusing to cross the pivot
+			or any disulfide SG-SG cross-link))
 		'''
 		Ai = self.GetAtomIdx(res1, atom1)
 		Bi = self.GetAtomIdx(res2, atom2)
 		bonds = self.data['Bonds']
+		atoms = self.data['Atoms']
 		result = {Bi}
 		stack = [Bi]
 		while stack:
@@ -304,6 +306,7 @@ class Pose():
 			for nb in bonds.get(cur, []):
 				if nb == Ai: continue
 				if nb in result: continue
+				if atoms[cur][0] == 'SG' and atoms[nb][0] == 'SG': continue
 				result.add(nb)
 				stack.append(nb)
 		return result
