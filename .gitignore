@@ -9,3 +9,5 @@ pose/Video8.gif
 .DS_Store
 .claude
 __pycache__
+*.pyc
+*.pyo
