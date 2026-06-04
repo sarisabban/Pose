@@ -1,5 +1,5 @@
 # Pose
-A bare-metal Python library for building and manipulating protein and nucleic acid molecular structures
+A bare-metal Python library for building and manipulating the molecular structures of proteins, nucleic acids, and small organic molecules
 
 ![Python >= 3](https://img.shields.io/badge/python-%3E%3D3-blue)
 ![NumPy](https://img.shields.io/badge/dependency-NumPy-orange)
@@ -18,9 +18,9 @@ A bare-metal Python library for building and manipulating protein and nucleic ac
 
 ## What is Pose?
 
-Pose constructs a data structure for protein or nucleic acid molecules that contains all relevant information defining a polymer. Primary information includes the XYZ cartesian coordinates of each atom, the identity and charge of each atom, and the bond graph of the entire molecule. Secondary information includes the FASTA sequence, radius of gyration, potential energy, and the secondary structure assignment for each protein residue.
+Pose constructs a data structure for proteins, nucleic acids, or small organic molecules that contains all relevant information defining a polymer or an organic molecule. Primary information includes the XYZ cartesian coordinates of each atom, the identity and charge of each atom, and the bond graph of the entire molecule. Secondary information includes the FASTA sequence, radius of gyration, potential energy, and the secondary structure assignment for each protein residue.
 
-Using this data structure, Pose can build and manipulate polypeptides and nucleic acids: construct any polypeptide or nucleic acid from sequence, move dihedral and rotamer angles, mutate residues and base pairs, and measure bond lengths and angles. It is designed as a substrate for higher-level protocols such as simulated annealing, molecular dynamics, and machine learning-based molecular design.
+Using this data structure, Pose can build and manipulate polypeptides, nucleic acids, or small organic molecules: construct any polypeptide or nucleic acid from sequence, move dihedral and rotamer angles, mutate residues and base pairs, and measure bond lengths and angles. It is designed as a substrate for higher-level protocols such as simulated annealing, molecular dynamics, and machine learning-based molecular design.
 
 **Key features:**
 - Designed to be extremely stable bare-metal python: NumPy is the only dependency for the core `Pose` and `Molecule` classes
@@ -34,7 +34,7 @@ Using this data structure, Pose can build and manipulate polypeptides and nuclei
 - PDB and mmCIF file import and export
 - Pythonic zero-based indexing throughout (unlike PDB's one-based convention)
 - Bundled bare-metal force field with analytic gradients, periodic-boundary support, and a hash-cached topology
-- Hybrid physics + statistical score function for protein design, chirality-aware end to end across L-AA, D-AA, mixed L/D, and non-canonical residues
+- Bundled hybrid physics + statistical score function that is chirality-aware end to end across L-AA, D-AA, mixed L/D, and non-canonical residues
 - Three production protocols: minimisation, simulated annealing, and molecular dynamics simulation
 
 ---
