@@ -2574,6 +2574,8 @@ _FADUN_NRCHI_CACHE = {}
 _PAAPP_SPLINE_CACHE = {}
 _RAMA_ENTROPY = {}
 _RAMA_SPLINE_CACHE = {}
+_PCS_M = {}
+_FROZEN_ADJ = {}
 
 def ScoreMatch(pose, params, ligand=None, xs_override=None,
 		nrot_override=None):
@@ -2977,6 +2979,7 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None,
 			is_oh_donor[i] = is_donor[i] and (t.startswith('OH')
 				or t.startswith('OW') or t == 'Oet3')
 			has_score[i] = True
+		idealize_coords = lambda Xin: np.asarray(Xin, dtype=np.float64)
 		if aas:
 			by_chain = {}
 			for ri, info in aas.items():
@@ -3113,6 +3116,59 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None,
 					coords[ai] = N_xyz + BOND * H_dir
 			for ri in n_term_res:
 				idealize_nterm_h(ri)
+			def idealize_coords(Xin):
+				'''
+				Place the N-terminal NH3+ protons at ideal geometry on a
+				copy of Xin (coordinate-pure twin of idealize_nterm_h, for
+				refreshing derived geometry on a cached re-score)
+				Arguments:
+				----------
+					Xin: ndarray (n, 3) - input coordinates
+				Returns:
+				--------
+					ndarray (n, 3): copy of Xin with N-terminal H ideal
+				'''
+				X2 = np.array(Xin, dtype=np.float64)
+				for ri in n_term_res:
+					info = aas.get(ri)
+					if info is None: continue
+					tri = info[5] if len(info) >= 6 else None
+					if tri == 'PRO': continue
+					N_ai = CA_ai = C_ai = None
+					h_atoms = []
+					for ai in info[2] + info[3]:
+						ai = int(ai)
+						nm = atoms[ai][0]
+						if nm == 'N': N_ai = ai
+						elif nm == 'CA': CA_ai = ai
+						elif nm == 'C': C_ai = ai
+						elif nm in NT_H_DIH: h_atoms.append((ai, nm))
+					if N_ai is None or CA_ai is None or C_ai is None:
+						continue
+					if not h_atoms: continue
+					N_xyz = X2[N_ai]
+					CA_xyz = X2[CA_ai]
+					C_xyz = X2[C_ai]
+					v_NCA = CA_xyz - N_xyz
+					n_NCA = np.linalg.norm(v_NCA)
+					if n_NCA < 1e-6: continue
+					unit_NCA = v_NCA / n_NCA
+					v_NC = C_xyz - N_xyz
+					v_NC_perp = v_NC - np.dot(v_NC, unit_NCA) * unit_NCA
+					n_perp = np.linalg.norm(v_NC_perp)
+					if n_perp < 1e-6: continue
+					unit_py = v_NC_perp / n_perp
+					unit_pz = np.cross(unit_NCA, unit_py)
+					ANGLE = math.radians(109.47)
+					cos_a = math.cos(ANGLE)
+					sin_a = math.sin(ANGLE)
+					for ai, nm in h_atoms:
+						dih = math.radians(NT_H_DIH[nm])
+						H_dir = (cos_a * unit_NCA
+							+ sin_a * (math.cos(dih) * unit_py
+								+ math.sin(dih) * unit_pz))
+						X2[ai] = N_xyz + 1.0 * H_dir
+				return X2
 			for ri in c_term_res:
 				info = aas.get(ri)
 				if info is None: continue
@@ -3143,23 +3199,36 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None,
 		adj = {int(k): set(int(j) for j in v) for k, v in bonds.items()}
 		for i in range(n):
 			adj.setdefault(i, set())
-		X_arr = np.asarray(coords, dtype=np.float64)
-		heavy_mask = np.array([atoms[k][1] != 'H' for k in range(n)])
-		for i in range(n):
-			if atoms[i][1] != 'H': continue
-			dij = np.linalg.norm(X_arr - X_arr[i], axis=1)
-			dij[i] = np.inf
-			dij = np.where(heavy_mask, dij, np.inf)
-			j = int(np.argmin(dij))
-			if dij[j] < 1.3:
-				adj[i].add(j); adj[j].add(i)
-		s_idx = [i for i in range(n) if atoms[i][1] == 'S']
-		for ii in s_idx:
-			for jj in s_idx:
-				if ii >= jj: continue
-				d = float(np.linalg.norm(X_arr[ii] - X_arr[jj]))
-				if d < 2.5:
-					adj[ii].add(jj); adj[jj].add(ii)
+		# ROUTE 1: the H-nearest-heavy and S-S bond inference is
+		# coordinate-dependent, which shifts count-pair weights when atoms
+		# move and breaks cache reuse. Freeze the inferred graph per-topology
+		# so the bond graph is invariant under coordinate moves.
+		_sig = hash((n, tuple(sorted(
+			(int(k), tuple(sorted(int(j) for j in v)))
+			for k, v in bonds.items()))))
+		_frozen = _FROZEN_ADJ.get(_sig)
+		if _frozen is not None:
+			for i in range(n):
+				adj[i] = set(_frozen[i])
+		else:
+			X_arr = np.asarray(coords, dtype=np.float64)
+			heavy_mask = np.array([atoms[k][1] != 'H' for k in range(n)])
+			for i in range(n):
+				if atoms[i][1] != 'H': continue
+				dij = np.linalg.norm(X_arr - X_arr[i], axis=1)
+				dij[i] = np.inf
+				dij = np.where(heavy_mask, dij, np.inf)
+				j = int(np.argmin(dij))
+				if dij[j] < 1.3:
+					adj[i].add(j); adj[j].add(i)
+			s_idx = [i for i in range(n) if atoms[i][1] == 'S']
+			for ii in s_idx:
+				for jj in s_idx:
+					if ii >= jj: continue
+					d = float(np.linalg.norm(X_arr[ii] - X_arr[jj]))
+					if d < 2.5:
+						adj[ii].add(jj); adj[jj].add(ii)
+			_FROZEN_ADJ[_sig] = {i: set(adj[i]) for i in range(n)}
 		def bfsdists(start, max_depth=4):
 			'''
 			BFS bond-distance map from `start` up to max_depth bonds
@@ -3401,111 +3470,126 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None,
 		ang_sp3 = math.radians(71.0)   # 180 - 109
 		dih_sp2 = (0.0, math.radians(180.0))
 		dih_sp3 = (math.radians(120.0), math.radians(240.0))
-		water_xyz = []
-		water_atom = []
-		water_off = np.full(n, -1, dtype=np.int64)
-		water_cnt = np.zeros(n, dtype=np.int64)
-		def unit(v):
+		def place_waters(X):
 			'''
-			Unit vector along v; zero vector when v has zero length
+			Build LkBall virtual-water positions for coordinates X from the
+			cached per-atom topology (donor/acceptor types, bond graph),
+			so waters can be refreshed on a cached re-score
 			Arguments:
 			----------
-				v: np.ndarray - 3-component vector
+				X: ndarray (n, 3) - current coordinates
 			Returns:
 			--------
-				np.ndarray: v / |v|, or v itself if |v| is zero
+				tuple: (water_xyz_arr, water_off, water_cnt) - stacked water
+					coordinates, per-atom offset into them, per-atom count
 			'''
-			nv = float(np.linalg.norm(v))
-			return v / nv if nv > 1e-9 else v
-		for i in range(n):
-			t = ros_types[i]
-			if t not in LKB_WTS: continue
-			info = atom_types_db.get(t, {})
-			is_d = bool(info.get('donor', False))
-			is_a = bool(info.get('acceptor', False))
-			is_sp2 = bool(info.get('sp2', False))
-			is_sp3 = bool(info.get('sp3', False))
-			is_ring = bool(info.get('ring', False))
-			i_xyz = X[i]
-			i_waters = []
-			nbrs = adj.get(i, set())
-			heavy_nbrs = [j for j in nbrs if not is_H[j]]
-			polar_h_nbrs = [j for j in nbrs if is_polar_h[j]]
-			if is_d:
-				elem = info.get('element', '')
-				NTERM_H_NAMES_SET = {'H1', 'H2', 'H3',
-					'1H', '2H', '3H', 'HN', 'HT1', 'HT2', 'HT3'}
-				for h in polar_h_nbrs:
-					h_nm = atoms[h][0]
-					if elem == 'O':
-						ideal_bond = 0.96
-					elif t == 'NH2O':
-						ideal_bond = 1.00
-					elif h_nm in NTERM_H_NAMES_SET:
-						ideal_bond = 1.00
-					else:
-						ideal_bond = 1.01
-					offset = opt_dist - ideal_bond
-					h_xyz = X[h]
-					dirvec = unit(h_xyz - i_xyz)
-					w = h_xyz + offset * dirvec
-					i_waters.append(w)
-			if is_a:
-				if is_ring and len(heavy_nbrs) >= 2:
-					c1, c2 = heavy_nbrs[0], heavy_nbrs[1]
-					mid = 0.5 * (X[c1] + X[c2])
-					w = i_xyz + opt_dist * unit(i_xyz - mid)
-					i_waters.append(w)
-				elif is_sp3 and len(heavy_nbrs) >= 1 and \
-						len(polar_h_nbrs) >= 1:
-					c = heavy_nbrs[0]; h = polar_h_nbrs[0]
-					x_hat = unit(i_xyz - X[c])
-					v_OH = X[h] - i_xyz
-					y_dir = v_OH - np.dot(v_OH, x_hat) * x_hat
-					y_hat = unit(y_dir)
-					z_hat = np.cross(x_hat, y_hat)
-					cos_a = math.cos(ang_sp3)
-					sin_a = math.sin(ang_sp3)
-					for d in dih_sp3:
-						v_off = (cos_a * x_hat
-							+ sin_a * (math.cos(d) * y_hat
-								+ math.sin(d) * z_hat))
-						i_waters.append(i_xyz + opt_dist * v_off)
-				elif is_sp2 and len(heavy_nbrs) >= 1:
-					c = heavy_nbrs[0]
-					c_heavy_nbrs = [k for k in adj.get(c, set())
-						if k != i and not is_H[k]]
-					if not c_heavy_nbrs: continue
-					my_res = atom_res[i]
-					same_res_nbrs = sorted(
-						k for k in c_heavy_nbrs if atom_res[k] == my_res)
-					if same_res_nbrs:
-						b2 = same_res_nbrs[0]
-					else:
-						b2 = sorted(c_heavy_nbrs)[0]
-					x_hat = unit(i_xyz - X[c])
-					v_b2 = X[b2] - i_xyz
-					y_dir = v_b2 - np.dot(v_b2, x_hat) * x_hat
-					y_hat = unit(y_dir)
-					z_hat = np.cross(x_hat, y_hat)
-					cos_a = math.cos(ang_sp2)
-					sin_a = math.sin(ang_sp2)
-					for d in dih_sp2:
-						v_off = (cos_a * x_hat
-							+ sin_a * (math.cos(d) * y_hat
-								+ math.sin(d) * z_hat))
-						i_waters.append(i_xyz + opt_dist * v_off)
-			if i_waters:
-				water_off[i] = len(water_xyz)
-				water_cnt[i] = len(i_waters)
-				for w in i_waters:
-					water_xyz.append(np.asarray(w, dtype=np.float64))
-					water_atom.append(i)
-		if water_xyz:
-			water_xyz_arr = np.stack(water_xyz, axis=0)
-		else:
-			water_xyz_arr = np.empty((0, 3), dtype=np.float64)
-		water_atom = np.array(water_atom, dtype=np.int64)
+			water_xyz = []
+			water_atom = []
+			water_off = np.full(n, -1, dtype=np.int64)
+			water_cnt = np.zeros(n, dtype=np.int64)
+			def unit(v):
+				'''
+				Unit vector along v; zero vector when v has zero length
+				Arguments:
+				----------
+					v: np.ndarray - 3-component vector
+				Returns:
+				--------
+					np.ndarray: v / |v|, or v itself if |v| is zero
+				'''
+				nv = float(np.linalg.norm(v))
+				return v / nv if nv > 1e-9 else v
+			for i in range(n):
+				t = ros_types[i]
+				if t not in LKB_WTS: continue
+				info = atom_types_db.get(t, {})
+				is_d = bool(info.get('donor', False))
+				is_a = bool(info.get('acceptor', False))
+				is_sp2 = bool(info.get('sp2', False))
+				is_sp3 = bool(info.get('sp3', False))
+				is_ring = bool(info.get('ring', False))
+				i_xyz = X[i]
+				i_waters = []
+				nbrs = adj.get(i, set())
+				heavy_nbrs = [j for j in nbrs if not is_H[j]]
+				polar_h_nbrs = [j for j in nbrs if is_polar_h[j]]
+				if is_d:
+					elem = info.get('element', '')
+					NTERM_H_NAMES_SET = {'H1', 'H2', 'H3',
+						'1H', '2H', '3H', 'HN', 'HT1', 'HT2', 'HT3'}
+					for h in polar_h_nbrs:
+						h_nm = atoms[h][0]
+						if elem == 'O':
+							ideal_bond = 0.96
+						elif t == 'NH2O':
+							ideal_bond = 1.00
+						elif h_nm in NTERM_H_NAMES_SET:
+							ideal_bond = 1.00
+						else:
+							ideal_bond = 1.01
+						offset = opt_dist - ideal_bond
+						h_xyz = X[h]
+						dirvec = unit(h_xyz - i_xyz)
+						w = h_xyz + offset * dirvec
+						i_waters.append(w)
+				if is_a:
+					if is_ring and len(heavy_nbrs) >= 2:
+						c1, c2 = heavy_nbrs[0], heavy_nbrs[1]
+						mid = 0.5 * (X[c1] + X[c2])
+						w = i_xyz + opt_dist * unit(i_xyz - mid)
+						i_waters.append(w)
+					elif is_sp3 and len(heavy_nbrs) >= 1 and \
+							len(polar_h_nbrs) >= 1:
+						c = heavy_nbrs[0]; h = polar_h_nbrs[0]
+						x_hat = unit(i_xyz - X[c])
+						v_OH = X[h] - i_xyz
+						y_dir = v_OH - np.dot(v_OH, x_hat) * x_hat
+						y_hat = unit(y_dir)
+						z_hat = np.cross(x_hat, y_hat)
+						cos_a = math.cos(ang_sp3)
+						sin_a = math.sin(ang_sp3)
+						for d in dih_sp3:
+							v_off = (cos_a * x_hat
+								+ sin_a * (math.cos(d) * y_hat
+									+ math.sin(d) * z_hat))
+							i_waters.append(i_xyz + opt_dist * v_off)
+					elif is_sp2 and len(heavy_nbrs) >= 1:
+						c = heavy_nbrs[0]
+						c_heavy_nbrs = [k for k in adj.get(c, set())
+							if k != i and not is_H[k]]
+						if not c_heavy_nbrs: continue
+						my_res = atom_res[i]
+						same_res_nbrs = sorted(
+							k for k in c_heavy_nbrs if atom_res[k] == my_res)
+						if same_res_nbrs:
+							b2 = same_res_nbrs[0]
+						else:
+							b2 = sorted(c_heavy_nbrs)[0]
+						x_hat = unit(i_xyz - X[c])
+						v_b2 = X[b2] - i_xyz
+						y_dir = v_b2 - np.dot(v_b2, x_hat) * x_hat
+						y_hat = unit(y_dir)
+						z_hat = np.cross(x_hat, y_hat)
+						cos_a = math.cos(ang_sp2)
+						sin_a = math.sin(ang_sp2)
+						for d in dih_sp2:
+							v_off = (cos_a * x_hat
+								+ sin_a * (math.cos(d) * y_hat
+									+ math.sin(d) * z_hat))
+							i_waters.append(i_xyz + opt_dist * v_off)
+				if i_waters:
+					water_off[i] = len(water_xyz)
+					water_cnt[i] = len(i_waters)
+					for w in i_waters:
+						water_xyz.append(np.asarray(w, dtype=np.float64))
+						water_atom.append(i)
+			if water_xyz:
+				water_xyz_arr = np.stack(water_xyz, axis=0)
+			else:
+				water_xyz_arr = np.empty((0, 3), dtype=np.float64)
+			water_atom = np.array(water_atom, dtype=np.int64)
+			return water_xyz_arr, water_off, water_cnt
+		water_xyz_arr, water_off, water_cnt = place_waters(X)
 		return {
 			'ros_types': ros_types,
 			'has_score': has_score,
@@ -3534,6 +3618,8 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None,
 			'lkb_w_ball':  lkb_w_ball,
 			'lkb_d2_low':  lkb_d2_low,
 			'lkb_water_xyz': water_xyz_arr,
+			'place_waters': place_waters,
+			'idealize_coords': idealize_coords,
 			'lkb_water_off': water_off,
 			'lkb_water_cnt': water_cnt,
 			'lkb_ramp_w2': LK_RAMP_W2,
@@ -4655,11 +4741,19 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None,
 		'''
 		y = np.asarray(y, dtype=float)
 		n = len(y)
-		b = 6.0 * (np.roll(y, -1) - 2.0 * y + np.roll(y, 1))
-		k = np.arange(n)
-		A_diag = 4.0 + 2.0 * np.cos(2.0 * np.pi * k / n)
-		b_fft = np.fft.fft(b)
-		return np.real(np.fft.ifft(b_fft / A_diag))
+		M = _PCS_M.get(n)
+		if M is None:
+			F = np.fft.fft(np.eye(n), axis=0)
+			k = np.arange(n)
+			A_diag = 4.0 + 2.0 * np.cos(2.0 * np.pi * k / n)
+			B = np.zeros((n, n))
+			for i in range(n):
+				B[i, i] = -12.0
+				B[i, (i + 1) % n] += 6.0
+				B[i, (i - 1) % n] += 6.0
+			M = np.real(np.fft.ifft(np.diag(1.0 / A_diag) @ F @ B, axis=0))
+			_PCS_M[n] = M
+		return M @ y
 	def spline_eval_1d(y, ypp, t, n):
 		'''
 		Evaluate a 1D cubic spline at x using precomputed second-derivative coefficients
@@ -5201,6 +5295,15 @@ class Score():
 		self.scale = float(
 			self.Parameters.get('Constants', {}).get('scale', 1.0))
 		self._cache = None
+		self._topo_cache = None
+		self._topo_hash = None
+		self._topo_refX = None
+		self._skin = 1.5
+		# build the cache pair list with a Verlet skin (master cutoff +
+		# skin). Energy is unchanged (terms apply their own cutoffs); the
+		# skin lets the pair list be reused across small coordinate moves.
+		c = self.Parameters.setdefault('Constants', {})
+		c['fa_max_dis'] = float(c.get('fa_max_dis', 6.0)) + self._skin
 	def __call__(self, pose, ligand=None, decompose=False,
 			xs_override=None, nrot_override=None):
 		'''
@@ -5219,8 +5322,49 @@ class Score():
 			unit (REU, kcal/mol, or dimensionless); when decompose=True
 			also returns a per-term breakdown
 		'''
-		self._cache = ScoreMatch(pose, self.Parameters, ligand,
-			xs_override, nrot_override)
+		# PERF (item 1): topology/geometry split. The cache is keyed on a
+		# topology-only hash (bonds + atom records + AA info, NOT coords).
+		# On a re-score with the same topology, reuse the cached per-atom
+		# typing/charges/params/BFS/pair-list and refresh only geometry
+		# (coords + pair distances) — Verlet-style pair-list reuse.
+		plain = (ligand is None and xs_override is None
+			and nrot_override is None)
+		h = None
+		if plain:
+			bonds_key = tuple((int(k), tuple(sorted(int(j) for j in v)))
+				for k, v in sorted(pose.data['Bonds'].items()))
+			atoms_key = tuple((int(k), tuple(a))
+				for k, a in sorted(pose.data['Atoms'].items()))
+			aas = pose.data.get('Amino Acids')
+			aas_key = None if aas is None else tuple(
+				(int(k), info[0], info[1], tuple(info[2]))
+				for k, info in sorted(aas.items()))
+			h = hash((bonds_key, atoms_key, aas_key))
+		X = np.asarray(pose.data['Coordinates'], dtype=np.float64)
+		reuse = False
+		if plain and self._topo_cache is not None and self._topo_hash == h:
+			disp = np.sqrt(((X - self._topo_refX) ** 2).sum(1)).max()
+			reuse = disp < 0.5 * self._skin   # Verlet: safe within skin/2
+		if reuse:
+			cache = self._topo_cache
+			# refresh geometry from live coords: idealize N-term H (derived
+			# geometry), recompute distances, recompute LkBall waters.
+			Xc = cache['idealize_coords'](pose.data['Coordinates'])
+			cache['coords'] = Xc
+			cache['pair_d'] = np.linalg.norm(
+				Xc[cache['pairs_i']] - Xc[cache['pairs_j']], axis=1)
+			wx, woff, wcnt = cache['place_waters'](Xc)
+			cache['lkb_water_xyz'] = wx
+			cache['lkb_water_off'] = woff
+			cache['lkb_water_cnt'] = wcnt
+			self._cache = cache
+		else:
+			self._cache = ScoreMatch(pose, self.Parameters, ligand,
+				xs_override, nrot_override)
+			if plain:
+				self._topo_cache = self._cache
+				self._topo_hash = h
+				self._topo_refX = X.copy()
 		per_term = {}
 		torsional = False
 		for method_name, kwargs in self.terms:
