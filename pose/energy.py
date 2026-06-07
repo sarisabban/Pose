@@ -322,7 +322,8 @@ def SMIRKSMatch(pose, params):
 		for k in range(L):
 			a, b = r[k], r[(k + 1) % L]
 			in_ring_bond.add((min(a, b), max(a, b)))
-	x_count = {i: sum(1 for j in nbr[i] if ring_sizes_at[j])
+	x_count = {i: sum(1 for j in nbr[i]
+		if (min(i, j), max(i, j)) in in_ring_bond)
 		for i in sorted_ids}
 	def parse(smirks):
 		'''
