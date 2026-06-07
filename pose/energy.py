@@ -2874,43 +2874,57 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None,
 		residue_types_db = params['Residue_types']
 		N_TERM_H = {'H1':'H','H2':'H','H3':'H','1H':'H','2H':'H','3H':'H',
 			'HN':'H','HT1':'H','HT2':'H','HT3':'H'}
-		def lookuptype(tricode, atom_name):
+		D_TO_L = {'DAL':'ALA','DAR':'ARG','DAS':'ASP','DSG':'ASN','DCY':'CYS',
+			'DGN':'GLN','DGL':'GLU','DHI':'HIS','DIL':'ILE','DLE':'LEU',
+			'DLY':'LYS','MED':'MET','DPN':'PHE','DPR':'PRO','DSE':'SER',
+			'DTH':'THR','DTR':'TRP','DTY':'TYR','DVA':'VAL'}
+		def lookuptype(tricode, atom_name, ai=None):
 			'''
-			Resolve (tricode, atom_name) to a Rosetta atom type and partial charge
+			Resolve (tricode, atom_name) to a Rosetta atom type and charge
 			Arguments:
 			----------
-				tricode: str - 3-letter residue code
-				atom_name: str - PDB atom name
+				tricode: str - 3-letter residue code (D-codes map to L)
+				atom_name: str - built atom name
+				ai: int - atom index for the bonded-neighbour fallback
 			Returns:
 			--------
-				tuple: (atom_type_str_or_None, partial_charge_float)
+				tuple: (atom_type_or_None, partial_charge_float)
 			'''
-			res = residue_types_db.get(tricode)
+			res = residue_types_db.get(D_TO_L.get(tricode, tricode))
 			if res is None: return None, 0.0
+			table = res['atoms']
 			aliases = res.get('aliases', {}) or {}
-			direct = res['atoms'].get(atom_name)
-			if direct is not None:
-				return direct['type'], float(direct.get('charge', 0.0))
-			al = aliases.get(atom_name)
-			if al is not None:
-				e = res['atoms'].get(al)
-				if e is not None:
-					return e['type'], float(e.get('charge', 0.0))
-			swap = None
+			cands = [atom_name, aliases.get(atom_name)]
 			if atom_name and atom_name[0].isdigit():
-				swap = atom_name[1:] + atom_name[0]
+				cands.append(atom_name[1:] + atom_name[0])
 			elif atom_name and atom_name[-1].isdigit() and len(atom_name) > 1:
-				swap = atom_name[-1] + atom_name[:-1]
-			if swap is not None:
-				e = res['atoms'].get(swap)
+				cands.append(atom_name[-1] + atom_name[:-1])
+			cands.append(N_TERM_H.get(atom_name))
+			cands.append('1' + atom_name)
+			cands.append(atom_name + '1')
+			for c in cands:
+				e = table.get(c) if c else None
 				if e is not None:
 					return e['type'], float(e.get('charge', 0.0))
-			tgt = N_TERM_H.get(atom_name)
-			if tgt is not None:
-				e = res['atoms'].get(tgt)
-				if e is not None:
-					return e['type'], float(e.get('charge', 0.0))
-			return None, 0.0
+			if ai is None or not (0 <= ai < n): return None, 0.0
+			parent = next((atoms[b][0] for b in bonds.get(ai, ())
+				if atoms[b][1] != 'H'), None)
+			ptbl = parent if parent in table else (
+				parent + '1' if parent and parent + '1' in table else None)
+			if ptbl is None: return None, 0.0
+			tadj = []
+			for bd in res.get('bonds', ()):
+				if bd[0] == ptbl: tadj.append(bd[1])
+				elif bd[1] == ptbl: tadj.append(bd[0])
+			elem = atoms[ai][1]
+			cand = [t for t in tadj if t in table and atom_types_db.get(
+				table[t]['type'], {}).get('element') == elem]
+			if not cand: return None, 0.0
+			d = atom_name[0] if atom_name and atom_name[0].isdigit() else None
+			pick = next((m for m in cand if d and m.startswith(d)),
+				sorted(cand)[0])
+			e = table[pick]
+			return e['type'], float(e.get('charge', 0.0))
 		atom_res = np.full(n, -1, dtype=np.int64)
 		for r, info in aas.items():
 			for ai in info[2] + info[3]:
@@ -2935,7 +2949,7 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None,
 				ai = int(ai)
 				if not (0 <= ai < n): continue
 				nm = atoms[ai][0]
-				t, q = lookuptype(tri, nm)
+				t, q = lookuptype(tri, nm, ai)
 				ros_types[ai] = t
 				q_arr[ai] = q
 		ljR = np.zeros(n); ljW = np.zeros(n)
@@ -3171,47 +3185,25 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None,
 						out[y] = dist
 				frontier = nxt
 			return out
-		CP_REP_MAP_BY_AA = {
-			'ALA': {'N': 'H', 'C': 'O'},
-			'ARG': {'N': 'H', 'C': 'O', 'NE': 'HE'},
-			'ASN': {'N': 'H', 'C': 'O', 'CG': 'OD1', 'ND2': 'HD21'},
-			'ASP': {'N': 'H', 'C': 'O', 'CG': 'OD1'},
-			'CYS': {'N': 'H', 'C': 'O'},
-			'GLN': {'N': 'H', 'C': 'O', 'CD': 'OE1', 'NE2': 'HE21'},
-			'GLU': {'N': 'H', 'C': 'O', 'CD': 'OE1'},
-			'GLY': {'N': 'H', 'C': 'O'},
-			'HIS': {'N': 'H', 'C': 'O', 'NE2': 'HE2'},
-			'HIS_D': {'N': 'H', 'C': 'O', 'ND1': 'HD1'},
-			'ILE': {'N': 'H', 'C': 'O'},
-			'LEU': {'N': 'H', 'C': 'O'},
-			'LYS': {'N': 'H', 'C': 'O', 'NZ': 'HZ1'},
-			'MET': {'N': 'H', 'C': 'O'},
-			'PHE': {'N': 'H', 'C': 'O'},
-			'PRO': {'C': 'O'},
-			'SER': {'N': 'H', 'C': 'O', 'OG': 'HG'},
-			'THR': {'N': 'H', 'C': 'O', 'OG1': 'HG1'},
-			'TRP': {'N': 'H', 'C': 'O', 'NE1': 'HE1'},
-			'TYR': {'N': 'H', 'C': 'O', 'OH': 'HH'},
-			'VAL': {'N': 'H', 'C': 'O'},
-		}
 		rep_atom_idx = np.arange(n, dtype=np.int64)
 		if aas:
 			for ri, info in aas.items():
-				tri = info[5] if len(info) >= 6 else None
-				rep_map = CP_REP_MAP_BY_AA.get(tri)
-				if rep_map is None: continue
-				res_atoms = {}
-				for ai in info[2] + info[3]:
-					ai = int(ai)
-					if 0 <= ai < n:
-						res_atoms[atoms[ai][0]] = ai
 				is_nterm = ri in n_term_res
-				for src_nm, tgt_nm in rep_map.items():
-					if is_nterm and src_nm == 'N': continue
-					src_ai = res_atoms.get(src_nm)
-					tgt_ai = res_atoms.get(tgt_nm)
-					if src_ai is not None and tgt_ai is not None:
-						rep_atom_idx[src_ai] = tgt_ai
+				for ai in info[2] + info[3]:
+					ci = int(ai)
+					if not (0 <= ci < n): continue
+					elem = atoms[ci][1]
+					if is_nterm and atoms[ci][0] == 'N': continue
+					if elem == 'C':
+						rep = min((b for b in adj.get(ci, ()) if
+							atoms[b][1] == 'O' and not any(atoms[h][1] == 'H'
+							for h in adj.get(b, ()))), default=None)
+					elif elem == 'N' or elem == 'O':
+						rep = min((b for b in adj.get(ci, ())
+							if atoms[b][1] == 'H'), default=None)
+					else:
+						continue
+					if rep is not None: rep_atom_idx[ci] = rep
 		res_bonded = set()
 		res_polymer_bonded = set()
 		for ai, neighbors in adj.items():
