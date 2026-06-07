@@ -1501,14 +1501,59 @@ class Pose():
 		st     = np.sin(theta)
 		sph    = np.column_stack(
 			[st*np.cos(phi),st*np.sin(phi),np.cos(theta)]).astype(np.float32)
-		dx = c[:, None, 0] - c[None, :, 0]
-		dy = c[:, None, 1] - c[None, :, 1]
-		dz = c[:, None, 2] - c[None, :, 2]
-		dm_sq = dx*dx + dy*dy + dz*dz
-		reach_sq = (radii[:, None] + radii[None, :]) ** 2
-		n_ar = np.arange(n)
-		nbr_mask = (dm_sq < reach_sq) & (n_ar[:, None] != n_ar[None, :])
-		i_idx, j_idx = np.where(nbr_mask)
+		if n < 2:
+			i_idx = np.zeros(0, dtype=np.intp)
+			j_idx = np.zeros(0, dtype=np.intp)
+		elif n <= 4000:
+			dx = c[:, None, 0] - c[None, :, 0]
+			dy = c[:, None, 1] - c[None, :, 1]
+			dz = c[:, None, 2] - c[None, :, 2]
+			dm_sq = dx*dx + dy*dy + dz*dz
+			reach_sq = (radii[:, None] + radii[None, :]) ** 2
+			n_ar = np.arange(n)
+			nbr_mask = (dm_sq<reach_sq) & (n_ar[:,None]!=n_ar[None,:])
+			i_idx, j_idx = np.where(nbr_mask)
+		else:
+			cell = float(2.0 * radii.max())
+			cd = c.astype(np.float64)
+			gij = np.floor((cd - cd.min(axis=0)) / cell).astype(np.int64)
+			dims = gij.max(axis=0) + 1
+			ny, nz = int(dims[1]), int(dims[2])
+			lin = (gij[:, 0] * ny + gij[:, 1]) * nz + gij[:, 2]
+			order = np.argsort(lin, kind='stable')
+			ucell, starts = np.unique(lin[order], return_index=True)
+			ends = np.append(starts[1:], n)
+			offs = np.array([(ox, oy, oz)
+				for ox in (-1, 0, 1)
+				for oy in (-1, 0, 1)
+				for oz in (-1, 0, 1)], dtype=np.int64)
+			ii_parts, jj_parts = [], []
+			for ox, oy, oz in offs:
+				gx, gy, gz = gij[:,0]+ox, gij[:,1]+oy, gij[:,2]+oz
+				nb = (gx * ny + gy) * nz + gz
+				valid = ((gx>=0)&(gx<dims[0])&(gy>=0)&(gy<dims[1])
+					&(gz>=0)&(gz<dims[2]))
+				pos = np.clip(np.searchsorted(ucell, nb), 0, ucell.size-1)
+				hit = valid & (ucell[pos] == nb)
+				ai = np.where(hit)[0]
+				if ai.size == 0: continue
+				cnt = (ends - starts)[pos[ai]]
+				src = np.repeat(ai, cnt)
+				base = np.repeat(starts[pos[ai]], cnt)
+				rng = np.arange(cnt.sum()) - np.repeat(
+					np.cumsum(cnt) - cnt, cnt)
+				tgt = order[base + rng]
+				ddx = c[src,0]-c[tgt,0]
+				ddy = c[src,1]-c[tgt,1]
+				ddz = c[src,2]-c[tgt,2]
+				cand = ddx*ddx + ddy*ddy + ddz*ddz
+				keep = (cand < (radii[src]+radii[tgt])**2) & (src!=tgt)
+				ii_parts.append(src[keep])
+				jj_parts.append(tgt[keep])
+			i_idx = (np.concatenate(ii_parts) if ii_parts
+				else np.zeros(0, dtype=np.intp))
+			j_idx = (np.concatenate(jj_parts) if jj_parts
+				else np.zeros(0, dtype=np.intp))
 		M = i_idx.size
 		buried = np.zeros((n, n_points), dtype=bool)
 		if M > 0:
