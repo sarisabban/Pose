@@ -5255,7 +5255,60 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None,
 	cache['hbond_eval_lookup'] = hbond_eval_lookup
 	cache['hbond_poly_eval'] = hbond_poly_eval
 	cache['hbond_fade'] = hbond_fade
-	cache['fullatomhbond'] = fullatomhbond
+	def cached_dihedral(pose, ri, dtype, chi_type=None):
+		'''
+		Memoised pose.GetDihedral: backbone phi/psi are requested per
+		residue by FaDun/Rama/PAaPp/Omega each score, so compute each
+		dihedral once per score and share it (memo cleared each Score call)
+		Arguments:
+		----------
+			pose: Pose - structure being scored
+			ri: int - residue index
+			dtype: str - dihedral name ('PHI', 'PSI', ...)
+			chi_type: int or None - chi index when dtype is 'CHI'
+		Returns:
+		--------
+			float: dihedral angle; re-raises GetDihedral's error if undefined
+		'''
+		memo = cache.setdefault('_dihedral_memo', {})
+		key = (int(ri), dtype, chi_type)
+		if key in memo:
+			v = memo[key]
+			if isinstance(v, BaseException): raise v
+			return v
+		try:
+			if chi_type is None:
+				r = pose.GetDihedral(int(ri), dtype)
+			else:
+				r = pose.GetDihedral(int(ri), dtype, chi_type=chi_type)
+		except BaseException as ex:
+			memo[key] = ex
+			raise
+		memo[key] = r
+		return r
+	cache['cdih'] = cached_dihedral
+	def fullatomhbond_memo(pose, cache, per_hb=None):
+		'''
+		Memoised fullatomhbond: the four HBond terms each request the full
+		four-category result, so compute it once per score and reuse it
+		(the memo is cleared each Score call)
+		Arguments:
+		----------
+			pose: Pose - structure being scored
+			cache: dict - the ScoreMatch cache
+			per_hb: list or None - per-bond collector; bypasses the memo
+		Returns:
+		--------
+			dict: the four-category HBond contribution dict
+		'''
+		if per_hb is not None:
+			return fullatomhbond(pose, cache, per_hb)
+		m = cache.get('_hbond_memo')
+		if m is None:
+			m = fullatomhbond(pose, cache)
+			cache['_hbond_memo'] = m
+		return m
+	cache['fullatomhbond'] = fullatomhbond_memo
 	return cache
 
 class Score():
@@ -5365,6 +5418,11 @@ class Score():
 				self._topo_cache = self._cache
 				self._topo_hash = h
 				self._topo_refX = X.copy()
+		# per-score HBond memo: fullatomhbond is requested once by each of
+		# the 4 HBond terms; clear so it is recomputed for these coords,
+		# then computed once and shared across the 4 terms this call.
+		self._cache['_hbond_memo'] = None
+		self._cache['_dihedral_memo'] = {}
 		per_term = {}
 		torsional = False
 		for method_name, kwargs in self.terms:
@@ -5863,8 +5921,8 @@ class Score():
 			n_chi = int(entry.get('n_chi', 0))
 			if n_chi <= 0: continue
 			try:
-				phi = pose.GetDihedral(int(ri), 'PHI')
-				psi = pose.GetDihedral(int(ri), 'PSI')
+				phi = cache['cdih'](pose, int(ri), 'PHI')
+				psi = cache['cdih'](pose, int(ri), 'PSI')
 			except Exception:
 				phi = float('nan'); psi = float('nan')
 			if math.isnan(phi): phi = -90.0
@@ -6282,8 +6340,8 @@ class Score():
 			tri = info[5] if len(info) >= 6 else None
 			if tri == 'HIS_D': tri = 'HIS'
 			try:
-				phi = pose.GetDihedral(ri, 'PHI')
-				psi = pose.GetDihedral(ri, 'PSI')
+				phi = cache['cdih'](pose, ri, 'PHI')
+				psi = cache['cdih'](pose, ri, 'PSI')
 			except Exception: continue
 			if math.isnan(phi) or math.isnan(psi): continue
 			use_pre = (next_tri.get(ri) == 'PRO'
@@ -6373,8 +6431,8 @@ class Score():
 			if tri == 'HIS_D': tri = 'HIS'
 			if tri not in cache_pp: continue
 			try:
-				phi = pose.GetDihedral(int(ri), 'PHI')
-				psi = pose.GetDihedral(int(ri), 'PSI')
+				phi = cache['cdih'](pose, int(ri), 'PHI')
+				psi = cache['cdih'](pose, int(ri), 'PSI')
 			except Exception: continue
 			if math.isnan(phi) or math.isnan(psi): continue
 			fp = (phi + 175.0) / 10.0
@@ -6436,8 +6494,8 @@ class Score():
 			if tri == 'HIS_D': tri = 'HIS'
 			try:
 				om = pose.GetDihedral(int(ri), 'OMEGA')
-				phi = pose.GetDihedral(int(ri), 'PHI')
-				psi = pose.GetDihedral(int(ri), 'PSI')
+				phi = cache['cdih'](pose, int(ri), 'PHI')
+				psi = cache['cdih'](pose, int(ri), 'PSI')
 			except Exception: continue
 			if math.isnan(om): continue
 			om_nn = om
