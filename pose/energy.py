@@ -1062,6 +1062,7 @@ def SMIRKSMatch(pose, params):
 			for b in nbr[a]:
 				if b in sg_of and sg_of[b] != sg_of[a]:
 					ss_res.add(sg_of[a]); ss_res.add(sg_of[b])
+		res_of = {a: ri for ri, ats in ri_atoms.items() for a in ats}
 		for chain, ris in prot.items():
 			last = len(ris) - 1
 			for pos, ri in enumerate(ris):
@@ -1081,14 +1082,28 @@ def SMIRKSMatch(pose, params):
 				if tri == 'CYS' and ri in ss_res:
 					tri = 'CYX'
 				out['restri'][ri] = tri
+				# bond-based terminus (cyclic-safe): suppress the N-/C-
+				# terminal template when the backbone N/C is peptide-
+				# bonded to another residue. Identical to pos==0/pos==
+				# last for linear chains; a macrocycle has no termini.
+				n_at = next((a for a in ats
+					if atom_name.get(a) == 'N'), None)
+				c_at = next((a for a in ats
+					if atom_name.get(a) == 'C'), None)
+				is_n = n_at is not None and not any(
+					atom_name.get(b) == 'C' and res_of.get(b, ri) != ri
+					for b in nbr.get(n_at, []))
+				is_c = c_at is not None and not any(
+					atom_name.get(b) == 'N' and res_of.get(b, ri) != ri
+					for b in nbr.get(c_at, []))
 				keys = []
-				if pos == 0:    keys.append('N' + tri)
-				if pos == last: keys.append('C' + tri)
+				if is_n: keys.append('N' + tri)
+				if is_c: keys.append('C' + tri)
 				keys.append(tri)
 				# OpenMM names the first N-terminal proton 'H'; the
 				# AMBER NXXX templates call it 'H1'.
 				aliases = None
-				if pos == 0 and 'H' in anames and 'H1' not in anames:
+				if is_n and 'H' in anames and 'H1' not in anames:
 					aliases = {'H': 'H1'}
 				maptemplate(keys, ats, aliases)
 		nuc = {}
@@ -1831,12 +1846,21 @@ class ForceField():
 						name_to_idx['N'], name_to_idx['CA'],
 						name_to_idx['C'])
 				res_order = sorted(bb_per_res.keys())
+				bonds_g = pose.data.get('Bonds', {}) or {}
+				c_of = {bb_per_res[r][4]: r for r in bb_per_res}
+				n_of = {bb_per_res[r][2]: r for r in bb_per_res}
 				phi_q_list = []; psi_q_list = []; grids = []
-				for kk, ri in enumerate(res_order):
-					if kk == 0 or kk == len(res_order) - 1:
+				for ri in res_order:
+					# bond-aware prev/next (cyclic-safe): prev residue's C is
+					# bonded to this N, next residue's N to this C. Index
+					# adjacency for linear; closure neighbour for a macrocycle.
+					Ni0 = bb_per_res[ri][2]; Ci0 = bb_per_res[ri][4]
+					prev_ri = next((c_of[j] for j in bonds_g.get(Ni0, [])
+						if j in c_of and c_of[j] != ri), None)
+					next_ri = next((n_of[j] for j in bonds_g.get(Ci0, [])
+						if j in n_of and n_of[j] != ri), None)
+					if prev_ri is None or next_ri is None:
 						continue
-					prev_ri = res_order[kk - 1]
-					next_ri = res_order[kk + 1]
 					chain  = bb_per_res[ri][0]
 					if (bb_per_res[prev_ri][0] != chain or
 						bb_per_res[next_ri][0] != chain):
@@ -2985,13 +3009,36 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None,
 			for ri, info in aas.items():
 				ch = info[1] if len(info) > 1 else ''
 				by_chain.setdefault(ch, []).append(int(ri))
+			# Bond-based terminus detection (cyclic/chirality-safe): a residue
+			# is N-terminal iff its backbone N has no peptide bond to another
+			# residue's C, C-terminal iff its backbone C has no peptide bond to
+			# another residue's N. Bit-identical to the old first/last-in-chain
+			# rule for linear chains; correctly yields NO termini for a
+			# head-to-tail macrocycle.
+			bonds_raw = pose.data.get('Bonds', {}) or {}
+			res_of = {}
+			for _ri, _info in aas.items():
+				for _ai in list(_info[2]) + list(_info[3]):
+					res_of[int(_ai)] = int(_ri)
 			n_term_res = set()
 			c_term_res = set()
-			for ch, ris in by_chain.items():
-				ris.sort()
-				if ris:
-					n_term_res.add(ris[0])
-					c_term_res.add(ris[-1])
+			for _ri, _info in aas.items():
+				_ri = int(_ri)
+				_n = _c = None
+				for _ai in list(_info[2]) + list(_info[3]):
+					_nm = atoms[int(_ai)][0]
+					if _nm == 'N': _n = int(_ai)
+					elif _nm == 'C': _c = int(_ai)
+				if _n is not None and not any(
+						atoms[int(_j)][0] == 'C'
+						and res_of.get(int(_j), _ri) != _ri
+						for _j in bonds_raw.get(_n, [])):
+					n_term_res.add(_ri)
+				if _c is not None and not any(
+						atoms[int(_j)][0] == 'N'
+						and res_of.get(int(_j), _ri) != _ri
+						for _j in bonds_raw.get(_c, [])):
+					c_term_res.add(_ri)
 			NTERM_H_NAMES = {'H', 'H1', 'H2', 'H3', '1H', '2H', '3H',
 				'HN', 'HT1', 'HT2', 'HT3'}
 			def applyatom(ai, new_type, new_charge):
