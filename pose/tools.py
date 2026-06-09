@@ -4249,3 +4249,155 @@ def Port(name='openff'):
 	try: DBLoad.cache_clear()
 	except Exception: pass
 	return True
+
+def Cyclise(pose, mode='head-to-tail',
+	res1=None, atom1=None, res2=None, atom2=None, precoil=True):
+	'''
+	Form an intramolecular bond to build a cyclic peptide (macrocycle)
+	Arguments:
+	----------
+		mode:  'head-to-tail' to amide-bond the N-terminus to the
+		       C-terminus (default), or 'sidechain' to bond the two
+		       named atoms res1/atom1 and res2/atom2 (e.g. a disulfide)
+		res1:  First residue index (sidechain mode)
+		atom1: Atom name in res1 (sidechain mode)
+		res2:  Second residue index (sidechain mode)
+		atom2: Atom name in res2 (sidechain mode)
+		precoil: head-to-tail only - coil the backbone and run cyclic
+		       coordinate descent so the closing bond forms at ~1.33 A
+		       instead of a stretched gap (default True)
+	Returns:
+	--------
+		Modifies the pose in place: head-to-tail drops the extra
+		N-terminal hydrogens and the C-terminal OXT, adds the closing
+		bond to the graph, re-assigns Gasteiger charges, and records the
+		closure in pose.data['Cyclic']. With precoil the closing bond is
+		already at ~1.33 A (CCD); refine with tools.Minimise (the
+		'Default' force field is recommended - the SMIRNOFF/'OpenFF'
+		improper surface is poorly behaved for macrocyclic backbones).
+		RotateDihedral/AdjustDistance are undefined on a closed ring and
+		must not be used after cyclization. Returns no value.
+	'''
+	atoms = pose.data['Atoms']
+	src = (pose.data['Amino Acids'] or pose.data['Nucleotides'])
+	def atomof(res, nm):
+		for a in src[res][2] + src[res][3]:
+			if atoms[a][0] == nm: return a
+		return None
+	def reindex(drop):
+		keep = [i for i in sorted(atoms) if i not in drop]
+		nx = {old: k for k, old in enumerate(keep)}
+		coords = np.asarray(pose.data['Coordinates'], dtype=float)
+		pose.data['Coordinates'] = coords[keep]
+		pose.data['Atoms'] = {nx[i]: atoms[i] for i in keep}
+		bonds = pose.data['Bonds']
+		bo = pose.data['BondOrders']
+		nb = {}
+		nbo = {}
+		for i in keep:
+			lst = []
+			ol = []
+			for j, o in zip(bonds.get(i, []), bo.get(i, [])):
+				if j in nx:
+					lst.append(nx[j])
+					ol.append(o)
+			nb[nx[i]] = lst
+			nbo[nx[i]] = ol
+		pose.data['Bonds'] = nb
+		pose.data['BondOrders'] = nbo
+		for ri in src:
+			src[ri][2] = [nx[i] for i in src[ri][2] if i in nx]
+			src[ri][3] = [nx[i] for i in src[ri][3] if i in nx]
+		return nx
+	def ccdclose():
+		'''
+		Close the ring geometry before the bond is formed: coil the
+		backbone, then cyclic-coordinate-descent the C-terminal C onto
+		its ideal amide position next to the N-terminal N
+		Arguments:
+		----------
+			No arguments taken
+		Returns:
+		--------
+			Rotates the still-linear backbone in place; no return value
+		'''
+		rr = sorted(src)
+		for ri in rr:
+			for ang, val in (('PHI', 0.0), ('PSI', 180.0)):
+				try:
+					if not np.isnan(pose.GetDihedral(ri, ang)):
+						pose.RotateDihedral(ri, val, ang)
+				except Exception:
+					pass
+		nC = atomof(rr[-1], 'C')
+		n0 = atomof(rr[0], 'N')
+		hd = atomof(rr[0], '2H') or atomof(rr[0], '3H')
+		if nC is None or n0 is None or hd is None: return
+		co = np.asarray(pose.data['Coordinates'], dtype=float)
+		d = co[hd] - co[n0]
+		nd = np.linalg.norm(d)
+		if nd < 1e-9: return
+		tgt = co[n0] + 1.33 * d / nd
+		dih = []
+		for ri in rr:
+			for ang in ('PHI', 'PSI'):
+				try:
+					if not np.isnan(pose.GetDihedral(ri, ang)):
+						dih.append((ri, ang))
+				except Exception:
+					pass
+		for _ in range(300):
+			co = np.asarray(pose.data['Coordinates'])
+			if np.linalg.norm(co[nC] - tgt) < 0.02: break
+			for ri, ang in reversed(dih):
+				co = np.asarray(pose.data['Coordinates'])
+				M = co[nC]
+				if ang == 'PHI':
+					O = co[atomof(ri, 'N')]
+					u = co[atomof(ri, 'CA')] - O
+				else:
+					O = co[atomof(ri, 'CA')]
+					u = co[atomof(ri, 'C')] - O
+				nu = np.linalg.norm(u)
+				if nu < 1e-9: continue
+				u = u / nu
+				a = (M - O) - np.dot(M - O, u) * u
+				b = (tgt - O) - np.dot(tgt - O, u) * u
+				na = np.linalg.norm(a)
+				nb = np.linalg.norm(b)
+				if na < 1e-6 or nb < 1e-6: continue
+				a = a / na
+				b = b / nb
+				th = math.atan2(float(np.dot(np.cross(a, b), u)),
+					float(np.dot(a, b)))
+				pose.RotateDihedral(ri,
+					pose.GetDihedral(ri, ang) + math.degrees(th), ang)
+	if mode == 'head-to-tail':
+		if precoil:
+			ccdclose()
+		ris = sorted(src)
+		a_n = atomof(ris[0], 'N')
+		a_c = atomof(ris[-1], 'C')
+		drop = set()
+		for nm in ('2H', '3H', 'H2', 'H3'):
+			a = atomof(ris[0], nm)
+			if a is not None: drop.add(a)
+		for nm in ('OXT', 'OT1', 'OT2', "O''"):
+			a = atomof(ris[-1], nm)
+			if a is not None: drop.add(a)
+		nx = reindex(drop)
+		i1, i2, bov = nx[a_c], nx[a_n], 1.5
+		rec = [int(ris[-1]), int(ris[0])]
+	else:
+		i1 = atomof(res1, atom1)
+		i2 = atomof(res2, atom2)
+		if i1 is None or i2 is None:
+			raise Exception('Cyclize: sidechain atoms not found')
+		bov = 1.0
+		rec = [int(res1), int(res2)]
+	pose.data['Bonds'].setdefault(i1, []).append(i2)
+	pose.data['BondOrders'].setdefault(i1, []).append(bov)
+	pose.data['Bonds'].setdefault(i2, []).append(i1)
+	pose.data['BondOrders'].setdefault(i2, []).append(bov)
+	pose.data.setdefault('Cyclic', []).append(rec)
+	pose.CalcCharge()

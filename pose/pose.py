@@ -322,7 +322,9 @@ class Pose():
 		'''
 		src = (self.data['Amino Acids'] or self.data['Nucleotides'])
 		if i-1 in src and src[i-1][1] == src[i][1]: return i - 1
-		return None
+		if self.data['Type'] == 'Protein':
+			return self._bondedres(i, 'N', 'C')
+		return self._bondedres(i, 'P', "O3'")
 	def _nextres(self, i):
 		'''
 		Return the next residue index on the same chain
@@ -335,6 +337,37 @@ class Pose():
 		'''
 		src = (self.data['Amino Acids'] or self.data['Nucleotides'])
 		if i+1 in src and src[i+1][1] == src[i][1]: return i + 1
+		if self.data['Type'] == 'Protein':
+			return self._bondedres(i, 'C', 'N')
+		return self._bondedres(i, "O3'", 'P')
+	def _bondedres(self, i, atomself, atomother):
+		'''
+		Find a neighbouring residue linked to residue i via the bond graph
+		Arguments:
+		----------
+			i:         Residue index
+			atomself:  Backbone atom name in residue i forming the link
+			atomother: Backbone atom name in the bonded neighbour residue
+		Returns:
+		--------
+			int or None: index of the residue whose atomother atom is bonded
+			to residue i's atomself atom (the head-to-tail / closure
+			neighbour), or None if there is no such inter-residue bond
+		'''
+		src = (self.data['Amino Acids'] or self.data['Nucleotides'])
+		atoms = self.data['Atoms']
+		info = src[i]
+		ai = None
+		for a in info[2] + info[3]:
+			if atoms[a][0] == atomself: ai = a; break
+		if ai is None: return None
+		resof = {}
+		for ri, rinfo in src.items():
+			for a in rinfo[2] + rinfo[3]:
+				resof[a] = ri
+		for j in self.data['Bonds'].get(ai, []):
+			if atoms[j][0] == atomother and resof.get(j, i) != i:
+				return resof[j]
 		return None
 	def _hasatom(self, res, atom):
 		'''
