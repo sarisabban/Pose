@@ -460,10 +460,11 @@ class Pose():
 				idx = 4
 				flip = odd
 			T = np.array([X, Y, Z])
-			BB = np.array(aa_db[bb]['Vectors']) + T
-			SC = np.array(aa_db[aa.upper()]['Vectors']) + T
+			BB = np.array(aa_db[bb]['Vectors'])
+			SC = np.array(aa_db[aa.upper()]['Vectors'])
 			AA_co = np.insert(BB, [idx], SC, axis=0)
 			if LD: AA_co = AA_co * [1, 1, -1]
+			AA_co = AA_co + T
 			if flip:
 				AA = AA_co
 				p = AA[2]

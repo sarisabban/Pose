@@ -1869,12 +1869,16 @@ class ForceField():
 					# variant tricode (CYX vs CYS, HID/HIE/HIP, ...);
 					# SMIRKS force fields key by the 1-letter code.
 					restri = assigns.get('restri', {})
+					code1 = bb_per_res[ri][1]
 					grid = (cmap_section.get(restri.get(ri))
 						or cmap_section.get(aas[ri][5])
-						or cmap_section.get(bb_per_res[ri][1]))
+						or cmap_section.get(code1)
+						or cmap_section.get(code1.upper()))
 					if grid is None: continue
 					g = np.asarray(grid, dtype=np.float64)
 					if g.shape != (24, 24): continue
+					if code1.islower():
+						g = np.roll(g[::-1, ::-1], (1, 1), axis=(0, 1))
 					_, _, Ni, CAi, Ci = bb_per_res[ri]
 					Cm1 = bb_per_res[prev_ri][4]
 					Np1 = bb_per_res[next_ri][2]
