@@ -2532,6 +2532,7 @@ class Pose():
 			elif at == 'CHI':
 				assert chi_type is not None, 'Protein CHI needs chi_type'
 				sym = self.data['Amino Acids'][res][0].upper()
+				if self.aminoacids[sym].get('Fused'): return
 				ca = self.aminoacids[sym]['Chi Angle Atoms'][chi_type-1]
 				pivots = res, ca[1], res, ca[2]
 			else:
@@ -2558,7 +2559,11 @@ class Pose():
 			raise Exception('No structure loaded. Call Import() first')
 		if pivots is None: return
 		ra, aa, rb, ab = pivots
+		if not math.isfinite(theta):
+			raise ValueError(f'RotateDihedral: theta must be a real '
+			f'number, got {theta!r}')
 		current = self.GetDihedral(res, angle_type, chi_type)
+		if not math.isfinite(current): return
 		piv_a = self.GetAtomIdx(ra, aa)
 		piv_b = self.GetAtomIdx(rb, ab)
 		coords = self.data['Coordinates']
