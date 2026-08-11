@@ -16,8 +16,8 @@ from collections import defaultdict
 @functools.lru_cache(maxsize=1)
 def DBLoad():
 	'''
-	Load the database.json file (cached: parsed once per Python process).
-	Call DBLoad.cache_clear() after writing the file to force a re-read.
+	Load the database.json file (cached: parsed once per Python process)
+	Call DBLoad.cache_clear() after writing the file to force a re-read
 	Arguments:
 	----------
 		No arguments taken
@@ -29,7 +29,7 @@ def DBLoad():
 	with open(f'{path}/database.json') as f: return json.load(f)
 
 class Pose():
-	''' A class that builds and manipulates protein, DNA, and RNA '''
+	''' A class that builds and manipulates protein, DNA, and RNA molecules '''
 	def __init__(self):
 		'''
 		Initialise an empty pose and load the residue/nucleotide database
@@ -722,8 +722,7 @@ class Pose():
 		c_ai = next((a for a in bb_idx if atoms_dict[a][0] == 'C'), None)
 		h1_ai = next((a for a in bb_idx if atoms_dict[a][0] == '1H'), None)
 		if n_ai is None or ca_ai is None or c_ai is None:
-			raise Exception(
-				f'Residue {index} missing N/CA/C atom')
+			raise Exception(f'Residue {index} missing N/CA/C atom')
 		n_xyz = coords[n_ai].copy().astype(np.float64)
 		ca_xyz = coords[ca_ai].copy().astype(np.float64)
 		c_xyz = coords[c_ai].copy().astype(np.float64)
@@ -733,8 +732,7 @@ class Pose():
 		e2 = v - np.dot(v, e1) * e1
 		nm = np.linalg.norm(e2)
 		if nm < 1e-10:
-			raise Exception(
-				f'Degenerate N-CA-C at residue {index}')
+			raise Exception(f'Degenerate N-CA-C at residue {index}')
 		e2 = e2 / nm
 		F_target = np.array([e1, e2, np.cross(e1, e2)])
 		sc_vectors = np.array(new_entry['Vectors'], dtype=np.float64)
@@ -770,7 +768,7 @@ class Pose():
 			else:
 				index_map[oi] = cursor
 				cursor += 1
-		self._renumber_atoms(index_map)
+		self._renumberatoms(index_map)
 		Atoms_out = self.data['Atoms']
 		Bonds_out = self.data['Bonds']
 		BO_out = self.data['BondOrders']
@@ -875,12 +873,23 @@ class Pose():
 				targets.append(
 					(bp_index, comp.get(new_sym, new_sym)))
 		for idx, sym in targets:
-			self._swap_one_base(idx, sym)
+			self._swaponebase(idx, sym)
 		self._update()
-	def _swap_one_base(self, index, new_sym):
+	def _swaponebase(self, index, new_sym):
 		'''
 		Swap a single nucleotide's base atoms in place using the
-		sugar O4'-C1'-C2' rigid-body frame as anchor.
+		sugar O4'-C1'-C2' rigid-body frame as anchor
+		Arguments:
+		----------
+			index:   Nucleotide index whose base is replaced
+			new_sym: Single-letter base (A/T/G/C for DNA, A/U/G/C for RNA)
+		Returns:
+		--------
+			self.data updated in place: the old base atoms are
+			deleted, the remaining atoms renumbered, the new base
+			appended and bonded, and the Nucleotides record given
+			its new symbol, atom indices and database key; the
+			sugar-phosphate backbone is left untouched
 		'''
 		mol = self.data['Type']
 		db_key = ('D' + new_sym) if mol == 'DNA' else new_sym
@@ -943,7 +952,7 @@ class Pose():
 			else:
 				index_map[oi] = cursor
 				cursor += 1
-		self._renumber_atoms(index_map)
+		self._renumberatoms(index_map)
 		Atoms_out = self.data['Atoms']
 		Bonds_out = self.data['Bonds']
 		BO_out = self.data['BondOrders']
@@ -987,7 +996,7 @@ class Pose():
 		info[0] = new_sym
 		info[3] = list(new_base_global)
 		info[4] = db_key
-	def _renumber_atoms(self, index_map):
+	def _renumberatoms(self, index_map):
 		'''
 		Remap every atom-index reference in self.data
 		Arguments:
@@ -2138,7 +2147,6 @@ class Pose():
 						if 'Tricode' in v and len(v['Tricode']) > 1
 						and v['Tricode'][1] == tri), None)
 					if sym is not None: is_D = True
-
 				if sym is None: continue
 				hm = {v[0]: v[5] for v in (
 					self.aminoacids[sym].get('Sidechain Atoms',[]) +
@@ -3306,6 +3314,18 @@ class Molecule():
 		if any(bo >= 1.5 for bo in bos): return 'sp2'
 		return 'sp3'
 	def _getpdbstring(self):
+		'''
+		Return the molecule serialised as a PDB formatted string
+		Arguments:
+		----------
+			No arguments taken
+		Returns:
+		--------
+			str: every atom as a HETATM record of residue LIG,
+			followed by CONECT records for the bond graph and a
+			terminating END; raises ValueError above the 99999
+			atom serial limit of the format
+		'''
 		A = self.data['Atoms']
 		C = self.data['Coordinates']
 		B = self.data['Bonds']
@@ -3335,6 +3355,18 @@ class Molecule():
 		buf.write('END\n')
 		return buf.getvalue()
 	def _getcifstring(self, name='molecule'):
+		'''
+		Return the molecule serialised as a mmCIF formatted string
+		Arguments:
+		----------
+			name: Identifier written as the data_<name> block header
+		Returns:
+		--------
+			str: an _atom_site loop holding the element, name and
+			coordinates of every atom, followed by a
+			_chem_comp_bond loop giving each bond as SING, DOUB,
+			TRIP or AROM when the molecule has any bonds
+		'''
 		A = self.data['Atoms']
 		C = self.data['Coordinates']
 		B = self.data['Bonds']
@@ -3364,6 +3396,19 @@ class Molecule():
 				buf.write(f'{A[i][0]} {A[j][0]} {bm.get(bo, "SING")}\n')
 		return buf.getvalue()
 	def _getsdfstring(self):
+		'''
+		Return the molecule serialised as an SDF V2000 formatted string
+		Arguments:
+		----------
+			No arguments taken
+		Returns:
+		--------
+			str: the SMILES as title line, then the counts line,
+			one atom block line per atom and one bond block line
+			per bond (aromatic bonds written as type 4), closed by
+			M END and $$$$; raises ValueError above the 999 atom
+			or 999 bond limit of the format
+		'''
 		A = self.data['Atoms']
 		C = self.data['Coordinates']
 		B = self.data['Bonds']
@@ -3390,6 +3435,19 @@ class Molecule():
 		buf.write('M  END\n$$$$\n')
 		return buf.getvalue()
 	def _getmol2string(self):
+		'''
+		Return the molecule serialised as a TRIPOS MOL2 formatted string
+		Arguments:
+		----------
+			No arguments taken
+		Returns:
+		--------
+			str: MOLECULE, ATOM, BOND and COMMENT records, where
+			each C, N, O and S atom is given the SYBYL type
+			implied by its highest bond order (.1, .2, .3 or .ar)
+			and carries its partial charge, and bonds are written
+			as 1, 2, 3 or ar
+		'''
 		A = self.data['Atoms']
 		C = self.data['Coordinates']
 		B = self.data['Bonds']
