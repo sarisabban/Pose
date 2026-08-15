@@ -2461,7 +2461,7 @@ class ForceField():
 		G = E[:, None, :] - p_pow * E_dot_rhat[:, :, None] * rhat
 		A = alpha[:, None] * coeff
 		M = A[:, :, None] * G
-		forces = -np.sum(M, axis=1) + np.sum(M, axis=0)
+		forces = (np.sum(M, axis=1) - np.sum(M, axis=0)) / 1389.35458
 		return energy, forces
 	def CMAPPotential(self, pose, cache, alg='catmullrom', grad=True, box=None):
 		'''

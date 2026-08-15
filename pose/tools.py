@@ -2,12 +2,16 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import re
+import io
 import os
 import sys
 import json
 import math
 import time
 import shutil
+import base64
+import pickle
+import zipfile
 import itertools
 import numpy as np
 import urllib.request
@@ -19,12 +23,7 @@ from collections import defaultdict, deque
 def _validate_rot_entry(rot_entry, expected_tricode):
 	'''
 	Validate a rotamer JSON against the Dunbrack BBDEP2010 schema.
-
-	The JSON must come from the nnca_pipeline (build_*_rotamer.py) or
-	an equivalent producer, with top-level keys
-	{tricode, n_chi, rotamers, method}. The method.chi_axes field is
-	required because Parameterise() uses it as the source of truth for
-	the Amino Acids entry's "Chi Angle Atoms" field.
+	The JSON must come from https://github.com/sarisabban/ncaarotamers.
 
 	Arguments:
 	----------
@@ -131,8 +130,8 @@ def Parameterise(cif_file, rotamer_json_file, tricode, unicode,
 	(verified RCSB Chemical Component Dictionary CIF) and inserts the
 	matching backbone-dependent rotamer library under
 	"Rotamer Library"["residues"][tricode] from rotamer_json_file
-	(Dunbrack BBDEP2010-format JSON produced by the nnca_pipeline at
-	/Users/slurm/Desktop/Research/nnca_pipeline/). Both insertions
+	(Dunbrack BBDEP2010-format JSON produced by the
+	https://github.com/sarisabban/ncaarotamers). Both insertions
 	land in a single atomic write.
 
 	Arguments:
@@ -2448,8 +2447,8 @@ def Port(name='openff'):
 			'kilocalorie_per_mole': (4.184,         {'E': 1, 'N': -1}),
 			'elementary_charge':    (1.0,           {'Q': 1})}
 		def reduce(text):
-			'''Reduce a unit expression to (factor, {dimension: power}).'''
-			factor, dims = 1.0, {}
+			'''Reduce to (number, {unit: power}, {dimension: power}).'''
+			num, powers, dims = 1.0, {}, {}
 			for tok in text.strip().replace('**', '^').split('*'):
 				tok = tok.strip()
 				if not tok: continue
@@ -2459,25 +2458,30 @@ def Port(name='openff'):
 				else:
 					nm, ex = tok, 1
 				try:
-					factor *= float(nm) ** ex
+					num *= float(nm) ** ex
 					continue
 				except ValueError:
 					pass
 				if nm not in units:
 					raise ValueError(
 						f'port: unknown unit {nm!r} in {text!r}')
-				f, d = units[nm]
-				factor *= f ** ex
-				for k, v in d.items():
+				powers[nm] = powers.get(nm, 0) + ex
+				for k, v in units[nm][1].items():
 					dims[k] = dims.get(k, 0) + v * ex
-			return factor, {k: v for k, v in dims.items() if v}
-		fq, dq = reduce(qstr)
-		ft, dt = reduce(target)
+			return num, powers, {k: v for k, v in dims.items() if v}
+		nq, pq, dq = reduce(qstr)
+		nt, pt, dt = reduce(target)
 		if dq != dt:
 			raise ValueError(
 				f'port: cannot convert {qstr!r} to {target!r} '
 				f'(dimension mismatch)')
-		return fq / ft
+		# Cancel units common to both sides before multiplying, so that a
+		# shared factor such as radian ** -2 contributes no rounding.
+		value = nq / nt
+		for nm in set(pq) | set(pt):
+			ex = pq.get(nm, 0) - pt.get(nm, 0)
+			if ex: value *= units[nm][0] ** ex
+		return value
 	def converttorsions(section):
 		'''
 		Convert a SMIRNOFF torsion section to Pose's component schema
@@ -2617,7 +2621,6 @@ def Port(name='openff'):
 			'openff-forcefields/' + commit
 			+ '/openforcefields/offxml/openff-2.3.0.offxml')
 		root = ET.fromstring(download(url))
-		rmin_factor = 2.0 / (2.0 ** (1.0 / 6.0))
 		bonds = {}
 		for p in root.find('Bonds'):
 			a = p.attrib
@@ -2634,16 +2637,22 @@ def Port(name='openff'):
 					'kilojoule_per_mole * radian ** -2')}
 		propers   = converttorsions(root.find('ProperTorsions'))
 		impropers = converttorsions(root.find('ImproperTorsions'))
+		# ImproperTorsionPotential ignores idivf, and SMIRNOFF impropers
+		# carry no such attribute, so drop the placeholder it picks up.
+		for par in impropers.values():
+			for comp in par['components']: comp.pop('idivf', None)
 		vdw = {}
 		for p in root.find('vdW'):
 			a = p.attrib
-			if 'sigma' in a:
-				r = qval(a['sigma'], 'angstrom') / rmin_factor
-			else:
-				r = qval(a['rmin_half'], 'angstrom')
-			vdw[a['smirks']] = {'id': a.get('id'),
-				'epsilon': qval(a['epsilon'], 'kilojoule_per_mole'),
-				'r': r, 'alpha': 0.0}
+			# Store whichever radius the offxml states. SMIRKSMatch reads
+			# either 'sigma' or 'r', so converting between them would only
+			# discard bits of the published value.
+			rec = {'id': a.get('id'),
+				'epsilon': qval(a['epsilon'], 'kilojoule_per_mole')}
+			if 'sigma' in a: rec['sigma'] = qval(a['sigma'], 'angstrom')
+			else: rec['r'] = qval(a['rmin_half'], 'angstrom')
+			rec['alpha'] = 0.0
+			vdw[a['smirks']] = rec
 		charges = {}
 		for p in root.find('LibraryCharges'):
 			a = p.attrib
@@ -2654,21 +2663,115 @@ def Port(name='openff'):
 			charges[a['smirks']] = {'id': a.get('id'), 'q': qs}
 		constraints = {}
 		for p in root.find('Constraints'):
-			constraints[p.attrib['smirks']] = {'id': p.attrib.get('id')}
+			a = p.attrib
+			rec = {'id': a.get('id')}
+			if 'distance' in a:
+				rec['distance'] = qval(a['distance'], 'angstrom')
+			constraints[a['smirks']] = rec
+		def naglweights(url):
+			'''
+			Read the NAGL AM1-BCC network weights from a .pt checkpoint
+			Arguments:
+			----------
+				url: str - raw URL of a pinned openff-gnn-am1bcc .pt file
+			Returns:
+			--------
+				dict: 'gcn_layers' list and 'readout' dict, every tensor
+				stored as {'shape': [...], 'data': base64 float32}
+			'''
+			print(f'[port] downloading {url}', file=sys.stderr)
+			try:
+				with urllib.request.urlopen(url, timeout=300) as resp:
+					blob = resp.read()
+			except Exception as err:
+				raise RuntimeError(f'port: could not download {url}: {err}')
+			# A .pt file is a zip of pickled tensors: data.pkl holds the
+			# structure and data/<key> the raw storage bytes. Unpickling
+			# with stubs for the torch classes and np.frombuffer for the
+			# storages recovers every weight without importing torch.
+			zf = zipfile.ZipFile(io.BytesIO(blob))
+			root = zf.namelist()[0].split('/')[0]
+			dtypes = {'FloatStorage': np.float32,
+				'DoubleStorage': np.float64, 'HalfStorage': np.float16,
+				'LongStorage': np.int64, 'IntStorage': np.int32,
+				'ByteStorage': np.uint8, 'BoolStorage': np.bool_}
+			class Stub(dict):
+				'''Stand-in for any class the checkpoint pickles'''
+				def __init__(self, *a, **k): dict.__init__(self)
+				def __setstate__(self, state):
+					if isinstance(state, dict): self.update(state)
+			def rebuild(store, offset, size, stride, *rest):
+				'''Reconstruct one tensor from its storage as an array'''
+				arr = np.frombuffer(zf.read('%s/data/%s'
+					% (root, store[0])), dtype=store[1])
+				size = tuple(size)
+				n = int(np.prod(size)) if size else arr.size
+				return arr[offset:offset + n].reshape(size)
+			class Reader(pickle.Unpickler):
+				'''Unpickler that yields NumPy arrays, never torch objects'''
+				def find_class(self, mod, name):
+					if name == '_rebuild_tensor_v2': return rebuild
+					if name in dtypes: return dtypes[name]
+					try: return super().find_class(mod, name)
+					except Exception: return Stub
+				def persistent_load(self, pid):
+					dt = pid[1] if pid[1] in dtypes.values() else np.float32
+					return (pid[2], dt)
+			obj = Reader(io.BytesIO(zf.read('%s/data.pkl' % root))).load()
+			seen, found = set(), {}
+			def collect(node, name):
+				'''Walk the unpickled tree and index arrays by parameter name'''
+				if id(node) in seen: return
+				seen.add(id(node))
+				if isinstance(node, dict):
+					for k, v in node.items(): collect(v, str(k))
+				elif isinstance(node, (list, tuple)):
+					for v in node: collect(v, name)
+				elif isinstance(node, np.ndarray): found[name] = node
+			collect(obj, '')
+			pack = lambda a: {'shape': list(a.shape),
+				'data': base64.b64encode(np.ascontiguousarray(a,
+				dtype=np.float32).tobytes()).decode('ascii')}
+			conv = 'convolution_module.gcn_layers.'
+			read = 'readout_modules.am1bcc_charges.readout_layers.'
+			n_gcn = 1 + max(int(k[len(conv):].split('.')[0])
+				for k in found if k.startswith(conv))
+			layers = [{
+				'fc_neigh_w': pack(found['%s%d.fc_neigh.weight' % (conv, i)]),
+				'fc_self_w':  pack(found['%s%d.fc_self.weight' % (conv, i)]),
+				'fc_self_b':  pack(found['%s%d.fc_self.bias' % (conv, i)])}
+				for i in range(n_gcn)]
+			return {'gcn_layers': layers, 'readout': {
+				'linear_0_w': pack(found[read + '0.weight']),
+				'linear_0_b': pack(found[read + '0.bias']),
+				'linear_1_w': pack(found[read + '3.weight']),
+				'linear_1_b': pack(found[read + '3.bias'])}}
+		nagl_commit = '6a30bde31fc9ba7f9ff218dacd291184e2f70946'
+		nagl_url = ('https://raw.githubusercontent.com/openforcefield/'
+			'openff-nagl-models/' + nagl_commit + '/openff/nagl_models/'
+			'models/am1bcc/openff-gnn-am1bcc-1.0.0.pt')
 		prev = ep.get('OpenFF') or ep.get('openFF') or {}
-		nagl = prev.get('AM1BCC') or ep.get('AM1BCC')
+		# Sage covers neither selenium, nor aromatic C:N ring bonds, nor
+		# the phosphate improper, and the offxml has no field for the
+		# per-type polarisability, so those exist only in the database.
+		# Carry them forward, appended last so that they win under the
+		# last-match-wins SMIRKS precedence.
+		for part, new in (('Bonds', bonds), ('Angles', angles),
+				('ProperTorsions', propers),
+				('ImproperTorsions', impropers), ('vdW', vdw)):
+			for sm, par in (prev.get(part) or {}).items():
+				if sm not in new: new[sm] = par
+				elif 'alpha' in par: new[sm]['alpha'] = par['alpha']
 		block = {
 			'Constants': {'epsilon_r': 1.0, 'f_lj': 0.5,
 				'f_elec': 5.0 / 6.0},
 			'Constraints':      constraints,
 			'Bonds':            bonds,
 			'Angles':           angles,
-			'UB':               prev.get('UB', {}),
 			'ProperTorsions':   propers,
 			'ImproperTorsions': impropers,
 			'vdW':              vdw,
 			'Electrostatic':    charges,
-			'CMAP':             prev.get('CMAP', prev.get('cmap', {})),
 			'Terms': [
 				['BondPotential',            {'alg': 'harmonic'}],
 				['AnglePotential',           {}],
@@ -2678,7 +2781,7 @@ def Port(name='openff'):
 				['ElectrostaticPotential',   {'alg': 'constant'}],
 			],
 		}
-		if nagl is not None: block['AM1BCC'] = nagl
+		block['AM1BCC'] = naglweights(nagl_url)
 		ep.pop('OpenFF', None)
 		ep['OpenFF'] = block
 	def ff19sb():
