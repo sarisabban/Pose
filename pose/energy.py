@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import os
+import re
 import sys
 import json
 import math
@@ -1955,6 +1956,124 @@ class ForceField():
 			for j in bonds.get(i, []):
 				if j in atoms and j != i and j not in nbr[i]:
 					nbr[i].append(j)
+		# NAGL consults a table of precomputed AM1-BCC charges before it
+		# runs the network, so reproduce that order here. Entries are
+		# keyed by graph, matched on element, formal charge and bond
+		# order, then remapped onto this pose's atom order. Any miss
+		# falls through to the network below.
+		def parsemapped(smi):
+			'''
+			Parse an all-bracketed, atom-mapped SMILES into a graph
+			Arguments:
+			----------
+				smi: str - mapped SMILES, every atom bracketed and tagged
+					with an atom map number
+			Returns:
+			--------
+				tuple: (elements, formal charges, {i: {j: bond order}}),
+					each indexed by the atom map number minus one, or
+					None when the string is outside the supported subset
+			'''
+			bord = {'-': 1.0, '=': 2.0, '#': 3.0}
+			toks = re.findall(r'\[[^\]]*\]|[()\-=#]|\d', smi)
+			el = {}; ch = {}; adj = {}; stack = []; ring = {}
+			prev = None; order = 1.0
+			for t in toks:
+				if t == '(': stack.append(prev); continue
+				if t == ')': prev = stack.pop(); continue
+				if t in bord: order = bord[t]; continue
+				if t.isdigit():
+					if t not in ring: ring[t] = (prev, order)
+					else:
+						a, o = ring.pop(t)
+						adj.setdefault(a, {})[prev] = o
+						adj.setdefault(prev, {})[a] = o
+					order = 1.0; continue
+				m = re.match(
+					r'\[([A-Z][a-z]?)((?:[+-]\d*)?)[^\]:]*:(\d+)\]', t)
+				if m is None: return None
+				k = int(m.group(3)) - 1; sgn = m.group(2)
+				el[k] = m.group(1)
+				ch[k] = 0 if not sgn else (
+					int(sgn[1:]) if len(sgn) > 1 else 1) * (
+					1 if sgn[0] == '+' else -1)
+				adj.setdefault(k, {})
+				if prev is not None:
+					adj[k][prev] = order; adj[prev][k] = order
+				order = 1.0; prev = k
+			m = len(el)
+			if sorted(el) != list(range(m)): return None
+			return ([el[i] for i in range(m)], [ch[i] for i in range(m)],
+				{i: adj.get(i, {}) for i in range(m)})
+		def graphmatch(qe, qc, qa, te, tc, ta):
+			'''
+			Find a graph isomorphism between a query and a table entry
+			Arguments:
+			----------
+				qe, qc, qa: query elements, formal charges, adjacency
+				te, tc, ta: entry elements, formal charges, adjacency
+			Returns:
+			--------
+				dict: query atom index to entry atom index, or None when
+					the two graphs are not isomorphic
+			'''
+			m = len(qe)
+			if m != len(te) or sorted(qe) != sorted(te): return None
+			if sorted(qc) != sorted(tc): return None
+			sig = lambda e, c, a, i: (e[i], c[i],
+				tuple(sorted(a[i].values())))
+			cand = {i: [j for j in range(m)
+				if sig(qe, qc, qa, i) == sig(te, tc, ta, j)]
+				for i in range(m)}
+			if any(not v for v in cand.values()): return None
+			seq = sorted(range(m),
+				key=lambda i: (len(cand[i]), -len(qa[i])))
+			mp = {}; used = set()
+			def walk(k):
+				'''Backtracking search over the candidate assignments'''
+				if k == m: return True
+				i = seq[k]
+				for j in cand[i]:
+					clash = [1 for nb, o in qa[i].items()
+						if nb in mp and ta[j].get(mp[nb]) != o]
+					if j in used or clash: continue
+					mp[i] = j; used.add(j)
+					if walk(k + 1): return True
+					del mp[i]; used.discard(j)
+				return False
+			if not walk(0): return None
+			for i in range(m):
+				if {(mp[k], v) for k, v in qa[i].items()} != set(
+						ta[mp[i]].items()): return None
+			return mp
+		table = getattr(self, 'naglutable', None)
+		if table is None:
+			table = {}
+			for e in (nagl.get('lookup') or []):
+				g = parsemapped(e['smiles'])
+				if g is None: continue
+				table.setdefault((tuple(sorted(g[0])), sum(g[1])),
+					[]).append((g[0], g[1], g[2], e['q']))
+			self.naglutable = table
+		fcs = getattr(pose, '_formal_charges', {}) or {}
+		q_el = [atoms[i][1] for i in sorted_ids]
+		q_ch = [int(fcs.get(i, 0)) for i in sorted_ids]
+		pos = {i: k for k, i in enumerate(sorted_ids)}
+		bords = pose.data.get('BondOrders', {}) or {}
+		q_adj = {}
+		for i in sorted_ids:
+			ns = list(bonds.get(i, []))
+			os_ = list(bords.get(i, []))
+			if len(os_) != len(ns): os_ = [1.0] * len(ns)
+			q_adj[pos[i]] = {pos[j]: float(o) for j, o in zip(ns, os_)
+				if j in atoms and j != i}
+		for te, tc, ta, tq in table.get(
+				(tuple(sorted(q_el)), sum(q_ch)), []):
+			mp = graphmatch(q_el, q_ch, q_adj, te, tc, ta)
+			if mp is None: continue
+			out = np.zeros(max(sorted_ids) + 1, dtype=np.float64)
+			for k, i in enumerate(sorted_ids): out[i] = float(tq[mp[k]])
+			return out
 		def find_rings():
 			'''
 			SSSR via shortest cycle per edge
@@ -4342,8 +4461,11 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None,
 		return float(np.sum(w * atrE)), float(np.sum(w * repE))
 	# LK far-region switch: Etable takes the bin at
 	# (max_dis - far_offset); both values come from Port('ref15').
-	lk_max = float((params.get('LkBall') or {})['max_dis'])
-	lk_far_lo = float((params.get('LkBall') or {})['far_lo'])
+	# Absent for non-REF15 score sets (Vina has no LkBall block); these
+	# feed lkisopair only, which the Vina path never reaches.
+	_lkb = params.get('LkBall') or {}
+	lk_max = float(_lkb.get('max_dis', 0.0))
+	lk_far_lo = float(_lkb.get('far_lo', 0.0))
 	def lkisopair(cache, pi, pj, r):
 		'''
 		Return per-direction analytic fa_sol/lk_iso values (one-sided
@@ -5441,7 +5563,8 @@ class Score():
 		# skin). Energy is unchanged (terms apply their own cutoffs); the
 		# skin lets the pair list be reused across small coordinate moves.
 		c = self.Parameters.setdefault('Constants', {})
-		c['fa_max_dis'] = float(c['fa_max_dis']) + self._skin
+		if 'fa_max_dis' in c:
+			c['fa_max_dis'] = float(c['fa_max_dis']) + self._skin
 	def __call__(self, pose, ligand=None, decompose=False,
 			xs_override=None, nrot_override=None):
 		'''
