@@ -1707,7 +1707,12 @@ class ForceField():
 				canon = (min(ii[0], ii[2]), ii[1], max(ii[0], ii[2]))
 				par = assigns['angles'].get(canon)
 				if par is not None:
-					angle_t0[p] = par[0]; angle_Kt[p] = par[1]
+					# A constrained 1-3 distance makes the angle rigid
+					# (Sage does this for water), so drop its force
+					# constant exactly as constrained bonds drop K_b.
+					angle_t0[p] = par[0]
+					if (canon[0], canon[2]) not in constraints:
+						angle_Kt[p] = par[1]
 			cache['angle_K_theta'] = angle_Kt
 			cache['angle_theta0']  = np.deg2rad(angle_t0)
 			ub_assigns = assigns.get('ub', {})
@@ -3131,7 +3136,6 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None,
 			is_oh_donor[i] = is_donor[i] and (t.startswith('OH')
 				or t.startswith('OW') or t == 'Oet3')
 			has_score[i] = True
-		idealize_coords = lambda Xin: np.asarray(Xin, dtype=np.float64)
 		if aas:
 			by_chain = {}
 			for ri, info in aas.items():
@@ -3242,115 +3246,11 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None,
 						q_arr[ai] = TQ['generic']['CA']
 					elif nm == 'HA':
 						q_arr[ai] = TQ['generic']['HA']
-			NT_H_DIH = {
-				'H': 180.0, 'H1': 180.0, '1H': 180.0,
-				'HN': 180.0, 'HT1': 180.0,
-				'H2': 60.0, '2H': 60.0, 'HT2': 60.0,
-				'H3': -60.0, '3H': -60.0, 'HT3': -60.0}
-			def idealize_nterm_h(ri):
-				'''
-				Override H positions for the N-term residue ri's NH3+
-				protons in-place on `coords`.
-				Arguments:
-				----------
-					ri: residue index (key into aas)
-				Returns:
-				--------
-					No return; modifies `coords` rows for matched H atoms
-				'''
-				info = aas.get(ri)
-				if info is None: return
-				tri = info[5] if len(info) >= 6 else None
-				if tri == 'PRO': return
-				N_ai = CA_ai = C_ai = None
-				h_atoms = []
-				for ai in info[2] + info[3]:
-					ai = int(ai)
-					nm = atoms[ai][0]
-					if nm == 'N': N_ai = ai
-					elif nm == 'CA': CA_ai = ai
-					elif nm == 'C': C_ai = ai
-					elif nm in NT_H_DIH: h_atoms.append((ai, nm))
-				if N_ai is None or CA_ai is None or C_ai is None: return
-				if not h_atoms: return
-				N_xyz = coords[N_ai]
-				CA_xyz = coords[CA_ai]
-				C_xyz = coords[C_ai]
-				v_NCA = CA_xyz - N_xyz
-				n_NCA = np.linalg.norm(v_NCA)
-				if n_NCA < 1e-6: return
-				unit_NCA = v_NCA / n_NCA
-				v_NC = C_xyz - N_xyz
-				v_NC_perp = v_NC - np.dot(v_NC, unit_NCA) * unit_NCA
-				n_perp = np.linalg.norm(v_NC_perp)
-				if n_perp < 1e-6: return
-				unit_py = v_NC_perp / n_perp
-				unit_pz = np.cross(unit_NCA, unit_py)
-				BOND = 1.0
-				ANGLE = math.radians(109.47)
-				cos_a = math.cos(ANGLE)
-				sin_a = math.sin(ANGLE)
-				for ai, nm in h_atoms:
-					dih = math.radians(NT_H_DIH[nm])
-					H_dir = (cos_a * unit_NCA
-						+ sin_a * (math.cos(dih) * unit_py
-							+ math.sin(dih) * unit_pz))
-					coords[ai] = N_xyz + BOND * H_dir
-			for ri in n_term_res:
-				idealize_nterm_h(ri)
-			def idealize_coords(Xin):
-				'''
-				Place the N-terminal NH3+ protons at ideal geometry on a
-				copy of Xin (coordinate-pure twin of idealize_nterm_h, for
-				refreshing derived geometry on a cached re-score)
-				Arguments:
-				----------
-					Xin: ndarray (n, 3) - input coordinates
-				Returns:
-				--------
-					ndarray (n, 3): copy of Xin with N-terminal H ideal
-				'''
-				X2 = np.array(Xin, dtype=np.float64)
-				for ri in n_term_res:
-					info = aas.get(ri)
-					if info is None: continue
-					tri = info[5] if len(info) >= 6 else None
-					if tri == 'PRO': continue
-					N_ai = CA_ai = C_ai = None
-					h_atoms = []
-					for ai in info[2] + info[3]:
-						ai = int(ai)
-						nm = atoms[ai][0]
-						if nm == 'N': N_ai = ai
-						elif nm == 'CA': CA_ai = ai
-						elif nm == 'C': C_ai = ai
-						elif nm in NT_H_DIH: h_atoms.append((ai, nm))
-					if N_ai is None or CA_ai is None or C_ai is None:
-						continue
-					if not h_atoms: continue
-					N_xyz = X2[N_ai]
-					CA_xyz = X2[CA_ai]
-					C_xyz = X2[C_ai]
-					v_NCA = CA_xyz - N_xyz
-					n_NCA = np.linalg.norm(v_NCA)
-					if n_NCA < 1e-6: continue
-					unit_NCA = v_NCA / n_NCA
-					v_NC = C_xyz - N_xyz
-					v_NC_perp = v_NC - np.dot(v_NC, unit_NCA) * unit_NCA
-					n_perp = np.linalg.norm(v_NC_perp)
-					if n_perp < 1e-6: continue
-					unit_py = v_NC_perp / n_perp
-					unit_pz = np.cross(unit_NCA, unit_py)
-					ANGLE = math.radians(109.47)
-					cos_a = math.cos(ANGLE)
-					sin_a = math.sin(ANGLE)
-					for ai, nm in h_atoms:
-						dih = math.radians(NT_H_DIH[nm])
-						H_dir = (cos_a * unit_NCA
-							+ sin_a * (math.cos(dih) * unit_py
-								+ math.sin(dih) * unit_pz))
-						X2[ai] = N_xyz + 1.0 * H_dir
-				return X2
+			# N-terminal NH3+ protons are deliberately left as given.
+			# Rosetta scores the coordinates it is handed, so placing
+			# them at ideal geometry here moved three atoms by up to
+			# 7e-4 A and showed up in fa_elec, fa_atr, fa_intra_rep
+			# and lk_ball_wtd.
 			for ri in c_term_res:
 				info = aas.get(ri)
 				if info is None: continue
@@ -3705,23 +3605,13 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None,
 				heavy_nbrs = [j for j in nbrs if not is_H[j]]
 				polar_h_nbrs = [j for j in nbrs if is_polar_h[j]]
 				if is_d:
-					elem = info.get('element', '')
-					NTERM_H_NAMES_SET = {'H1', 'H2', 'H3',
-						'1H', '2H', '3H', 'HN', 'HT1', 'HT2', 'HT3'}
+					# The donor water sits at opt_dist from the heavy
+					# atom along the X-H direction. Stepping from the
+					# hydrogen instead, by opt_dist minus an assumed ideal
+					# bond length, makes the radius track the actual X-H
+					# distance and shifts lk_ball_wtd.
 					for h in polar_h_nbrs:
-						h_nm = atoms[h][0]
-						if elem == 'O':
-							ideal_bond = 0.96
-						elif t == 'NH2O':
-							ideal_bond = 1.00
-						elif h_nm in NTERM_H_NAMES_SET:
-							ideal_bond = 1.00
-						else:
-							ideal_bond = 1.01
-						offset = opt_dist - ideal_bond
-						h_xyz = X[h]
-						dirvec = unit(h_xyz - i_xyz)
-						w = h_xyz + offset * dirvec
+						w = i_xyz + opt_dist * unit(X[h] - i_xyz)
 						i_waters.append(w)
 				if is_a:
 					if is_ring and len(heavy_nbrs) >= 2:
@@ -3810,7 +3700,6 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None,
 			'lkb_d2_low':  lkb_d2_low,
 			'lkb_water_xyz': water_xyz_arr,
 			'place_waters': place_waters,
-			'idealize_coords': idealize_coords,
 			'lkb_water_off': water_off,
 			'lkb_water_cnt': water_cnt,
 			'lkb_ramp_w2': LK_RAMP_W2,
@@ -5608,9 +5497,10 @@ class Score():
 			reuse = disp < 0.5 * self._skin   # Verlet: safe within skin/2
 		if reuse:
 			cache = self._topo_cache
-			# refresh geometry from live coords: idealize N-term H (derived
-			# geometry), recompute distances, recompute LkBall waters.
-			Xc = cache['idealize_coords'](pose.data['Coordinates'])
+			# refresh geometry from live coords: recompute distances and
+			# LkBall waters. Coordinates are taken as given, matching the
+			# cache-build path and Rosetta itself.
+			Xc = np.asarray(pose.data['Coordinates'], dtype=np.float64)
 			cache['coords'] = Xc
 			cache['pair_d'] = np.linalg.norm(
 				Xc[cache['pairs_i']] - Xc[cache['pairs_j']], axis=1)
