@@ -2740,7 +2740,23 @@ def Port(name='openff'):
 				'fc_self_w':  pack(found['%s%d.fc_self.weight' % (conv, i)]),
 				'fc_self_b':  pack(found['%s%d.fc_self.bias' % (conv, i)])}
 				for i in range(n_gcn)]
-			return {'gcn_layers': layers, 'readout': {
+			# The checkpoint also carries a table of precomputed AM1-BCC
+			# charges that NAGL consults before running the network. Each
+			# entry stores an atom-mapped SMILES (which fixes the atom
+			# order) and one charge per atom. Without it, molecules in the
+			# table get network values where Sage returns tabulated ones.
+			tabs = (obj.get('hyperparameters') or {}).get(
+				'lookup_tables') or {}
+			ents = ((tabs.get('am1bcc_charges') or {}).get('properties')
+				or {})
+			lookup = []
+			for e in ents.values():
+				d = e.get('__dict__', e) if isinstance(e, dict) else vars(e)
+				smi = d.get('mapped_smiles')
+				if not smi: continue
+				lookup.append({'smiles': smi,
+					'q': [float(x) for x in d['property_value']]})
+			return {'gcn_layers': layers, 'lookup': lookup, 'readout': {
 				'linear_0_w': pack(found[read + '0.weight']),
 				'linear_0_b': pack(found[read + '0.bias']),
 				'linear_1_w': pack(found[read + '3.weight']),
