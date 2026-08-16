@@ -24,7 +24,7 @@ Using this data structure, Pose can build and manipulate polypeptides, nucleic a
 
 **Key features:**
 - Designed to be extremely stable bare-metal python: NumPy is the only dependency for the core `Pose` and `Molecule` classes
-- 26 amino acids supported by default (20 canonical + 6 non-canonical: ALY, MSE, TPO, SEC, TRF, PTR), and can be extended to 100+ amino acids
+- 26 amino acids supported by default (20 canonical + 6 non-canonical: ORN, MSE, TPO, SEC, FT6, PTR), and can be extended to 100+ amino acids
 - Support for both L-amino acids and D-amino acids (mixed sequences fully supported)
 - 5 DNA and RNA canonical nucleotides
 - Full bond graph with atom partial charges
@@ -78,7 +78,7 @@ p.RotateDihedral(1, -45, 'PSI')
 p.Mutate(2, 'V')                                 # Mutate residue index 2 (3 in PDB index) Leu → Val
 p.Export('peptide.pdb')
 
-# === Same APIs work for D-amino acids and mixed L/D sequences ===
+# === Same code work for D-amino acids and mixed L/D sequences ===
 p_d = Pose()
 p_d.Build('MsLeSnRgI', chain='A', fmt='Protein') # Mixed L/D chirality-aware
 
@@ -86,10 +86,10 @@ p_d.Build('MsLeSnRgI', chain='A', fmt='Protein') # Mixed L/D chirality-aware
 ff = ForceField('OpenFF')                        # Small-molecule force field
 # ff = ForceField()                              # 'Default' smoke-test FF (verification only)
 
-E           = ff(p)                              # Potential energy (kJ/mol)
-E, F        = ff(p, grad=True)                   # Also return per-atom forces
+E    = ff(p)                                     # Potential energy (kJ/mol)
+E, F = ff(p, grad=True)                          # Also return per-atom forces
 
-E_min, log  = Minimise(p, ff)                    # FIRE2 relaxation
+E_min, log  = Minimise(p, ff)                    # Relaxation
 E_md,  log  = MolecularDynamics(p, ff, n_steps=1000, dt_fs=2.0, T=300.0, thermostat='langevin')
 ```
 
@@ -102,9 +102,9 @@ p.Import('1TQG.pdb', chain='A')   # Or '1BNA.pdb' for a DNA/RNA structure
 p.ReBuild()                       # Adds missing hydrogens
 ```
 
-> Note: Importing a PDB structure with added Hydrogens will disrupt the *Bond Graph* in `p.data['Bonds']`, the bond graph in this situation won't include the hydrogens. It is recomended to run p.ReBuild() to re-establish the correct bond graph to include hydrogens (but this will change the positions of the Hydrogens). A trick to overcome this is to import the pose `p = Pose(); p.Import('1YN3.pdb')` and then seperatly import and rebuild the pose `p2 = Pose(); p2.Import('1YN3.pdb'); p2.ReBuild()` then substiture the bond graph from `p2` to `p`: `p.data['Bonds'] = p2.data['Bonds']`. This would solve it
+> Note: Importing a PDB structure with added Hydrogens will disrupt the *Bond Graph* in `p.data['Bonds']`, the bond graph in this situation won't include the hydrogens. It is recomended to run p.ReBuild() to re-establish the correct bond graph to include hydrogens (but this will change the positions of the Hydrogens). A trick to overcome this is to import the pose `p = Pose(); p.Import('1TQG.pdb')` and then seperatly import and rebuild the pose `p2 = Pose(); p2.Import('1TQG.pdb'); p2.ReBuild()` then substitute the bond graph from `p2` to `p`: `p.data['Bonds'] = p2.data['Bonds']`. This would solve it.
 
-You can run `p.ReBuild()` after `Import()` to add hydrogens to the structure. But understand that a new synthetic structure will be built, therefore you will lose the original occupancy and temperature-factor for each atom (replaced with 1.0 and 0.0).
+> Note: You can run `p.ReBuild()` after `Import()` to add hydrogens to the structure. But understand that a new synthetic structure will be built, therefore you will lose the original occupancy and temperature-factor for each atom (replaced with 1.0 and 0.0).
 
 **Building DNA/RNA:**
 ```python
@@ -132,8 +132,12 @@ from openmm.unit import *
 
 p = Pose()
 p.Import('1YN3.pdb', chain='A')
+#p.Build('GAILV')
 
-pdb = PDBFile(io.StringIO(p.Export(fmt='PDB')))        # <--- The plugin
+pdbstr = p.Export(fmt='PDB')
+#pdbstr = '\n'.join(l for l in pdbstr.split('\n') if not (l.startswith(('ATOM', 'HETATM')) and l[76:78].strip() == 'H')) # If building a structure using p.Build(), you need to remove all H so they can be added by openmm
+
+pdb = PDBFile(io.StringIO(pdbstr)) # <-- the plugin
 forcefield = ForceField('amber99sb.xml', 'tip3p.xml')
 modeller = Modeller(pdb.topology, pdb.positions)
 modeller.addHydrogens(forcefield)
@@ -172,42 +176,110 @@ This RDKit plugin gives you the power and flexibility to manipulate molecules us
 
 ---
 
-## API Reference
+## Key Concepts
+
+### Zero-based indexing
+
+All residue and atom indices start at 0, not 1. Residue 0 is the N-terminal amino acid. This is the **opposite** of PDB convention.
+
+```python
+p.Build('MSLESNRGI', chain='A', fmt='protein') # Construct a polypeptide
+p.GetDihedral(0, 'PHI')                        # PHI of first residue (index 0)
+p.GetDihedral(2, 'chi', 1)                     # CHI 1 of third residue (index 2)
+p.GetDistance(0, 'N', 1, 'CA')                 # N of residue 1 (index 0) to CA of residue 2 (index 1)
+p.Build('MSLESNRGI', chain='B', fmt='protein') # Add a second chain
+```
+
+### Accessing the data structure directly
+
+```python
+p.data['FASTA']              # Sequence string
+p.data['Size']               # Number of residues (int)
+p.data['Amino Acids'][0]     # [letter, chain, bb_indices, sc_indices, secondary structure, tricode, SASA]
+p.data['Atoms'][0]           # [pdb_name, element, charge, occupancy, temp_factor, hybridisation]
+p.data['Coordinates']        # Numpy array, shape (N, 3)
+p.data['Bonds']              # Adjacency list: {atom_index: [bonded_atom_indices]}
+```
+
+Iterating over residues and atoms:
+```python
+for idx, aa in p.data['Amino Acids'].items():
+    symbol, chain, bb, sc, ss, tricode, sasa = aa
+    print(f'Residue {idx}: {tricode} ({symbol}), SS={ss}')
+
+for idx, atom in p.data['Atoms'].items():
+    name, element, charge, occupancy, temp, hybrid = atom
+    xyz = p.data['Coordinates'][idx]
+    print(f'Atom {idx}: {name} ({element}) at {xyz}')
+```
+
+### Supported Amino Acids
+
+> Uppercase = L-form, lowercase = D-form. All 26 are supported in mixed L/D sequences. Additional amino acids can be added to the **database.json** file.
+
+> The N-terminus is protonated, as expected at physiological pH (~7.4), and therefore exists as a positively charged ammonium group (–NH<sub>3</sub><sup>+</sup>)
+
+|       |       |       |       |       |
+|-------|-------|-------|-------|-------|
+|A - ALA|B - ORN|C - CYS|D - ASP|E - GLU|
+|F - PHE|G - GLY|H - HIS|I - ILE|J - MSE|
+|K - LYS|L - LEU|M - MET|N - ASN|O - TPO|
+|P - PRO|Q - GLN|R - ARG|S - SER|T - THR|
+|U - SEC|V - VAL|W - TRP|X - FT6|Y - TYR|
+|Z - PTR|
+
+### Supported Nucleotides
+
+#### DNA
+
+|       |       |       |       |
+|-------|-------|-------|-------|
+|A - DA |T - DT |C - DC |G - DG |
+
+#### RNA
+
+|      |      |      |      |
+|------|------|------|------|
+|A - A |U - U |C - C |G - G |
+
+---
+
+## Method Reference
+
+The following is a reference for all the Pose mothod functions.
 
 ### Call Class
 
 | Class            | Description |
 |------------------|-------------|
-| `p = Pose()`     | Calls the `Pose()` class for proteins, DNA, and RNA |
+| `p = Pose()`     | Calls the `Pose()` class for proteins, DNA, or RNA |
 | `m = Molecule()` | Calls the `Molecule()` class for small organic molecules |
 
-Each class have similar methods and data structure, but with slight differences in the way they are used.
+Each class has similar methods and data structure, but with slight differences in the way they are used.
 
 ### Building & I/O
 
 | Method                                                                   | Description |
 |--------------------------------------------------------------------------|-------------|
-| `p.Import(filename='1YN3.pdb', chain=['A', 'B'], model=1, strict=True)`  | Imports a structure from a PDB or mmCIF file and constructs the `p.data` object. Can import a protein, DNA, or RNA structure. `chain` accepts a single chain ID (`'A'`), a list of chains (`['A', 'B']`), or `None` to import all chains. `model` selects which model to import from multi-model files (e.g. NMR ensembles); defaults to `1`. For atoms with multiple conformers, the highest-occupancy conformer is kept. Cannot import a structure that is a mixture of proteins and nucleic acids in separate chains, import each macromolecule type as a separate pose, `strict=False` will allow importing broken chains |
+| `p.Import(filename='1YN3.pdb', chain=['A', 'B'], model=1, strict=True)`  | Imports a structure from a PDB or mmCIF file and constructs the `p.data` object. Can import a protein, DNA, or RNA structure. `chain` accepts a single chain ID (`'A'`), a list of chains (`['A', 'B']`), or `None` to import all chains. `model` selects which model to import from multi-model files (e.g. NMR ensembles); defaults to `1`. For atoms with multiple conformers, the highest-occupancy conformer is kept. Cannot import a structure that is a mixture of proteins and nucleic acids in separate chains, import each macromolecule type as a separate pose. `strict=False` will allow importing broken chains |
 | `m.Import(filename='caffiene.sdf')`                                      | Imports a structure from a PDB, SDF, mmCIF, MOL, or MOL2 files, or an RDKit block string and constructs the `m.data` object |
-| `p.Export('out.pdb', fmt=None)`                                          | Write the full structure, and all chains, to a PDB or mmCIF file. `fmt='PDB'` or `fmt='CIF'` will export the structure as a string and not a file (ideal to plug the structure to other libraries such as OpenMM) |
-| `m.Export('out.sdf', fmt=None)`                                          | Write the full structure to a PDB, SDF, mmCIF, MOL, or MOL2 file. `fmt='PDB'` or `fmt='CIF'` or `'SDF'`/`'MOL'`/`'MOL2'` will export the structure as a string and not a file (ideal to plug the structure to other libraries such as OpenMM and RDKit) |
-| `p.Build('MSLESNRGI', chain='A', fmt='protein')`                         | Build a macromolecule from a one-letter sequence. For a polypeptide add the sequence and choose the format `fmt='Protein'`, uppercase = L-amino acids, lowercase = D-amino acids. For a nucleic acid add the sequence and choose the format `fmt='DNA'` or `fmt='RNA'`. You can add more chains by repeating the command with different chain `chain='A'` values. A structure can either be a protein, or a nucleic acid (DNA/RNA), it cannot be a mixture of the two |
-| `p.ReBuild(sequence=None, mirror=False, _mutated=None)`                  | Rebuild the polypeptide or nucleic acid. Use `sequence='AGLMTSWVLVA'` to rebuild the structure with multiple bulk mutations on chain A. Use `sequence={'A':'MSLKLSTVVA', 'B':'ASLKSWFWVA'}` to perform mutations at multiple chains at the same time. Use `mirror=True` to rebuild a protein and convert L-amino acids → D-amino acids and D-amino acids → L-amino acids. Running `p.ReBuild(sequence=None)` will add missing Hydrogens. For DNA and RNA, the `sequence=''` length must match exactly the original sequence length, otherwise an error will be raised |
-| `p.Mutate(1, 'V', fast=True)`                                            | Mutate a single monomer. For proteins: `p.Mutate(1, 'V')` = residue 1 → L-Valine, `p.Mutate(1, 'v')` = residue 1 → D-Valine. For DNA: `p.Mutate(0, 'T')` = nucleotide 0 → Thymine. For RNA: `p.Mutate(0, 'U')` = nucleotide 0 → Uracil. For double-stranded nucleic acids, the complementary base is also updated automatically. The `fast=True` argument means the mutation is performed by vector addition without ensuring the stability of the backbone (also the `CalcDSSP(), CalcSASA, and CalcRg()` etc.. are not re-computed) so these needs to be called after the mutation, in return the mutation is very fast, ideal for large mutation simulations. If `fast=False` the mutated residue is added to the structure and the entire structure rebuilt using ReBuild(), this is more accurate but very slow for large simulations |
-
-> Note: `Import()` will not import broken structures such as broken chains or missing backbone atoms. The structure needs to be complete. If it is not complete, then re-generate it to fill in the missing sections.
+| `p.Export('out.pdb', fmt=None)`                                          | Write the full structure, and all chains, to a PDB or mmCIF file, file format is determined from the name string. On the other hand, `fmt='PDB'` or `fmt='CIF'` will export the structure as a string and not a file (ideal to plug the structure to other libraries such as OpenMM), thus default is `fmt=None` |
+| `m.Export('out.sdf', fmt=None)`                                          | Write the full structure to a PDB, SDF, mmCIF, MOL, or MOL2 file, file format is determined from the name string. On the other hand, `fmt='PDB'` or `fmt='CIF'` or `'SDF'`/`'MOL'`/`'MOL2'` will export the structure as a string and not a file (ideal to plug the structure to other libraries such as OpenMM and RDKit), thus default is `fmt=None` |
+| `p.Build('MSLESNRGI', chain='A', fmt='protein')`                         | Build a macromolecule from a one-letter sequence. For a polypeptide add the sequence and choose the format `fmt='Protein'`, uppercase for L-amino acids, lowercase for D-amino acids. For nucleic acid add the sequence and choose the format `fmt='DNA'` or `fmt='RNA'`. You can add more chains by repeating the command with different chain `chain='A'` values. A structure can either be a protein, or a nucleic acid (DNA/RNA), it cannot be a mixture of the two |
+| `p.ReBuild(sequence=None, mirror=False, _mutated=None)`                  | Rebuild the polypeptide or nucleic acid. Use `sequence='AGLMTSWVLVA'` to rebuild the structure with multiple bulk mutations on chain A. Use `sequence={'A':'MSLKLSTVVA', 'B':'ASLKSWFWVA'}` to perform mutations at multiple chains at the same time. Use `mirror=True` to rebuild a protein and convert L-amino acids to D-amino acids or D-amino acids to L-amino acids. This also works on a structure with a mixture of the two orientations by mirroring the entire structure. Running `p.ReBuild(sequence=None)` will add missing Hydrogens. For DNA and RNA, the `sequence=''` length must match exactly the original sequence length, otherwise an error will be raised |
+| `p.Mutate(1, 'V', fast=True)`                                            | Mutate a single monomer. For proteins: `p.Mutate(1, 'V')` will mutate residue 1 to L-Valine, `p.Mutate(1, 'v')` will mutate residue 1 to D-Valine. For DNA: `p.Mutate(0, 'T')` will mutate nucleotide 0 to Thymine. For RNA: `p.Mutate(0, 'U')` will mutate nucleotide 0 to Uracil. For double-stranded nucleic acids, the complementary base is also updated automatically. The `fast=True` argument means the mutation is performed by vector addition without ensuring the stability of the backbone, also the `p.CalcSASA()` is not re-computed, so it needs to be called manually after the mutation, in return the mutation is very fast, ideal for large mutation simulations. If `fast=False` the mutated residue is added to the structure and the entire structure rebuilt using ReBuild(), this is more accurate but very slow for large simulations everything is re-computed) |
 
 ### Measurements
 
 | Method                                       | Description |
 |----------------------------------------------|-------------|
-| `p.GetDistance(0, 'N', 5, 'CA')`             | Get the distance in Å between any two atoms. Example: residue 0 nitrogen atom to residue 5 CA atom |
+| `p.GetDistance(0, 'N', 5, 'CA')`             | Get the distance in Å between any two atoms. Example: residue 0 N atom to residue 5 CA atom |
 | `m.GetDistance(0, 5)`                        | Get the distance in Å between any two atoms. Example: atom 0 to atom 5 |
-| `p.GetDihedral(2, 'PHI')`                    | Calculate the amino acid φ/ψ/ω/χ and nucleotide α/β/γ/δ/ε/ζ/χ dihedral angles. In this example we are measuring the PHI angle of the 3rd protein residue (index 2). For protein χ dihedral use `p.GetDihedral(4, 'chi', 1)` 5th residue (index 4), CHI 1 angle |
+| `p.GetDihedral(2, 'PHI')`                    | Calculate the amino acid's φ/ψ/ω/χ or the nucleotide's α/β/γ/δ/ε/ζ/χ dihedral angles. For example, the PHI angle of the 3<sup>rd</sup> protein residue (index 2). For protein χ dihedral use `p.GetDihedral(4, 'chi', 1)` 5<sup>th</sup> residue (index 4), CHI 1 angle |
 | `m.GetDihedral(0, 1, 2, 3)`                  | Calculate a dihedral angle between 4 atoms. In this example the dihedral angle is made up of the atoms at indeces 0, 1, 2, and 3 |
 | `p.GetAngle(0, 'N', 5, 'CA', 17, 'C')`       | Get the angle between any three atoms in the whole structure. Example: N of residue 1, CA of residue 5, and C angle of residue 17, with the CA atom in the middle being the pivot |
 | `m.GetAngle(0, 5, 17)`                       | Get the angle between any three atoms in the whole structure. Example: atom at index 1, atom at index 5, and atom at index 17, with atom at index 5 being the pivot |
-| `p.GetAtomBonds(0, 1)`                       | Confirm and get the PDB name and element name `[atom 1 element name, atom 1 PDB name, atom 2 PDB name, atom 2 element name]` for two atoms (if they are bonded together). Use the atom indeces. If the two atoms are not bonded an error will be raised |
+| `p.GetAtomBonds(0, 1)`                       | Confirm that two atoms are bonded and get their PDB and element names `[atom 1 element name, atom 1 PDB name, atom 2 element name, atom 2 PDB name]`. If the two atoms are not bonded an error will be raised |
 | `m.GetAtomBonds(1)`                          | Get all atom names bonded to this atom index ['atom name 1', 'atom name 2', 'atom name 3'] |
 | `p.GetAtomCoord(3, 'N')`                     | Get the XYZ coordinates of an atom of a residue or a nucleotide (monomers). Example: `N` nitrogen of monomer index `3` |
 | `m.GetAtomCoord(3)`                          | Get the XYZ coordinates of an atom given its index. Example: atom at index `3` |
@@ -216,21 +288,21 @@ Each class have similar methods and data structure, but with slight differences 
 | `p.GetAtomHybridisation()`                   | Get a list of all atom hybridisations for the entire structure |
 | `m.GetAtomHybridisation()`                   | Get a list of all atom hybridisations for the entire structure |
 | `p.GetAtomIdx(3, 'N')`                       | Get the atom index in `p.data['Coordinates']` from its name within a monomer. This is the opposite of `p.GetAtomCoord(3, 'N')` |
-| `p.GetIdentity(0, 'Atom')`                   | Identify the PDB name of an atom, or an amino acid, or a nucleotide by its index. Example `p.GetIdentity(5, 'Atom')` or `p.GetIdentity(5, 'amino acid')` or `p.GetIdentity(5, 'nucleotide')`. Also, specifically just for atoms, you are return its partial charge using `p.GetIdentity(3, 'Atom', charge=True)` |
+| `p.GetIdentity(0, 'Atom')`                   | Identify the PDB name of an atom, or an amino acid, or a nucleotide by its index. Example `p.GetIdentity(5, 'Atom')` or `p.GetIdentity(5, 'amino acid')` or `p.GetIdentity(5, 'nucleotide')`. Also, specifically just for atoms, you can return its partial charge using `p.GetIdentity(3, 'Atom', charge=True)` |
 | `p.GetInfo()`                                | Print a formatted summary of the structure's information |
 | `m.GetInfo()`                                | Print a formatted summary of the structure's information and a graphical representation of the molecule |
 | `m.CalcSMILES()`                             | Calculate the SMILES representation of a molecule and add it to `m.data['SMILES']` |
 | `m.CalcSMARTS()`                             | Calculate the SMARTS representation of a molecule and add it to `m.data['SMARTS']` |
-| `m.CalcSMIRKS()`                             | Calculate an atom-mapped SMIRKS-style string with hybridisation, connectivity, H-count, and formal-charge tags on each heavy atom. Atoms carry a 1-based atom-map index ':N' where N is the atom's index+1. Hybridization symbol follows SMARTS convention (^1, ^2, ^3 for sp/sp2/sp3; omitted for 's') |
+| `m.CalcSMIRKS()`                             | Calculate the SMIRKS representation of a molecule and add it to `m.data['SMIRKS']` |
 | `p.CalcMass()`                               | Calculates the entire molecular mass of a molecule (all chains) in Da (Daltons), updates the value of p.data['Mass'] |
-| `m.CalcMass()`                               | Calculates the entire molecular mass of a molecule |
+| `m.CalcMass()`                               | Calculates the entire molecular mass of a molecule, updates the value of m.data['Mass'] |
 | `p.CalcSize()`                               | Calculates the length of each chain in a structure, updates the value of p.data['Size']. You can get the length of each chain using `p.data['Size'][CHAIN]` |
 | `p.CalcFASTA()`                              | Compiles the FASTA sequence of each chain, updates the value of p.data['FASTA']. You can get the FASTA sequence of each chain using `p.data['FASTA'][CHAIN]` |
 | `p.CalcRg()`                                 | Calculates the entire Radius of Gyration of a molecule (all chains) in Å (angstrom), updates the value of p.data['Rg'] |
-| `m.CalcRg()`                                 | Calculates the entire Radius of Gyration of a molecule |
+| `m.CalcRg()`                                 | Calculates the entire Radius of Gyration of a molecule, updates the value of p.data['Rg'] |
 | `p.CalcCharge(iterations=6)`                 | Calculate the Gasteiger-Marsili partial charges to all atoms using iterative equalization (default 6 iterations), updates the value of `p.data['Atoms'][index][2]` |
 | `m.CalcCharge(iterations=6)`                 | Calculate the Gasteiger-Marsili partial charges to all atoms using iterative equalization (default 6 iterations), updates the value of `m.data['Atoms'][index][2]` |
-| `p.CalcDSSP()`                               | Calculates each amino acid's secondary structure assignments, only for proteins, and stores them in `p.data['Amino Acids'][i][4]` and updates `p.data['SS'][CHAIN]`, therefore this is where you can get the SS sequence of each chain. Codes: H=α-helix, G=3₁₀-helix, I=π-helix, E=β-sheet, B=β-bridge, T=turn, S=bend, L=loop, P=PPII-helix |
+| `p.CalcDSSP()`                               | Calculates each amino acid's secondary structure assignments, only for proteins, and stores them in `p.data['Amino Acids'][i][4]` and updates `p.data['SS']`, therefore this is where you can get the secondary structure sequence of each chain. Codes: H=α-helix, G=3₁₀-helix, I=π-helix, E=β-sheet, B=β-bridge, T=turn, S=bend, L=loop, P=PPII-helix |
 | `p.CalcSASA(n_points=960, probe_radius=1.4)` | Calculates the Solvent Accessible Surface Area (SASA) for each amino acid, only for proteins, using golden sphere sampling. `n_points` controls sampling density, `probe_radius` is the solvent probe radius in Å (default 1.4 for water). Adds the value to `p.data['Amino Acids'][i][6]` |
 
 ### Manipulation
@@ -241,26 +313,46 @@ Each class have similar methods and data structure, but with slight differences 
 | `m.AdjustDistance(0, 4, 17)`                             | Set the distance between any two atoms in (Å). Example: set the distance between atom at index 0 and atom at index 4 to 17 Å. Order matters: the second atom (and all atoms downstream of it) moves, while the first atom stays fixed. `(0, 1, d)` ≠ `(1, 0, d)` |
 | `p.AdjustAngle(1, 'N', 1, 'CA', 1, 'C', -2)`             | Add/subtract degrees from a three-atom angle, with the middle atom being the pivot point. Example: subtract 2° from N–CA–C angle of residue 1, with the CA atom being the pivot |
 | `m.AdjustAngle(0, 1, 2, -2)`                             | Add/subtract degrees from a three-atom angle, with the middle atom being the pivot point. Example: subtract 2° from the angle represented by atom 0, atom 1, and atom 2, with atom 1 being the pivot |
-| `p.RotateDihedral(1, -60, 'PHI')`                        | Rotate the amino acid φ/ψ/ω/χ and nucleotide α/β/γ/δ/ε/ζ/χ dihedral angles. Example: residue 1 PHI dihedral to -60° |
+| `p.RotateDihedral(1, -60, 'PHI')`                        | Rotate the amino acid's φ/ψ/ω/χ or the nucleotide's α/β/γ/δ/ε/ζ/χ dihedral angles. Example: rotate residue 1's PHI dihedral to -60° |
 | `m.RotateDihedral(0, 1, 2, 3, -60)`                      | Rotate any dihedral angle represented by four atoms. Example: rotate a dihedral angle represented by atom index 0, atom index 1, atom index 2, and atoms index 3 to become -60° |
-| `p.MovePose(theta=5, u=[18, 10, 5], l=6, ori=[0, 0, 0])` | Rotate and/or translate the whole structure. `theta` = rotation angle in degrees, `u` = rotation axis vector (will be normalised), `l` = translation distance in Å, `ori` = target point to translate towards. All parameters are optional (default `None`); you can rotate only, translate only, or both |
-| `m.MovePose(theta=5, u=[18, 10, 5], l=6, ori=[0, 0, 0])` | Rotate and/or translate the whole structure. `theta` = rotation angle in degrees, `u` = rotation axis vector (will be normalised), `l` = translation distance in Å, `ori` = target point to translate towards. All parameters are optional (default `None`); you can rotate only, translate only, or both |
+| `p.MovePose(theta=5, u=[18, 10, 5], l=6, ori=[0, 0, 0])` | Rotate and/or translate the whole structure. `theta` is the rotation angle in degrees, `u` is the rotation axis vector (will be normalised), `l` is the translation distance in Å, `ori` is the target point to translate towards. All parameters are optional (default `None`), you can rotate only, translate only, or both |
+| `m.MovePose(theta=5, u=[18, 10, 5], l=6, ori=[0, 0, 0])` | Rotate and/or translate the whole structure. `theta` is the rotation angle in degrees, `u` is the rotation axis vector (will be normalised), `l` is the translation distance in Å, `ori` is the target point to translate towards. All parameters are optional (default `None`), you can rotate only, translate only, or both |
 
-### Force Field & Energy Score
 
-The `ForceField()` class evaluates the total potential energy and analytical per-atom forces of a `Pose` or `Molecule`. It is configured by **name** at construction, the name keys into `database.json['Energy Parameters'][name]`, which carries both the SMIRKS-keyed parameter sections and the explicit list of potential methods to evaluate (under the `Terms` sub-key). The currently shipped names are:
 
-| Name      | Purpose | Terms |
-|-----------|---------|-------|
-| `OpenFF`  | Small-molecule force field. Bonded + vdW parameters from [OpenFF Sage 2.3.0](https://github.com/openforcefield/openff-forcefields) ([CC-BY-4.0](https://creativecommons.org/licenses/by/4.0/)); per-atom AM1BCC charges from a NumPy reimplementation of [NAGL](https://github.com/openforcefield/openff-nagl-models) | 6: Bond, Angle, ProperTorsion, ImproperTorsion (Fourier), VDW (12-6), Electrostatic |
-| `Default` | Deterministic smoke-test / regression FF. Single wildcard SMIRKS per section with dummy parameters tuned so that `ForceField()(Pose().Build('AaBbCcDdEeFfGgHhIiJjKkLlMmNnOoPpQqRrSsTtUuVvWwXxYyZz')) = 100.00 kJ/mol` exactly. Exercises **every** potential method, dispatch branch and cache path; verifies the math, not the physics. Not for production simulation | 9: Bond, Angle, UB, ProperTorsion, ImproperTorsion (harmonic), VDW (12-6), Electrostatic, Polarisation, CMAP |
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+### Force Field methods
+
+The `ForceField()` class evaluates the total potential energy and analytical per-atom forces of a `Pose` or `Molecule`. It is configured by **name** at construction, the name keys into `database.json['Energy Parameters'][NAME]`, which carries both the SMIRKS-keyed parameter sections and the explicit list of potential methods to evaluate (under the `Terms` sub-key). The currently shipped names are:
+
+| Name      | Purpose |
+|-----------|---------|
+| `Default` | Deterministic smoke-test for development purposes with dummy parameters, tuned so that `ForceField()(Pose().Build('AaBbCcDdEeFfGgHhIiJjKkLlMmNnOoPpQqRrSsTtUuVvWwXxYyZz')) = 100.00 kJ/mol` exactly. It exercises **every** potential method |
+| `OpenFF`  | Small-molecule force field. Bonded + vdW parameters from [OpenFF Sage 2.3.0](https://github.com/openforcefield/openff-forcefields) ([CC-BY-4.0](https://creativecommons.org/licenses/by/4.0/)); per-atom AM1BCC charges from a NumPy reimplementation of [NAGL](https://github.com/openforcefield/openff-nagl-models) |
 
 A hash of the bond graph + atom records + amino-acid assignments is cached, so repeated calls during minimisation, MD, or annealing only recompute coordinate-dependent quantities.
 
 | Method                                                                          | Description |
 |---------------------------------------------------------------------------------|-------------|
-| `ff = ForceField(name='Default', strict=False)`                                 | Build a force field. `name` is the parameter-set name in `database.json['Energy Parameters']`. Defaults to `'Default'`. `strict=True` raises `RuntimeError` on any SMIRKS coverage gap; `strict=False` warns once per pose and falls through with `K=0` for unmatched fragments. The list of potential methods to evaluate is taken from `database.json['Energy Parameters'][name]['Terms']` |
-| `E = ff(pose, grad=False, box=None, v=False)`                                            | Evaluate total potential energy in kJ/mol. `box=None` disables PBC; pass a `(3,)` array for an orthorhombic box or a `(3, 3)` array for a triclinic box, in Å. `v=True` will print errors for missing SMIRKS that result in k=0 |
+| `ff = ForceField(name='Default', strict=False)`                                 | Build a force field. `name` is the parameter-set name in `database.json['Energy Parameters']`. Defaults to `'Default'`. `strict=True` raises `RuntimeError` on any SMIRKS coverage gap; `strict=False` warns once per pose and falls through with `K=0` for unmatched fragments. The list of potential methods to evaluate is taken from `database.json['Energy Parameters'][NAME]['Terms']` |
+| `E = ff(pose, grad=False, box=None, v=False)`                                   | Evaluate total potential energy in kJ/mol. `box=None` disables PBC; pass a `(3,)` array for an orthorhombic box or a `(3, 3)` array for a triclinic box, in Å. `v=True` will print errors for missing SMIRKS that result in k=0 |
 | `E, F = ff(pose, grad=True, box=None)`                                          | Evaluate total potential energy plus per-atom forces. Returns a tuple `(float, ndarray)` where forces are shape `(N, 3)` in kJ/mol/Å |
 | `ff.BondPotential(pose, cache, alg='harmonic', grad=True, box=None)`            | Bond-stretching term. `alg='harmonic'` uses `Σ K_b·(r − r₀)²`, `alg='morse'` uses `Σ D_e·(1 − e^(−a(r − r₀)))²` |
 | `ff.AnglePotential(pose, cache, grad=True, box=None)`                           | Harmonic three-atom angle term, `Σ K_θ·(θ − θ₀)²` over every bonded triplet |
@@ -270,9 +362,263 @@ A hash of the bond graph + atom records + amino-acid assignments is cached, so r
 | `ff.VDWPotential(pose, cache, alg='12-6', grad=True, box=None)`                 | Van der Waals (Lennard-Jones) non-bonded term, with 1-4 scaling masks. `alg='12-6'` is the standard form, `alg='9-6'` is a softer variant |
 | `ff.ElectrostaticPotential(pose, cache, alg='constant', grad=True, box=None)`   | Electrostatic non-bonded term. `alg='constant'` uses uniform εᵣ; `alg='ddd'` uses a distance-dependent dielectric `ε(r) = εᵣ·r` |
 | `ff.PolarisationPotential(pose, cache, alg='constant', grad=True, box=None)`    | Induced-dipole polarisation term, `−½·Σ α_i·\|E_i\|²` with the per-atom field built from neighbour charges. Evaluates to 0 when the active FF assigns `α = 0` to all atoms |
-| `ff.CMAPPotential(pose, cache, grad=True, box=None)`                            | CMAP backbone (φ, ψ) cross-term correction over every interior protein residue, evaluated by bicubic Catmull-Rom interpolation on the per-residue 24×24 energy grids stored under `[name]['cmap']`. Skips residues whose 1-letter code has no grid |
+| `ff.CMAPPotential(pose, cache, grad=True, box=None)`                            | CMAP backbone (φ, ψ) cross-term correction over every interior protein residue, evaluated by bicubic Catmull-Rom interpolation on the per-residue 24×24 energy grids stored under `[NAME]['CMAP']`. Skips residues whose 1-letter code has no grid |
 
-> **Charge model**: under `OpenFF`, partial charges are computed by `ForceField.NAGLCharges(pose)`, a NumPy reimplementation of the [`openff-gnn-am1bcc-1.0.0`](https://github.com/openforcefield/openff-nagl-models) graph neural network released by the [Open Force Field Initiative](https://github.com/openforcefield). Output is bit-equivalent to upstream NAGL float32 inference, with the total constrained to the molecule's formal charge via electronegativity equalisation. NAGL weights live under `[name]['AM1BCC']`; force fields without that sub-key (e.g. `Default`) skip NAGL and fall back to library charges then atom-record charges. SMIRKS pattern assignment for bonded and vdW parameters is done in `pose.energy.SMIRKSMatch(pose, params)`, a pure-NumPy SMIRKS engine. All numerical values in `database.json` are in **kJ/mol** (lengths in Å, angles in degrees).
+> **Charge model**: under `OpenFF`, partial charges are computed by `ForceField.NAGLCharges(pose)`, a NumPy reimplementation of the [`openff-gnn-am1bcc-1.0.0`](https://github.com/openforcefield/openff-nagl-models) graph neural network released by the [Open Force Field Initiative](https://github.com/openforcefield). Output is bit-equivalent to upstream NAGL float32 inference, with the total constrained to the molecule's formal charge via electronegativity equalisation. NAGL weights live under `['OpenFF']['AM1BCC']`; force fields without that sub-key (e.g. `Default`) skip NAGL and fall back to library charges then atom-record charges. SMIRKS pattern assignment for bonded and vdW parameters is done in `pose.energy.SMIRKSMatch(pose, params)`, a pure-NumPy SMIRKS engine. All numerical values in `database.json` are in **kJ/mol** (lengths in Å, angles in degrees).
+
+
+
+
+
+
+
+
+### Energy score methods
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+### Other Tools
+
+
+
+
+
+
+
+
+
+
+
+
+## Data Structure Reference
+
+Get the content of the structure's JSON object using `print(p.data[KEY])`
+
+This `p.data` structure from the `Pose()` class represents proteins, DNA, and RNA:
+
+| Key           | Value Type  | Description |
+|---------------|-------------|-------------|
+| `Type`        | String      | Identifies the structure as a protein, DNA, or RNA |
+| `Energy`      | Float       | Potential energy or score of the molecule |
+| `Rg`          | Float       | Radius of gyration |
+| `Mass`        | Float       | Mass in Daltons |
+| `Size`        | Dict        | Length of each chain, ie: the number of monomers in each chain |
+| `FASTA`       | Dict        | One-letter sequence for each chain |
+| `SS`          | Dict        | One-letter amino acid secondary structure asignments for each chain |
+| `Nucleotides` | Dict        | `{index: [symbol, chain, bb_atom_indices, sc_atom_indices, tricode]}`, **zero-based indexing** |
+| `Amino Acids` | Dict        | `{index: [symbol, chain, bb_atom_indices, sc_atom_indices, secondary_struct, tricode, SASA]}`, **zero-based indexing** |
+| `Atoms`       | Dict        | `{atom_index: [pdb_name, element, partial charge, occupancy, temp_factor, hybridisation]}`, **zero-based indexing** |
+| `Bonds`       | Dict        | Bond graph as adjacency list: `{atom_index: [bonded_atom_indices]}`, **zero-based indexing** |
+| `BondOrders`  | Dict        | Bond order as an adjacency list, 1 = single bonds, 1.5 = delocalised bond, such as aromatic rings, resonance systems, or partial-double bond, 2 = double bonds, 3 = triple bonds |
+| `Coordinates` | NumPy array | Shape `(N, 3)`, Cartesian XYZ for each atom |
+
+This `m.data` structure from the `Molecule()` class represents small organic molecules:
+
+| Key           | Value Type  | Description |
+|---------------|-------------|-------------|
+| `Type`        | String      | Identifies the structure as a molecule |
+| `Energy`      | Float       | Potential energy of the molecule |
+| `Rg`          | Float       | Radius of gyration |
+| `Mass`        | Float       | Molecule's molecular mass |
+| `SMILES`      | Str         | The SMILES representation of the molecule as a string |
+| `SMARTS`      | Str         | The SMARTS representation of the molecile as a string |
+| `SMIRKS`      | Str         | The SMIRKS representation of the molecile as a string |
+| 'Formula'     | Str         | The molecular formula of the molecule |
+| `Atoms`       | Dict        | `{atom_index: [pdb_name, element, partial charge, hybridisation]}`, **zero-based indexing** |
+| `Bonds`       | Dict        | Bond graph as adjacency list: `{atom_index: [bonded_atom_indices]}`, **zero-based indexing** |
+| `BondOrders`  | Dict        | Bond order as an adjacency list, 1 = single bonds, 1.5 = aromatic resonance partial-double bond, 2 = double bonds, 3 = triple bonds |
+| `Coordinates` | NumPy array | Shape `(N, 3)`, Cartesian XYZ for each atom |
+
+> The `hybridisation` field is one of `'s'` (hydrogens), `'sp'`, `'sp2'`, or `'sp3'`.
+
+> Each atom's hybridisation is stored as the last element of its atom record: `p.data['Atoms'][i][5]` for `Pose()`, `m.data['Atoms'][i][3]` for `Molecule()`.
+
+---
+
+## database.json overview
+
+Pose ships a single `database.json` file (~70 MB) under `pose/` with **five** top-level keys:
+
+| Top-level key      | Purpose |
+|--------------------|---------|
+| `Amino Acids`      | Per-residue topology templates for amino acids: backbone & sidechain atoms, vectors, bonds, χ angle atoms |
+| `Nucleotides`      | Per-nucleotide topology templates for DNA and RNA |
+| `Rotamer Library`  | Backbone-dependent rotamer mixture data (Dunbrack BBDEP2010 derived) |
+| `Energy Parameters`| Named force-field parameter sets, keyed by force-field name. Two ship today `openFF` (Sage 2.3.0 small-molecule FF, CC-BY-4.0) and `Default` (deterministic smoke-test calibrated to 100.00 kJ/mol anchor) |
+| `Score Parameters` | Named score parameter sets, keyed by score function name. One ships today `Default` (deterministic smoke-test calibrated to 100.00 kJ/mol anchor) |
+
+The whole file is loaded once per Python process via the cached module-level loader `pose.DBLoad()`, thus if you want to investogate the database use this code `p = Pose(); DB = DBLoad()`
+
+### Description of amino acids in database.json:
+
+This information resides in `database['Amino Acids'][AMINO_ACID_UNICODE or BACKBONE]`
+
+| Dictionary Key                        | Value Type     | Description of Values |
+|---------------------------------------|----------------|-----------------------|
+| `Vectors`                             | List of lists  | The position of each atom relative to the first backbone atom (N for amino acids, P for nucleotides). If the N coorinate is X, Y, Z = 0, 0, 0 you will get these stored vectors |
+| `Tricode`                             | String         | The three letter code for each amino acid, `[0]` for the L-AA tricode `[1]` for the D-AA tricode |
+| `Fused`                               | Boolian        | True = the sidechain is fused to the backbone, such as in Proline |
+| `Backbone Atoms` or `Sidechain Atoms` | List of lists  | The atom identity of each coordinate point, for example: first coordinate point is the nitrogen with symbol N and PDB entry N, next atom is the hydrogen that is bonded to the nitrogen with symbol H and PDB entry 1H etc... Unlike the PDB where all hydrogens are collected after the heavy atoms, here each atom's hydrogens come right after it. This makes for easier matrix operations. Order is `[PDB atom's name, element, partial charge, occupancy, temperature factor, hybridisation]` |
+| `Chi Angle Atoms`                     | List of lists  | The atoms in the sidechain that are contributing to a chi angle |
+| `Bonds`                               | Dictionary     | The bond graph as an adjacency list |
+| `BondOrders`                          | Dictionary     | The bond order graph as an adjacency list, 1 = single bonds, 1.5 = aromatic resonance partial-double bond, 2 = double bonds, 3 = triple bonds |
+
+### Description of nucleotides in database.json:
+
+This information resides in `database['Nucleotides'][NUCEOTIDE_TRICODE]`
+
+| Dictionary Key    | Value Type     | Description of Values |
+|-------------------|----------------|-----------------------|
+| `Vectors`         | List of lists  | The position of each atom relative to the N of the backbone. If the N coorinate is X, Y, Z = 0, 0, 0 you will get these stored vectors |
+| `Tricode`         | String         | The three letter code for each nucleotide |
+| `Type`            | String         | Identify as `DNA` or `RNA` |
+| `Backbone Atoms`  | List of lists  | The atom identity of each backbone coordinate point, first coordinate point is the phosphorus with symbol P and PDB entry P, next atom is the oxygen atom that is bonded to the phosphorus with symbol O and PDB entry OP1 etc... Order is `[PDB atom's name, element, partial charge, occupancy, temperature factor, hybridisation]` |
+| `Base Atoms`      | List of lists  | The atom identity of each nitrogen base coordinate point. Order is `[PDB atom's name, element, partial charge, occupancy, temperature factor, hybridisation]` |
+| `Chi Angle Atoms` | List of lists  | The atoms in the sidechain that are contributing to a chi angle |
+| `Bonds`           | Dictionary     | The bond graph as an adjacency list |
+| `BondOrders`      | Dictionary     | The bond order graph as an adjacency list, 1 = single bonds, 1.5 = aromatic resonance partial-double bond, 2 = double bonds, 3 = triple bonds |
+
+### Description of the Rotamer Library in database.json:
+
+This information resides in `database['Rotamer Library']`. Derived from the Dunbrack BBDEP2010 rotamer library (Shapovalov & Dunbrack 2011, CC-BY-4.0). Rotamers of NCAAs were derived using Rosetta's *MakeRotLib*.
+
+**Top-level shape:**
+
+| Key             | Value Type     | Description |
+|-----------------|----------------|-------------|
+| `format`        | String         | Format identifier (currently `"rot_v1"`) |
+| `version`       | Int            | Schema version |
+| `phi_start`     | Float          | φ lower edge in degrees, default `-180` |
+| `phi_step`      | Float          | φ width in degrees, default `10` |
+| `phi_n`         | Int            | Number of φ bins, default `36` |
+| `psi_start`     | Float          | ψ lower edge in degrees, default `-180` |
+| `psi_step`      | Float          | ψ width in degrees, default `10` |
+| `psi_n`         | Int            | Number of ψ bins, default `36` |
+| `density_grids` | List           | Per-residue total-density grids |
+| `residues`      | Dict           | Per-residue rotamer mixture data, keyed by residue tricode |
+
+**Per-residue entry, `database['Rotamer Library']['residues'][TRICODE]`:**
+
+| Key        | Value Type | Description |
+|------------|------------|-------------|
+| `n_chi`    | Int        | Number of χ angles for this residue type |
+| `rotamers` | Dict       | The rotamer data |
+| `densities`| List/None  | Per-cell density auxiliary, usually `null` |
+
+**Per-residue `database['Rotamer Library']['residues'][TRICODE]['rotamers']`:**
+
+| Key            | Value Type     | Description |
+|----------------|----------------|-------------|
+| `table`        | List of rows   | Flat list of all rotamer rows across every (φ, ψ) cell. `[index, per-cell normalised probability, per-rotamer mean χ1...χn values in degrees, 𝜎1...𝜎n standard deviations in degrees]` |
+| `bin_offsets`  | List of ints   | CSR indexing of each bin in `table`, length `phi_n × psi_n + 1 = 1297`. Basically it tells you a rotamer bin is from which index to which index in `table` |
+
+**Lookup pattern (used internally by `Rotamers`, `Pack`, and `Score._rotamer_prior`):**
+
+D-amino acid handling: the library is keyed on the L-form 3-letter code only. Consumers fetch the L cell at `(−φ, −ψ)` and negate the recovered μ values when applying them, exploiting the chi/Ramachandran mirror symmetry between enantiomers.
+
+
+
+
+
+
+
+
+
+
+
+
+
+### Description of energy parameters in database.json:
+### Description of score parameters in database.json:
+
+
+
+
+
+
+
+
+
+---
+
+## Community & Contributions
+
+Contributions are welcome! Open an issue or pull request on GitHub, or just email me.
+
+Chat with users and contributors in real time: **IRC:** `#pose` channel on the `irc.libera.chat` network, Or use the [Libera web chat](https://web.libera.chat/#pose), no install needed.
+
+Come ask questions, share what you've built with Pose, or discuss contributions.
+
+---
+
+## How to Cite
+
+If Pose is useful in your research, please cite it. The repository ships a `CITATION.cff` file at the project root with the canonical citation metadata; GitHub's "Cite this repository" button and most reference managers (Zotero, Mendeley) can import it directly. The current entry is:
+
+> Sabban, S. *Pose: A bare metal Python library for building and manipulating protein molecular structures.* 2023. https://github.com/sarisabban/Pose (ORCID: [0000-0002-9621-2395](https://orcid.org/0000-0002-9621-2395))
+
+---
+
+## License
+
+Pose is released under the **Apache License, Version 2.0**. The full licence text lives in the [`LICENSE`](LICENSE) file at the project root, and per Apache-2.0 convention a [`NOTICE`](NOTICE) file records the copyright and attribution.
+
+`SPDX-License-Identifier: Apache-2.0`
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 The `Score()` class is a hybrid physics + statistical scoring function for protein design and small-molecule docking. It is configured by **name** at construction, the name keys into `database.json['Score Parameters'][name]`, which carries the per-term `{weight, …}` blocks, the atom-type / residue-type lookup tables, and the explicit list of energy-term methods to evaluate (under the `Terms` sub-key).
 
@@ -318,7 +664,7 @@ These are standalone tools (not Pose() class methods) and thus are called on the
 
 | Function                                                           | Description |
 |--------------------------------------------------------------------|-------------|
-| `Parameterise('PTR.cif', 'ptr_rot.json', 'PTR', 'B', backup=True)` | Add a non-canonical amino acid to the unified `database.json`. Takes the RCSB CCD `.cif` file, a Dunbrack BBDEP2010-format rotamer-library JSON (e.g. produced by `nnca_pipeline/scripts/build_*_rotamer.py`), the three-letter tricode, and a single-letter unicode for the `Amino Acids` slot. Inserts the residue into both `Amino Acids[unicode]` (atoms / bonds / hybridisation inferred from the CIF) and `Rotamer Library["residues"][tricode]` (chi means, sigmas, populations from the JSON) in one atomic write. `backup=True` (default) timestamps a `database.json.bak.<YYYYMMDD-HHMMSS>` before modifying. Chi axes are taken from `rot_entry["method"]["chi_axes"]` (the user-confirmed source of truth); the CIF walker's chi tracing is no longer used. Calls `DBLoad.cache_clear()` on success so subsequently constructed Pose / ForceField / Score / Rotamers instances see the new residue immediately. The rotamer JSON file can be generated using [this repo](https://github.com/sarisabban/ncaarotamers) |
+| `Parameterise('PTR.cif', 'ptr_rot.json', 'PTR', 'B', backup=True)` | Add a non-canonical amino acid to the unified `database.json`. Takes the RCSB CCD `.cif` file, a Dunbrack BBDEP2010-format rotamer-library JSON, the three-letter tricode, and a single-letter unicode for the `Amino Acids` slot. Inserts the residue into both `Amino Acids[unicode]` (atoms / bonds / hybridisation inferred from the CIF) and `Rotamer Library["residues"][tricode]` (chi means, sigmas, populations from the JSON) in one atomic write. `backup=True` (default) timestamps a `database.json.bak.<YYYYMMDD-HHMMSS>` before modifying. The rotamer JSON file can be generated using [this repo](https://github.com/sarisabban/ncaarotamers) |
 | `RMSD(pose1, pose2, alg='align', export='aligned.pdb')`            | Computes the Root Mean Squared Deviation between two protein or nucleic acids `Pose` structures using Cα (alpha-carbon) atoms for proteins, or C1 atoms for nulceic acids. Returns the RMSD in (Å). Supported algorithms: `'align'` (sequence alignment + iterative Kabsch), `'kabsch'` (SVD-based optimal rotation), `'quaternion'` (eigenvalue-based optimal rotation), or `'simple'` (translation only, no rotation). Can export the aligned structures to `aligned_1.pdb, aligned_2.pdb` |
 | `BLAST(sequence1, sequence2)`                                      | Perform pairwise protein or nucleic acid sequence alignment using the Smith-Waterman local alignment algorithm with BLOSUM62 substitution scores, matching the statistical model used by NCBI BLASTP. Returns: `(alignment_string, percent_identity, e_value)` |
 | `MSA([sequence1, sequence2, sequence3....])`                       | Aligns three or more protein or nucleic acid sequences using a ClustalW-like progressive alignment strategy, pairwise distances are computed with `BLAST()`. Returns: `(alignment_string, aligned_list, conservation_list, entropy_list, pssm_array, dca_array)` where `conservation_list` is a per-column score in [0, 1] (1 = fully conserved), `entropy_list` is per-column Shannon entropy in bits, `pssm_array` is a `(L, 20)` log-odds matrix in BLOSUM62 column order (`ARNDCQEGHILKMFPSTWYV`), and `dca_array` is an `(L, L)` APC-corrected mean-field DCA direct-information matrix |
@@ -350,210 +696,22 @@ These are standalone tools (not Pose() class methods) and thus are called on the
 For Parameterise() this is the workflow:
 
 1. Download the CIF file for the amino acid from the [RCSB Chemical Component Dictionary](https://www.rcsb.org/ligand/) (e.g. `https://files.rcsb.org/ligands/download/PTR.cif`).
-2. Produce a backbone-dependent rotamer library JSON in Dunbrack BBDEP2010 schema. The `nnca_pipeline/scripts/build_*_rotamer.py` scripts at the project root generate one from PDB-mining + adaptive KDE + BGMM (THGLab `ptm_sc` methodology, MIT-licensed). The output JSON must carry `method.chi_axes` (atom-name 4-tuples), Parameterise reads this as the source of truth for the `Chi Angle Atoms` field.
+2. Produce a backbone-dependent rotamer library JSON in Dunbrack BBDEP2010 schema from [this repo](https://github.com/sarisabban/ncaarotamers).
 3. Call `Parameterise(cif_file, rotamer_json_file, tricode, unicode)`. A timestamped backup of `database.json` is created automatically; pass `backup=False` to opt out.
 
----
 
-## Key Concepts
 
-### Zero-based indexing
 
-All residue and atom indices start at 0, not 1. Residue 0 is the N-terminal amino acid. This is the **opposite** of PDB convention.
 
-```python
-p.Build('MSLESNRGI', chain='A', fmt='protein') # Construct a polypeptide
-p.GetDihedral(0, 'PHI')                        # PHI of first residue (index 0)
-p.GetDihedral(2, 'chi', 1)                     # CHI 1 of third residue (index 2)
-p.GetDistance(0, 'N', 1, 'CA')                 # N of residue 0 to CA of residue 1
-p.Build('MSLESNRGI', chain='B', fmt='protein') # Add a second chain
-```
 
-### Accessing the data structure directly
 
-```python
-p.data['FASTA']              # Sequence string
-p.data['Size']               # Number of residues (int)
-p.data['Amino Acids'][0]     # [letter, chain, bb_indices, sc_indices, secondary structure, tricode, SASA]
-p.data['Atoms'][0]           # [pdb_name, element, charge, occupancy, temp_factor, hybridisation]
-p.data['Coordinates']        # Numpy array, shape (N, 3)
-p.data['Bonds']              # Adjacency list: {atom_index: [bonded_atom_indices]}
-```
 
-Iterating over residues and atoms:
-```python
-for idx, aa in p.data['Amino Acids'].items():
-    symbol, chain, bb, sc, ss, tricode, sasa = aa
-    print(f'Residue {idx}: {tricode} ({symbol}), SS={ss}')
 
-for idx, atom in p.data['Atoms'].items():
-    name, element, charge, occupancy, temp, hybrid = atom
-    xyz = p.data['Coordinates'][idx]
-    print(f'Atom {idx}: {name} ({element}) at {xyz}')
-```
 
----
 
-## Supported Amino Acids
 
-> Uppercase = L-form, lowercase = D-form. All 26 are supported in mixed L/D sequences. Additional amino acids can be added to the **database.json** file.
 
-> The N-terminus is protonated, as expected at physiological pH (~7.4), and therefore exists as a positively charged ammonium group (–NH<sub>3</sub><sup>+</sup>)
 
-|       |       |       |       |       |
-|-------|-------|-------|-------|-------|
-|A - ALA|B - ALY|C - CYS|D - ASP|E - GLU|
-|F - PHE|G - GLY|H - HIS|I - ILE|J - MSE|
-|K - LYS|L - LEU|M - MET|N - ASN|O - TPO|
-|P - PRO|Q - GLN|R - ARG|S - SER|T - THR|
-|U - SEC|V - VAL|W - TRP|X - TRF|Y - TYR|
-|Z - PTR|
-
-## Supported Nucleotides
-
-### DNA
-
-|       |       |       |       |
-|-------|-------|-------|-------|
-|A - DA |T - DT |C - DC |G - DG |
-
-### RNA
-
-|      |      |      |      |
-|------|------|------|------|
-|A - A |U - U |C - C |G - G |
-
----
-
-## Data Structure Reference
-
-Get the content of the structure's JSON object using `print(p.data[KEY])`
-
-This `p.data` structure from the `Pose()` class represents proteins, DNA, and RNA:
-
-| Key           | Value Type  | Description |
-|---------------|-------------|-------------|
-| `Type`        | String      | Identifies the structure as a protein, DNA, or RNA |
-| `Energy`      | Float       | Potential energy of the molecule |
-| `Rg`          | Float       | Radius of gyration |
-| `Mass`        | Float       | Mass in Daltons |
-| `Size`        | Dict        | Length of each chain, ie: the number of monomers for each chain |
-| `FASTA`       | Dict        | One-letter sequence for each chain |
-| `SS`          | Dict        | One-letter amino acid secondary structure asignments for each chain |
-| `Nucleotides` | Dict        | `{index: [symbol, chain, bb_atom_indices, sc_atom_indices, tricode]}`, **zero-based indexing** |
-| `Amino Acids` | Dict        | `{index: [symbol, chain, bb_atom_indices, sc_atom_indices, secondary_struct, tricode, SASA]}`, **zero-based indexing** |
-| `Atoms`       | Dict        | `{atom_index: [pdb_name, element, partial charge, occupancy, temp_factor, hybridisation]}`, **zero-based indexing** |
-| `Bonds`       | Dict        | Bond graph as adjacency list: `{atom_index: [bonded_atom_indices]}` |
-| `BondOrders`  | Dict        | Bond order as an adjacency list, 1 = single bonds, 1.5 = aromatic resonance partial-double bond, 2 = double bonds, 3 = triple bonds |
-| `Coordinates` | NumPy array | Shape `(N, 3)`, Cartesian XYZ for each atom |
-
-This `m.data` structure from the `Molecule()` class represents small organic molecules:
-
-| Key           | Value Type  | Description |
-|---------------|-------------|-------------|
-| `Type`        | String      | Identifies the structure as a molecule |
-| `Energy`      | Float       | Potential energy of the molecule |
-| `Rg`          | Float       | Radius of gyration |
-| `Mass`        | Float       | Molecule's molecular mass |
-| `SMILES`      | Str         | The SMILES representation of the molecule as a string |
-| `SMARTS`      | Str         | The SMARTS representation of the molecile as a string |
-| `SMIRKS`      | Str         | An atom-mapped SMIRKS-style string that contain hybridisation, formal-charge, and other info about the molecule |
-| 'Formula'     | Str         | The molecular formula of the molecule |
-| `Atoms`       | Dict        | `{atom_index: [pdb_name, element, partial charge, hybridisation]}`, **zero-based indexing** |
-| `Bonds`       | Dict        | Bond graph as adjacency list: `{atom_index: [bonded_atom_indices]}` |
-| `BondOrders`  | Dict        | Bond order as an adjacency list, 1 = single bonds, 1.5 = aromatic resonance partial-double bond, 2 = double bonds, 3 = triple bonds |
-| `Coordinates` | NumPy array | Shape `(N, 3)`, Cartesian XYZ for each atom |
-
-> The `hybridisation` field is one of `'s'` (hydrogens), `'sp'`, `'sp2'`, or `'sp3'`.
-
-> Each atom's hybridisation is stored as the last element of its atom record: `p.data['Atoms'][i][5]` for `Pose()`, `m.data['Atoms'][i][3]` for `Molecule()`.
-
----
-
-## database.json overview
-
-Pose ships a single `database.json` file (~70 MB) under `pose/` with **four** top-level keys:
-
-| Top-level key      | Purpose |
-|--------------------|---------|
-| `Amino Acids`      | Per-residue topology templates: backbone & sidechain atoms, vectors, bonds, χ angle atoms. Used by `Pose.Build`, `Pose.Mutate`, all dihedral routines |
-| `Nucleotides`      | Per-nucleotide topology templates for DNA and RNA |
-| `Rotamer Library`  | Backbone-dependent rotamer mixture data (Dunbrack BBDEP2010 derived), multimodal `{P_k, μ_k_χ_c, σ_k_χ_c}` per residue type per 10° (φ, ψ) cell. Consumed by `Score._rotamer_prior`, `tools.Rotamers`, and `tools.Pack` |
-| `Energy Parameters`| Named force-field parameter sets, keyed by force-field name. Two ship today `openFF` (Sage 2.3.0 small-molecule FF, CC-BY-4.0, plus NAGL AM1-BCC neural-network weights for charges) and `Default` (deterministic smoke-test that exercises every potential method on a calibrated 100.00 kJ/mol anchor). Each named block carries SMIRKS-keyed `Bonds`, `Angles`, `UB`, `ProperTorsions`, `ImproperTorsions`, `vdW`, `Electrostatic`, `Constraints`, `cmap`, plus a global `Constants` dict and a `Terms` list that selects which potential methods to evaluate. The `openFF` block additionally carries an `AM1BCC` sub-key with base64-encoded float32 NAGL weights. All numerical values in kJ/mol (Å, degrees). See "Description of energy parameters in database.json" below |
-| `Score Parameters` | Named score parameter sets, keyed by score function name. `Default` (deterministic smoke-test that exercises every term method on a calibrated 100.00 kJ/mol anchor) |
-
-The whole file is loaded once per Python process via the cached module-level loader `pose.DBLoad()`
-
-## Description of amino acids in database.json:
-
-This information resides in `database['Amino Acids'][AMINO_ACID_UNICODE or BACKBONE]`
-
-| Dictionary Key                        | Value Type     | Description of Values |
-|---------------------------------------|----------------|-----------------------|
-| `Vectors`                             | List of lists  | The position of each atom relative to the N of the backbone. If the N coorinate is X, Y, Z = 0, 0, 0 you will get these vectors. To find the correct vectors position the N at coordinate X, Y, Z = 0, 0, 0, and use the corresponding coordinates of each atom |
-| `Tricode`                             | String         | The three letter code for each amino acid, `[0]` for the L-AA tricode `[1]` for the D-AA tricode |
-| `Fused`                               | Boolian        | True = the sidechain is fused to the backbone |
-| `Backbone Atoms` or `Sidechain Atoms` | List of lists  | The atom identity of each coordinate point, for example: first coordinate point is the nitrogen with symbol N and PDB entry N, next atom is the hydrogen that is bonded to the nitrogen with symbol H and PDB entry 1H etc... Unlike the PDB where all hydrogens are collected after the amino acid, here each atom's hydrogens come right after it. This makes for easier matrix operations. Order is index [0] = PDB atom's name, index [1] = element, index [2] = partial charge, index [3] = occupancy, index [4] = temperature factor, index [5] = hybridisation |
-| `Chi Angle Atoms`                     | List of lists  | The atoms in the sidechain that are contributing to a chi angle |
-| `Bonds`                               | Dictionary     | The bond graph as an adjacency list |
-| `BondOrders`                          | Dictionary     | The bond order graph as an adjacency list, 1 = single bonds, 1.5 = aromatic resonance partial-double bond, 2 = double bonds, 3 = triple bonds |
-
-> Backbone-dependent rotamer data (formerly carried as a per-amino-acid `BBDEP` field on this object) now lives in the separate `Rotamer Library` top-level block, see "Description of the Rotamer Library in database.json" below.
-
-## Description of nucleotides in database.json:
-
-This information resides in `database['Nucleotides'][NUCEOTIDE_TRICODE]`
-
-| Dictionary Key    | Value Type     | Description of Values |
-|-------------------|----------------|-----------------------|
-| `Vectors`         | List of lists  | The position of each atom relative to the N of the backbone. If the N coorinate is X, Y, Z = 0, 0, 0 you will get these vectors. To find the correct vectors position the N at coordinate X, Y, Z = 0, 0, 0, and use the corresponding coordinates of each atom |
-| `Tricode`         | String         | The three letter code for each nucleotide |
-| `Type`            | String         | Identify as `DNA` or `RNA` |
-| `Backbone Atoms`  | List of lists  | The atom identity of each backbone coordinate point, first coordinate point is the phosphorus with symbol P and PDB entry P, next atom is the oxygen atom that is bonded to the phosphorus with symbol O and PDB entry OP1 etc... Order is index [0] = PDB atom's name, index [1] = element, index [2] = partial charge, index [3] = occupancy, index [4] = temperature factor, index [5] = hybridisation |
-| `Base Atoms`      | List of lists  | The atom identity of each nitrogen base coordinate point. Order is index [0] = PDB atom's name, index [1] = element, index [2] = partial charge, index [3] = occupancy, index [4] = temperature factor, index [5] = hybridisation |
-| `Chi Angle Atoms` | List of lists  | The atoms in the sidechain that are contributing to a chi angle |
-| `Bonds`           | Dictionary     | The bond graph as an adjacency list |
-| `BondOrders`      | Dictionary     | The bond order graph as an adjacency list, 1 = single bonds, 1.5 = aromatic resonance partial-double bond, 2 = double bonds, 3 = triple bonds |
-
-## Description of the Rotamer Library in database.json:
-
-This information resides in `database['Rotamer Library']` and is consumed by `Score()`, `tools.Rotamers()`, and `tools.Pack()`. Derived from the Dunbrack BBDEP2010 rotamer library (Shapovalov & Dunbrack 2011, CC-BY-4.0). Currently covers 24 chi-bearing residue types: ALY, ARG, ASN, ASP, CYS, GLN, GLU, HIS, ILE, LEU, LYS, MET, MSE, PHE, PRO, PTR, SEC, SER, THR, TPO, TRF, TRP, TYR, VAL. Glycine and Alanine carry no χ angles and need no entry.
-
-**Top-level shape:**
-
-| Key             | Value Type     | Description |
-|-----------------|----------------|-------------|
-| `format`        | String         | Format identifier (currently `"rot_v1"`) |
-| `version`       | Int            | Schema version |
-| `phi_start`     | Float          | First (φ, ψ) bin lower edge in degrees, default `-180` |
-| `phi_step`      | Float          | (φ, ψ) bin width in degrees, default `10` |
-| `phi_n`         | Int            | Number of φ bins, default `36` |
-| `psi_start`     | Float          | (analogous) |
-| `psi_step`      | Float          | (analogous) |
-| `psi_n`         | Int            | Number of ψ bins, default `36` |
-| `density_grids` | List           | Per-residue total-density grids (auxiliary, not consumed by current code paths) |
-| `residues`      | Dict           | Per-residue rotamer mixture data, keyed by 3-letter code |
-
-**Per-residue entry, `database['Rotamer Library']['residues'][TRICODE]`:**
-
-| Key        | Value Type | Description |
-|------------|------------|-------------|
-| `n_chi`    | Int        | Number of χ angles for this residue type (1 for VAL/SER/THR/CYS/SEC, 2 for LEU/ILE/PHE/TYR/TRP/HIS/ASN/ASP/PRO/MSE/TRF, 3 for MET/GLN/GLU, 4 for ARG/LYS) |
-| `rotamers` | Dict       | The CSR-packed rotamer mixture (see below) |
-| `densities`| List/None  | Optional per-cell density auxiliary; usually `null` |
-
-**Per-residue `rotamers` block, CSR-packed for compactness:**
-
-| Key            | Value Type     | Description |
-|----------------|----------------|-------------|
-| `columns`      | List of strings| Column schema for each row of `table`, e.g. for VAL: `['count', 'prob', 'chi1', 'sig1']`; for LEU (n_chi=2): `['count', 'prob', 'chi1', 'chi2', 'sig1', 'sig2']`; in general `[count, prob, chi1..chiN, sig1..sigN]` |
-| `table`        | List of rows   | Flat list of all rotamer rows across every (φ, ψ) cell. Each row matches `columns`: the empirical observation `count`, the per-cell normalised probability `prob` (sums to 1 within a cell), the per-rotamer mean χ values in degrees, and the per-rotamer χ standard deviations in degrees |
-| `bin_offsets`  | List of ints   | CSR indexing, length `phi_n × psi_n + 1 = 1297` for the default 36×36 grid. Cell `(i_phi, i_psi)` is at `bin_idx = i_phi × psi_n + i_psi`, and its rotamer rows are `table[bin_offsets[bin_idx] : bin_offsets[bin_idx+1]]` |
-| `top_chi`      | List           | Optional precomputed (most-probable rotamer mean χ values per cell) lookup, currently unused by `Score._rotamer_prior` / `Rotamers` / `Pack` (which slice `table` directly) |
-
-**Lookup pattern (used internally by `Rotamers`, `Pack`, and `Score._rotamer_prior`):**
-
-D-amino acid handling: the library is keyed on the L-form 3-letter code only. Consumers fetch the L cell at `(−φ, −ψ)` and negate the recovered μ values when applying them, exploiting the chi/Ramachandran mirror symmetry between enantiomers.
 
 ## Description of energy parameters in database.json:
 
@@ -570,13 +728,26 @@ D-amino acid handling: the library is keyed on the L-form 3-letter code only. Co
 | `ImproperTorsions` | Dict       | SMIRKS-keyed improper torsions, trefoil-expanded at compile time into the three cyclic permutations of the outer atoms (each contributing `K_phi / 3`). Same component shape as `ProperTorsions`. Evaluated as harmonic or Fourier depending on the `alg` field of the method's entry in `Terms` |
 | `vdW`              | Dict       | SMIRKS-keyed Lennard-Jones parameters. Each value is `{id?, epsilon, r, alpha?, sigma?}`, well depth in kJ/mol, half-min-distance `r` in Å (or `sigma` directly), optional atomic polarisability `alpha` in Å³ co-keyed with the same SMIRKS. Sigma is derived as `r * 2 / 2^(1/6)` when not explicitly given. `alpha` defaults to 0; when 0 for every atom, `PolarisationPotential` evaluates to 0 |
 | `Electrostatic`    | Dict       | SMIRKS-keyed library charges (water, ions, Xe). Each value is `{id?, q: [c₀, c₁, …]}`, literal partial charges in elementary-charge units, one per tagged atom in the SMIRKS pattern. Library charges take priority over NAGL inference on matched atoms |
-| `CMAP`             | Dict       | SMIRKS-keyed φ/ψ backbone correction grids, keyed by one-letter amino-acid code. Each value is a 24×24 list-of-lists. The potential evaluates by bicubic Catmull-Rom interpolation; residues whose code is missing from the dict contribute 0. `cmap` is unused on `Molecule` poses (the cache stays empty) |
+| `CMAP`             | Dict       | SMIRKS-keyed φ/ψ backbone correction grids, keyed by one-letter amino-acid code. Each value is a 24×24 list-of-lists. The potential evaluates by bicubic Catmull-Rom interpolation; residues whose code is missing from the dict contribute 0. `CMAP` is unused on `Molecule` poses (the cache stays empty) |
 | `Terms`            | List       | Ordered list of potential methods to evaluate, each entry is `[method_name, kwargs_dict]`. Example: `["BondPotential", {"alg": "harmonic"}]`. `ForceField.__call__` iterates this list and dispatches to each named method on `ForceField` |
 | `AM1BCC`           | Dict       | (only under `openFF`) NAGL graph-neural-network weights for AM1-BCC partial-charge prediction. `gcn_layers[0..5]` (each with `fc_neigh_w`, `fc_self_w`, `fc_self_b`) and `readout` (`linear_0_w/b`, `linear_1_w/b`). Each weight tensor is `{shape, data}` where `data` is base64-encoded float32 bytes, bit-exact NAGL float32 inference, ~13 MB total. FFs without this sub-key (e.g. `Default`) skip NAGL inference |
 
 **Field name conventions**, keys follow physics-textbook naming so the schema reads as formulas: `r_0` (equilibrium bond length), `K_b` (bond force constant), `theta_0`/`K_theta` (angles), `s_0`/`K_ub` (Urey-Bradley), `n`/`phi_0`/`K_phi` (torsion multiplicity / phase / barrier height), `r` (vdW half-min-distance), `q` (literal partial charges). The optional `id` field on `openFF` entries carries the upstream Sage identifier (e.g. `'b1'`, `'a1'`, `'t1'`); `Default` entries omit it.
 
 **`Default` (smoke-test / regression FF, 9 terms)**, one broad-wildcard SMIRKS per section (`[*:1]~[*:2]` for bonds, `[*:1]~[*:2]~[*:3]` for angles + UB, etc.). All linear coefficients (`K_b`, `K_theta`, `K_ub`, `K_phi`, `vdW.epsilon`, `CMAP` grid values) were uniformly calibrated so that `ForceField()(Pose().Build('AaBbCcDdEeFfGgHhIiJjKkLlMmNnOoPpQqRrSsTtUuVvWwXxYyZz'))` returns **100.00 kJ/mol** exactly (within float64 ulps). `Electrostatic.q = [0.0]` and `vdW.alpha = 0` by design, so `ElectrostaticPotential` and `PolarisationPotential` both evaluate to 0, this isolates the calibration from quadratic charge-dependent terms. `CMAP` carries a 24×24 constant grid for every A-Z one-letter code. `Default` is not for production; its only purpose is to drive every potential method, every cache path, and every dispatch branch in `ForceField` through a deterministic check.
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 ## Description of score parameters in database.json:
 
@@ -621,29 +792,3 @@ D-amino acid handling: the library is keyed on the L-form 3-letter code only. Co
 | `Terms`              | List       | Ordered list of `[method_name, kwargs_dict]` pairs to evaluate. `Score.__call__` iterates this list and dispatches to each named method on `Score`. The `Default` set carries 25 entries — every potential method in the framework |
 
 **`Default` (smoke-test / regression set, 25 dispatched terms)**, contains dummy parameter values, it is used as a smoke-test to ensure that all `Score()` methods are correctly working. `Score()(Pose().Build('AaBbCcDdEeFfGgHhIiJjKkLlMmNnOoPpQqRrSsTtUuVvWwXxYyZz'))` returns **100.00** exactly.
-
----
-
-## Community & Contributions
-
-Contributions are welcome! Open an issue or pull request on GitHub, or just email me.
-
-Chat with users and contributors in real time: **IRC:** `#pose` channel on the `irc.libera.chat` network, Or use the [Libera web chat](https://web.libera.chat/#pose), no install needed.
-
-Come ask questions, share what you've built with Pose, or discuss contributions.
-
----
-
-## How to Cite
-
-If Pose is useful in your research, please cite it. The repository ships a `CITATION.cff` file at the project root with the canonical citation metadata; GitHub's "Cite this repository" button and most reference managers (Zotero, Mendeley) can import it directly. The current entry is:
-
-> Sabban, S. *Pose: A bare metal Python library for building and manipulating protein molecular structures.* 2023. https://github.com/sarisabban/Pose (ORCID: [0000-0002-9621-2395](https://orcid.org/0000-0002-9621-2395))
-
----
-
-## License
-
-Pose is released under the **Apache License, Version 2.0**. The full licence text lives in the [`LICENSE`](LICENSE) file at the project root, and per Apache-2.0 convention a [`NOTICE`](NOTICE) file records the copyright and attribution.
-
-`SPDX-License-Identifier: Apache-2.0`
