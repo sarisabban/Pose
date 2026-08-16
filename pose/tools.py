@@ -24,7 +24,6 @@ def _validate_rot_entry(rot_entry, expected_tricode):
 	'''
 	Validate a rotamer JSON against the Dunbrack BBDEP2010 schema.
 	The JSON must come from https://github.com/sarisabban/ncaarotamers.
-
 	Arguments:
 	----------
 		rot_entry         : dict - parsed JSON content
@@ -3202,7 +3201,7 @@ def Port(name='openff'):
 				['TorsionalPenalty',     {}]]}
 		sp['AutoDock Vina'] = block
 	def ref15():
-		'''Port Rosetta REF15 into db['Score Parameters'] + top-level Rotamer Library / FaDunNrchiDensities / EtablePairParams'''
+		'''Port Rosetta REF15 into db['Score Parameters'] + top-level Rotamer Library'''
 		sp = db.setdefault('Score Parameters', {})
 		ETABLE_ATOM_TYPES = [
 			'CNH2', 'COO', 'CH0', 'CH1', 'CH2', 'CH3', 'aroC', 'Ntrp',
@@ -3445,7 +3444,8 @@ def Port(name='openff'):
 				LK_VOLUME plus donor/acceptor/polar_h/h2o flags
 			Returns:
 			--------
-				dict matching `database.json['EtablePairParams']`:
+				dict stored at `['Score Parameters']['REF15']`
+				['EtablePairParams']:
 				{atom_types: [list of 29 names], n_types: 29, pairs: [841 dicts]}
 			'''
 			import math as _math
@@ -3950,6 +3950,289 @@ def Port(name='openff'):
 				'ring':      'RING_HYBRID' in flags,
 				'orbitals':  'ORBITALS' in flags,
 				'polar_h':   'POLAR_HYDROGEN' in flags}
+		# 1b. lk_ball atom weights -> per-Rosetta-type (iso, ball) pair.
+		# Rosetta ships three variants; LK_BallInfo.cc pins the tag
+		# "_RATIO23.0_DEFAULT", so that is the file REF15 actually reads.
+		# Columns are NAME, ball weight, iso weight; they are stored here
+		# swapped to (iso, ball) to match how ScoreMatch unpacks them. The
+		# generic "****" row is the zero default and is skipped, since an
+		# atom type absent from the table already scores zero.
+		lkb_txt = fetch('chemical/atom_type_sets/fa_standard/extras/'
+			'lk_ball_wtd_RATIO23.0_DEFAULT.txt')
+		lkb_wts = {}
+		for line in lkb_txt.splitlines():
+			s = line.split('#', 1)[0]
+			toks = s.split()
+			if len(toks) < 3 or s.lstrip().startswith('NAME'): continue
+			if toks[0] == '****': continue
+			try:
+				ball, iso = float(toks[1]), float(toks[2])
+			except ValueError: continue
+			lkb_wts[toks[0]] = [iso, ball]
+		# 1c. Terminal-variant and disulfide partial charges, the proline
+		# ring-closure geometry, and the sp2 hydrogen-bond shape params.
+		# These are read from the patch files and option defaults rather
+		# than transcribed, so that no Rosetta value lives in Pose's code.
+		def patchcases(text):
+			'''
+			Split a Rosetta patch file into its BEGIN_CASE blocks
+			Arguments:
+			----------
+				text: str - contents of a .txt patch file
+			Returns:
+			--------
+				list: the body of each case, in file order; Rosetta takes
+				the first matching case, so the generic one is written last
+			'''
+			return re.split(r'^BEGIN_CASE', text, flags=re.M)[1:]
+		def casecharges(case):
+			'''
+			Read the added-hydrogen and reassigned charges of one case
+			Arguments:
+			----------
+				case: str - the body of a single BEGIN_CASE block
+			Returns:
+			--------
+				dict: atom name -> charge, using 'H' for the added
+				terminal hydrogens and 'HA' for either HA or 1HA
+			'''
+			out = {}
+			m = re.search(r'^ADD_ATOM 1H\s+\S+\s+\S+\s+(-?[\d.]+)',
+				case, re.M)
+			if m: out['H'] = float(m.group(1))
+			for nm in ('N', 'CA', 'HA', '1HA'):
+				m = re.search(r'^SET_ATOMIC_CHARGE %s\s+(-?[\d.]+)' % nm,
+					case, re.M)
+				if m: out['HA' if nm == '1HA' else nm] = float(m.group(1))
+			return out
+		nterm_txt = fetch('chemical/residue_type_sets/fa_standard/'
+			'patches/NtermProteinFull.txt')
+		cterm_txt = fetch('chemical/residue_type_sets/fa_standard/'
+			'patches/CtermProteinFull.txt')
+		cys_txt = fetch('chemical/residue_type_sets/fa_standard/'
+			'residue_types/l-caa/CYS.params')
+		ncases = patchcases(nterm_txt)
+		pro_case = next(c for c in ncases
+			if re.search(r'^NAME3 PRO\s*$', c, re.M))
+		gly_case = next(c for c in ncases
+			if re.search(r'^AA GLY\s*$', c, re.M))
+		term_q = {'PRO': casecharges(pro_case),
+			'GLY': casecharges(gly_case),
+			'generic': casecharges(ncases[-1])}
+		ccase = patchcases(cterm_txt)[-1]
+		term_q['cterm'] = {nm: float(re.search(
+			r'^SET_ATOMIC_CHARGE %s\s+(-?[\d.]+)' % nm, ccase, re.M).group(1))
+			for nm in ('C', 'O')}
+		term_q['disulfide_SG'] = float(re.search(
+			r'^ATOM\s+SG\s+\S+\s+\S+\s+(-?[\d.]+)', cys_txt, re.M).group(1))
+		# CAV virtual-atom placement, stated once per proline case
+		m = re.search(r'^SET_ICOOR CAV\s+\S+\s+([\d.]+)\s+([\d.]+)',
+			pro_case, re.M)
+		proclose = {'cav_theta': float(m.group(1)),
+			'cav_d': float(m.group(2))}
+		# The four proline chi4 tethers are C++ member initialisers, so they
+		# come from the source tree rather than from database/.
+		pce_url = (REPO.replace('/database/', '/source/src/')
+			+ 'core/energy_methods/ProClosureEnergy.cc')
+		with urllib.request.urlopen(pce_url, timeout=120) as resp:
+			pce_txt = resp.read().decode('utf-8')
+		for nm, key in (('trans_chi4_mean_', 'trans_chi4_mean'),
+				('trans_chi4_sd_',   'trans_chi4_sd'),
+				('cis_chi4_mean_',   'cis_chi4_mean'),
+				('cis_chi4_sd_',     'cis_chi4_sd')):
+			m = re.search(nm + r'\(\s*(-?[\d.]+)', pce_txt)
+			if m is None:
+				raise RuntimeError('port: %s not found in %s'
+					% (nm, pce_url))
+			proclose[key] = float(m.group(1))
+		# NV is the virtual nitrogen that closes the proline ring; its
+		# placement is an internal coordinate of the residue itself.
+		pro_txt = fetch('chemical/residue_type_sets/fa_standard/'
+			'residue_types/l-caa/PRO.params')
+		m = re.search(r'^ICOOR_INTERNAL\s+NV\s+\S+\s+([\d.]+)\s+([\d.]+)',
+			pro_txt, re.M)
+		if m is None:
+			raise RuntimeError('port: NV ICOOR not found in PRO.params')
+		proclose['nv_theta'] = float(m.group(1))
+		proclose['nv_d'] = float(m.group(2))
+		# dslf_fa13: von Mises / skew-normal fits, set in the
+		# FullatomDisulfideParams13 constructor.
+		dsl_url = (REPO.replace('/database/', '/source/src/')
+			+ 'core/scoring/disulfides/FullatomDisulfidePotential.hh')
+		with urllib.request.urlopen(dsl_url, timeout=120) as resp:
+			dsl_txt = resp.read().decode('utf-8')
+		dslf = {}
+		for nm in ('d_location', 'd_scale', 'd_shape',
+				'a_logA', 'a_kappa', 'a_mu',
+				'dss_logA1', 'dss_kappa1', 'dss_mu1',
+				'dss_logA2', 'dss_kappa2', 'dss_mu2',
+				'dcs_logA1', 'dcs_mu1', 'dcs_kappa1',
+				'dcs_logA2', 'dcs_mu2', 'dcs_kappa2',
+				'dcs_logA3', 'dcs_mu3', 'dcs_kappa3'):
+			m = re.search(r'(?<![\w])' + nm + r'\s*=\s*(-?[\d.]+)', dsl_txt)
+			if m is None:
+				raise RuntimeError('port: %s not found in %s'
+					% (nm, dsl_url))
+			dslf[nm] = float(m.group(1))
+		# The sp2 chi/BAH slope is a literal in the hbond kernel, selected
+		# by fade_energy; REF15 runs with fading on, which gives 1.6.
+		hbg_url = (REPO.replace('/database/', '/source/src/')
+			+ 'core/scoring/hbonds/hbonds_geom.cc')
+		with urllib.request.urlopen(hbg_url, timeout=120) as resp:
+			hbg_txt = resp.read().decode('utf-8')
+		m = re.search(r'fade_energy\(\)\s*\?\s*([\d.]+)\s*:\s*([\d.]+)',
+			hbg_txt)
+		if m is None:
+			raise RuntimeError('port: sp2 fade slope not found in %s'
+				% hbg_url)
+		sp2_slope = float(m.group(1))
+		# sp2 hydrogen-bond shape parameters, from the option defaults
+		opt_url = (REPO.replace('/database/', '/source/src/')
+			+ 'basic/options/options_rosetta.py')
+		with urllib.request.urlopen(opt_url, timeout=120) as resp:
+			opt_txt = resp.read().decode('utf-8')
+		hb_sp2 = {}
+		for nm, key in (('hb_sp2_BAH180_rise', 'BAH180_rise'),
+				('hb_sp2_outer_width', 'outer_width')):
+			m = re.search(r"Option\(\s*'" + nm
+				+ r"'.*?default\s*=\s*\"?'?([\d.]+)", opt_txt, re.S)
+			if m is None:
+				raise RuntimeError('port: %s not found in %s'
+					% (nm, opt_url))
+			hb_sp2[key] = float(m.group(1))
+		hb_sp2['fade_slope'] = sp2_slope
+		m2 = re.search(r"pro_close_planar_constraint'.*?default\s*=\s*"
+			r"[\"']?([\d.]+)", opt_txt, re.S)
+		proclose['planar_sd'] = float(m2.group(1)) if m2 else 0.1
+		# sp3 chi penalty magnitude and the energy-fading polynomial, both
+		# literals in the hbond kernel; and the burial ramp used when
+		# smooth_hb_env_dep is on, which is the REF15 default.
+		m = re.search(r'max_penalty\s*=\s*([\d.]+)', hbg_txt)
+		if m is None:
+			raise RuntimeError('port: max_penalty not found in %s' % hbg_url)
+		hb_sp2['max_penalty'] = float(m.group(1))
+		m = re.search(r'energy\s*=\s*(-?[\d.]+)\s*\+\s*([\d.]+)\s*\*\s*energy'
+			r'\s*-\s*([\d.]+)\s*\*\s*energy\s*\*\s*energy', hbg_txt)
+		if m is None:
+			raise RuntimeError('port: fade polynomial not found in %s'
+				% hbg_url)
+		hb_sp2['fade_c0'] = float(m.group(1))
+		hb_sp2['fade_c1'] = float(m.group(2))
+		hb_sp2['fade_c2'] = -float(m.group(3))
+		hbc_url = (REPO.replace('/database/', '/source/src/')
+			+ 'core/scoring/hbonds/hbonds.cc')
+		with urllib.request.urlopen(hbc_url, timeout=120) as resp:
+			hbc_txt = resp.read().decode('utf-8')
+		m = re.search(r'burial_weight\(int const nb\)\s*\{(.*?)\n\}',
+			hbc_txt, re.S)
+		if m is None:
+			raise RuntimeError('port: burial_weight not found in %s'
+				% hbc_url)
+		body = m.group(1)
+		lo = re.search(r'nb\s*<\s*(\d+)\s*\)\s*return\s+([\d.]+)', body)
+		hi = re.search(r'nb\s*>\s*(\d+)\s*\)\s*return\s+([\d.]+)', body)
+		mid = re.search(r'\(nb\s*-\s*([\d.]+)\s*\)\s*\*\s*\(([\d.]+)\s*/\s*'
+			r'([\d.]+)\s*\)', body)
+		if not (lo and hi and mid):
+			raise RuntimeError('port: burial_weight body unparsed')
+		hb_burial = {'nb_lo': int(lo.group(1)), 'w_lo': float(lo.group(2)),
+			'nb_hi': int(hi.group(1)), 'w_hi': float(hi.group(2)),
+			'shift': float(mid.group(1)),
+			'slope': float(mid.group(2)) / float(mid.group(3))}
+		hb_sp2['burial'] = hb_burial
+		# lk_ball water geometry and ramp width
+		lki_url = (REPO.replace('/database/', '/source/src/')
+			+ 'core/scoring/lkball/LK_BallInfo.cc')
+		with urllib.request.urlopen(lki_url, timeout=120) as resp:
+			lki_txt = resp.read().decode('utf-8')
+		m = re.search(r'optimal_water_distance\(\s*([\d.]+)', lki_txt)
+		if m is None:
+			raise RuntimeError('port: optimal_water_distance not found')
+		lkball = {'opt_dist': float(m.group(1))}
+		m = re.search(r"lk_ball_ramp_width_A2'.*?default\s*=\s*[\"']?([\d.]+)",
+			opt_txt, re.S)
+		lkball['ramp_w2'] = float(m.group(1)) if m else 3.9
+		# The LK far-region switch is derived, not independent: Etable takes
+		# the bin at (max_dis - 1.5).
+		etb_url = (REPO.replace('/database/', '/source/src/')
+			+ 'core/scoring/etable/Etable.cc')
+		with urllib.request.urlopen(etb_url, timeout=120) as resp:
+			etb_txt = resp.read().decode('utf-8')
+		m = re.search(r'\(\s*max_dis_\s*-\s*([\d.]+)\s*\)\s*\*\s*10\.0',
+			etb_txt)
+		far_off = float(m.group(1)) if m else 1.5
+		# Store the switch bounds outright: Score adds a Verlet skin to
+		# Constants['fa_max_dis'] at construction, so that key must not be
+		# used to derive the etable region boundaries.
+		lkball['far_offset'] = far_off
+		m = re.search(r"Option\(\s*'fa_max_dis'.*?default\s*=\s*"
+			r"[\"']?([\d.]+)", opt_txt, re.S)
+		if m is None:
+			raise RuntimeError('port: fa_max_dis default not found')
+		lkball['max_dis'] = float(m.group(1))
+		lkball['far_lo'] = lkball['max_dis'] - far_off
+		lke_url = (REPO.replace('/database/', '/source/src/')
+			+ 'core/scoring/lkball/LK_BallEnergy.cc')
+		with urllib.request.urlopen(lke_url, timeout=120) as resp:
+			lke_txt = resp.read().decode('utf-8')
+		m = re.search(r'h2o_radius\(\s*([\d.]+)', lke_txt)
+		if m is None:
+			raise RuntimeError('port: h2o_radius not found in %s' % lke_url)
+		lkball['h2o_radius'] = float(m.group(1))
+		# The disulfide kernel floors its log with a minimum estimate.
+		dslc_url = (REPO.replace('/database/', '/source/src/')
+			+ 'core/scoring/disulfides/FullatomDisulfidePotential.cc')
+		with urllib.request.urlopen(dslc_url, timeout=120) as resp:
+			dslc_txt = resp.read().decode('utf-8')
+		m = re.search(r'mest_\s*=\s*exp\(\s*(-?[\d.]+)\s*\)', dslc_txt)
+		if m is None:
+			raise RuntimeError('port: mest_ not found in %s' % dslc_url)
+		dslf['mest_log'] = float(m.group(1))
+		for nm in ('wt_dihSS', 'wt_dihCS', 'wt_ang', 'wt_len'):
+			m = re.search(nm + r'_\(\s*([\d.]+)\s*\)', dslc_txt)
+			if m is None:
+				raise RuntimeError('port: %s_ not found in %s'
+					% (nm, dslc_url))
+			dslf[nm] = float(m.group(1))
+		# OmegaTether's per-residue weight.
+		omg_url = (REPO.replace('/database/', '/source/src/')
+			+ 'core/scoring/OmegaTether.cc')
+		with urllib.request.urlopen(omg_url, timeout=120) as resp:
+			omg_txt = resp.read().decode('utf-8')
+		m = re.search(r'Real\s+weight\s*=\s*([\d.]+)\s*;', omg_txt)
+		if m is None:
+			raise RuntimeError('port: omega weight not found in %s' % omg_url)
+		omega_k = float(m.group(1))
+		# Countpair path weight: bonded paths of 4 (3 for non-polymers)
+		# score at half strength.
+		cpf_url = (REPO.replace('/database/', '/source/src/')
+			+ 'core/scoring/etable/count_pair/CountPairFunction.cc')
+		with urllib.request.urlopen(cpf_url, timeout=120) as resp:
+			cpf_txt = resp.read().decode('utf-8')
+		m = re.search(r'cp_half\(\s*([\d.]+)', cpf_txt)
+		if m is None:
+			raise RuntimeError('port: cp_half not found in %s' % cpf_url)
+		cp_half = float(m.group(1))
+		# Threshold that gates the hbond energy-fading polynomial.
+		# Two thresholds gate the fade: energy is zeroed above fade_hi and
+		# faded between fade_lo and fade_hi. Anchor on the else-if so the
+		# lower bound is not confused with the upper one.
+		m = re.search(r'if\s*\(\s*input_energy\s*>\s*([\d.]+)L?\s*\)',
+			hbg_txt)
+		m2 = re.search(r'else\s+if\s*\(\s*input_energy\s*>\s*'
+			r'(-[\d.]+)L?\s*\)', hbg_txt)
+		if m is None or m2 is None:
+			raise RuntimeError('port: fade thresholds not found in %s'
+				% hbg_url)
+		hb_sp2['fade_hi'] = float(m.group(1))
+		hb_sp2['fade_lo'] = float(m2.group(1))
+		# Default LK lambda: the modal LK_LAMBDA of atom_properties.txt.
+		lam = [float(x) for x in re.findall(
+			r'^\S+\s+\S+\s+[\d.-]+\s+[\d.-]+\s+[\d.-]+\s+([\d.]+)',
+			props_txt, re.M)]
+		if not lam:
+			raise RuntimeError('port: no LK_LAMBDA column parsed')
+		lk_lambda_default = max(set(lam), key=lam.count)
 		# 2. ref2015.wts -> weight list + METHOD_WEIGHTS ref values
 		wts_txt = fetch('scoring/weights/ref2015.wts')
 		weights = {}
@@ -4251,6 +4534,10 @@ def Port(name='openff'):
 				'sigmoidal_D0':    6.0,
 				'sigmoidal_S':     0.4,
 				'connectivity_weight': {'3': 0.0, '4': 0.2, '5+': 1.0}},
+			'TerminalCharges': term_q,
+			'HBondSp2':        hb_sp2,
+			'LkBall':          dict(lkball, lk_lambda_default=lk_lambda_default),
+			'CountPair':       {'half': cp_half},
 			'Atom_types':    atom_types,
 			'Residue_types': residues,
 			'HBond_data':    hb_data,
@@ -4265,20 +4552,30 @@ def Port(name='openff'):
 			'FaSol':              {'weight': w('fa_sol',              1.000)},
 			'FaIntraRep':         {'weight': w('fa_intra_rep',        0.005)},
 			'FaIntraSolXover4':   {'weight': w('fa_intra_sol_xover4', 1.000)},
-			'LkBallWtd':          {'weight': w('lk_ball_wtd',         1.000)},
+			'LkBallWtd':          {'weight': w('lk_ball_wtd',         1.000),
+				'atom_weights': lkb_wts},
 			'FaElec':             {'weight': w('fa_elec',             1.000)},
 			'HBondSrBb':          {'weight': w('hbond_sr_bb',         1.000)},
 			'HBondLrBb':          {'weight': w('hbond_lr_bb',         1.000)},
 			'HBondBbSc':          {'weight': w('hbond_bb_sc',         1.000)},
 			'HBondSc':            {'weight': w('hbond_sc',            1.000)},
-			'DslfFa13':           {'weight': w('dslf_fa13',           1.250)},
-			'Omega':              {'weight': w('omega',               0.400)},
+			'DslfFa13':           dict(dslf,
+				weight=w('dslf_fa13',           1.250)),
+			'Omega':              {'weight': w('omega',               0.400),
+				'tether_k': omega_k,
+				# Value used for a terminal phi/psi that has no defining
+				# atoms. Rosetta has no constant here: a pose read from a PDB
+				# reports 0 for the first residue's phi, while one built from
+				# sequence reports 180 because the ideal build sets it. 0.0
+				# matches the imported case, which is what gets scored.
+				'undefined_torsion': 0.0},
 			'FaDun':              {'weight': w('fa_dun',              0.700)},
 			'PAaPp':              {'weight': w('p_aa_pp',             0.600)},
 			'YhhPlanarity':       {'weight': w('yhh_planarity',       0.625)},
 			'Ref':                {'weight': w('ref',                 1.000)},
 			'RamaPreProTerm':     {'weight': w('rama_prepro',         0.450)},
-			'ProClose':           {'weight': w('pro_close',           1.250)},
+			'ProClose':           dict(proclose,
+				weight=w('pro_close',           1.250)),
 			# 0-weight inactive terms exposed in the schema (user spec)
 			'FaIntraAtr':         {'weight': 0.0},
 			'LkBallIso':          {'weight': 0.0},
@@ -4308,9 +4605,9 @@ def Port(name='openff'):
 				['YhhPlanarityPotential',         {}],
 				['RefPotential',                  {}]]}
 		sp['REF15'] = block
-		# Top-level: rotamer library and nrchi densities (consumed by
-		# FaDunPotential). Preserve any other top-level structure
-		# (Nucleotides / Amino Acids / Energy Parameters / EtablePairParams)
+		# Top-level: rotamer library (consumed by FaDunPotential; the
+		# nrchi densities live in the REF15 block). Preserve other top-level
+		# (Nucleotides / Amino Acids / Energy Parameters)
 		# via read-modify-write — only update REF15-owned keys.
 		rl = db.setdefault('Rotamer Library', {})
 		rl.setdefault('format', 'BBDEP2010-shapovalov-StpDwn_0-0-0')
@@ -4326,9 +4623,12 @@ def Port(name='openff'):
 			entry = residues_rl.setdefault(aa3, {})
 			entry['n_chi'] = n_chi
 			entry['rotamers'] = rotamer_db[aa3]
-		db['FaDunNrchiDensities'] = nrchi_db
-		# Top-level: EtablePairParams (pure-Python LJ/LK analytic fit).
-		db['EtablePairParams'] = _etableparams(atom_types)
+		sp['REF15']['FaDunNrchiDensities'] = nrchi_db
+		# EtablePairParams (pure-Python LJ/LK analytic fit). It lives inside
+		# the REF15 block rather than at the top level so that every
+		# Rosetta-derived value sits under 'Score Parameters' and can be
+		# added or removed as one unit.
+		sp['REF15']['EtablePairParams'] = _etableparams(atom_types)
 	dispatch = {
 		'OPENFF':        openff,
 		'FF19SB':        ff19sb,

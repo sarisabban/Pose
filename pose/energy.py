@@ -11,6 +11,8 @@ import warnings
 import numpy as np
 from .pose import DBLoad
 
+
+
 def SMIRKSMatch(pose, params):
 	'''
 	Assign Sage 2.3.0 parameters to a pose by SMIRKS pattern matching
@@ -2598,7 +2600,6 @@ class ForceField():
 # used to be `self._<x>_cache` instance attributes; now per-process).
 _FADUN_GRID_CACHE = {}
 _FADUN_ENT_CACHE = {}
-_FADUN_NRCHI_CACHE = {}
 _PAAPP_SPLINE_CACHE = {}
 _RAMA_ENTROPY = {}
 _RAMA_SPLINE_CACHE = {}
@@ -2895,9 +2896,11 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None,
 			dict: per-atom type / LJ / LK / charge arrays + a
 			flat pair list with distances and connectivity weights
 		'''
+		# Countpair half-weight for 1-4 (or 1-3) bonded paths.
+		cp_half = float((params.get('CountPair') or {})['half'])
 		atoms = pose.data['Atoms']
 		bonds = pose.data['Bonds']
-		coords = np.asarray(pose.data['Coordinates'], dtype=np.float64)
+		coords = np.array(pose.data['Coordinates'], dtype=np.float64)
 		aas = pose.data.get('Amino Acids') or {}
 		n = len(atoms)
 		atom_types_db = params['Atom_types']
@@ -2983,7 +2986,9 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None,
 				ros_types[ai] = t
 				q_arr[ai] = q
 		ljR = np.zeros(n); ljW = np.zeros(n)
-		lkdG = np.zeros(n); lkLam = np.ones(n) * 3.5
+		lkdG = np.zeros(n)
+		lkLam = np.ones(n) * float(
+			(params.get('LkBall') or {})['lk_lambda_default'])
 		lkVol = np.zeros(n)
 		is_donor = np.zeros(n, dtype=bool)
 		is_accep = np.zeros(n, dtype=bool)
@@ -3072,6 +3077,13 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None,
 					is_H[ai] = info.get('element') in ('H',) \
 						or new_type == 'HOH'
 					has_score[ai] = True
+			# Terminal-variant and disulfide charges, installed by
+			# tools.Port('ref15') from Rosetta's patch files.
+			TQ = params.get('TerminalCharges')
+			if TQ is None:
+				raise ValueError(
+					"ScoreMatch: ['TerminalCharges'] is missing from the "
+					"score parameters. Run tools.Port('ref15') to install it.")
 			for ri in n_term_res:
 				info = aas.get(ri)
 				if info is None: continue
@@ -3082,35 +3094,35 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None,
 						nm = atoms[ai][0]
 						if nm in ('1H', '2H', 'H1', 'H2',
 							'HN', 'HT1', 'HT2'):
-							applyatom(ai, 'Hpol', 0.2142)
+							applyatom(ai, 'Hpol', TQ['PRO']['H'])
 						elif nm == 'N':
-							applyatom(ai, 'Nlys', -0.0285)
+							applyatom(ai, 'Nlys', TQ['PRO']['N'])
 					continue
 				if tri == 'GLY':
 					for ai in info[2] + info[3]:
 						ai = int(ai)
 						nm = atoms[ai][0]
 						if nm == 'N':
-							applyatom(ai, 'Nlys', -0.2039)
+							applyatom(ai, 'Nlys', TQ['GLY']['N'])
 						elif nm in NTERM_H_NAMES:
-							applyatom(ai, 'Hpol', 0.2894)
+							applyatom(ai, 'Hpol', TQ['GLY']['H'])
 						elif nm == 'CA':
-							q_arr[ai] = 0.1328
+							q_arr[ai] = TQ['GLY']['CA']
 						elif nm in ('HA', '1HA', '2HA',
 							'HA1', 'HA2', 'HA3'):
-							q_arr[ai] = 0.1015
+							q_arr[ai] = TQ['GLY']['HA']
 					continue
 				for ai in info[2] + info[3]:
 					ai = int(ai)
 					nm = atoms[ai][0]
 					if nm == 'N':
-						applyatom(ai, 'Nlys', -0.1987)
+						applyatom(ai, 'Nlys', TQ['generic']['N'])
 					elif nm in NTERM_H_NAMES:
-						applyatom(ai, 'Hpol', 0.2946)
+						applyatom(ai, 'Hpol', TQ['generic']['H'])
 					elif nm == 'CA':
-						q_arr[ai] = 0.2006
+						q_arr[ai] = TQ['generic']['CA']
 					elif nm == 'HA':
-						q_arr[ai] = 0.1144
+						q_arr[ai] = TQ['generic']['HA']
 			NT_H_DIH = {
 				'H': 180.0, 'H1': 180.0, '1H': 180.0,
 				'HN': 180.0, 'HT1': 180.0,
@@ -3231,11 +3243,11 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None,
 					elif nm == 'O': o_ai = ai
 					elif nm in ('OXT', 'OT1', 'OT2', "O''"): oxt_ai = ai
 				if c_ai is not None:
-					applyatom(c_ai, 'COO', 0.2158)
+					applyatom(c_ai, 'COO', TQ['cterm']['C'])
 				if o_ai is not None:
-					applyatom(o_ai, 'OOC', -0.6079)
+					applyatom(o_ai, 'OOC', TQ['cterm']['O'])
 				if oxt_ai is not None:
-					applyatom(oxt_ai, 'OOC', -0.6079)
+					applyatom(oxt_ai, 'OOC', TQ['cterm']['O'])
 			sg_idx = [i for i in range(n)
 				if atoms[i][1] == 'S' and ros_types[i] == 'SH1']
 			X_arr = np.asarray(coords, dtype=np.float64)
@@ -3245,8 +3257,8 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None,
 					d = float(
 						np.linalg.norm(X_arr[ii] - X_arr[jj]))
 					if d < 2.5:
-						q_arr[ii] = -0.24639810621738434
-						q_arr[jj] = -0.24639810621738434
+						q_arr[ii] = TQ['disulfide_SG']
+						q_arr[jj] = TQ['disulfide_SG']
 		adj = {int(k): set(int(j) for j in v) for k, v in bonds.items()}
 		for i in range(n):
 			adj.setdefault(i, set())
@@ -3339,7 +3351,7 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None,
 				if ((nm_a == 'C' and nm_b == 'N')
 						or (nm_a == 'N' and nm_b == 'C')):
 					res_polymer_bonded.add(pair)
-		c0 = float(params['Constants'].get('fa_max_dis', 6.0))
+		c0 = float(params['Constants']['fa_max_dis'])
 		pairs_i = []; pairs_j = []; pair_d = []
 		pair_w = []; pair_same_res = []; pair_path = []
 		pair_cp_path = []; pair_is_poly = []
@@ -3377,11 +3389,11 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None,
 					bd = 5
 				if is_poly:
 					if bd <= 3: w = 0.0
-					elif bd == 4: w = 0.2
+					elif bd == 4: w = cp_half
 					else: w = 1.0
 				else:
 					if bd <= 2: w = 0.0
-					elif bd == 3: w = 0.2
+					elif bd == 3: w = cp_half
 					else: w = 1.0
 				rep_i = int(rep_atom_idx[ii])
 				rep_j = int(rep_atom_idx[jj])
@@ -3408,18 +3420,18 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None,
 		pair_same_res = np.array(pair_same_res, dtype=bool)
 		pair_path = np.array(pair_path, dtype=np.int64)
 		pair_cp_path = np.array(pair_cp_path, dtype=np.int64)
-		LKB_WTS = {
-			'NH2O': (-0.462, 1.075),
-			'Narg': (-0.444, 1.111),
-			'Nhis': (-0.254, 0.746),
-			'Nlys': (-0.367, 0.633),
-			'Ntrp': (-0.231, 0.769),
-			'OCbb': (-0.329, 0.671),
-			'OH':   (-0.401, 0.599),
-			'ONH2': (-0.329, 0.671),
-			'OOC':  (-0.306, 0.694)}
-		LK_RAMP_W2 = 3.9
-		H2O_R = 1.4
+		LKB_WTS = {k: tuple(v) for k, v in
+			(params.get('LkBallWtd', {}).get('atom_weights') or {}).items()}
+		if not LKB_WTS and any(
+				float(params.get(s, {}).get('weight', 0.0) or 0.0) != 0.0
+				for s in ('LkBallWtd', 'LkBallIso', 'LkBallBridge')):
+			raise ValueError(
+				'ScoreMatch: lk_ball is weighted but '
+				"['LkBallWtd']['atom_weights'] is missing from the score "
+				"parameters. Run tools.Port('ref15') to install it.")
+		LKB = params.get('LkBall') or {}
+		LK_RAMP_W2 = float(LKB['ramp_w2'])
+		H2O_R = float(LKB['h2o_radius'])
 		lkb_w_iso = np.zeros(n, dtype=np.float64)
 		lkb_w_ball = np.zeros(n, dtype=np.float64)
 		lkb_d2_low = np.zeros(n, dtype=np.float64)
@@ -3431,7 +3443,15 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None,
 				ljr = atom_types_db[t]['LJ_RADIUS']
 				d2h = (H2O_R + ljr) * (H2O_R + ljr)
 				lkb_d2_low[i] = max(0.0, d2h - LK_RAMP_W2)
-		etb = DBLoad().get('EtablePairParams')
+		# Pair-wise LJ/LK table, installed by tools.Port('ref15') into the
+		# score-parameter block itself. Every value below derives from it,
+		# so a missing table is a configuration error rather than a
+		# defaultable option.
+		etb = params.get('EtablePairParams')
+		if etb is None:
+			raise ValueError(
+				"ScoreMatch: ['EtablePairParams'] is missing from the score "
+				"parameters. Run tools.Port('ref15') to install it.")
 		if etb is not None:
 			et_names = list(etb['atom_types'])
 			NT = int(etb['n_types'])
@@ -3443,7 +3463,8 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None,
 			et_close_poly  = np.zeros((NT, NT, 4), dtype=np.float64)
 			et_far_poly    = np.zeros((NT, NT, 4), dtype=np.float64)
 			et_lk_coeff    = np.zeros((NT, NT), dtype=np.float64)
-			et_lambda_self = np.ones((NT, NT), dtype=np.float64) * 3.5
+			et_lambda_self = np.ones((NT, NT), dtype=np.float64) * float(
+				(params.get('LkBall') or {})['lk_lambda_default'])
 			et_R_self      = np.zeros((NT, NT), dtype=np.float64)
 			et_final_w     = np.ones((NT, NT), dtype=np.float64)
 			et_close_flat_comb = np.zeros((NT, NT), dtype=np.float64)
@@ -3516,7 +3537,7 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None,
 			et_close_start = et_close_end = et_close_flat = None
 			et_close_poly = et_far_poly = et_lk_coeff = None
 			et_lambda_self = et_R_self = et_final_w = et_has = None
-		opt_dist = 2.65
+		opt_dist = float(LKB['opt_dist'])
 		ang_sp2 = math.radians(60.0)   # 180 - 120
 		ang_sp3 = math.radians(71.0)   # 180 - 109
 		dih_sp2 = (0.0, math.radians(180.0))
@@ -4202,25 +4223,26 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None,
 		--------
 			tuple: (pi, pj, r, w) NumPy arrays for the matching pair subset
 		'''
+		cp_half = float((params.get('CountPair') or {})['half'])
 		mask = cache['pair_same_res']
 		sel = mask if same_res else ~mask
 		path = cache['pair_cp_path'] if use_cp_rep else cache['pair_path']
 		if same_res:
 			if cp == 'cp3':
 				w = np.where(path <= 2, 0.0,
-					np.where(path == 3, 0.2, 1.0))
+					np.where(path == 3, cp_half, 1.0))
 			else:
 				w = np.where(path <= 3, 0.0,
-					np.where(path == 4, 0.2, 1.0))
+					np.where(path == 4, cp_half, 1.0))
 		else:
 			w = cache['pair_w']
 			if use_cp_rep:
 				if cp == 'cp3':
 					w = np.where(path <= 2, 0.0,
-						np.where(path == 3, 0.2, 1.0))
+						np.where(path == 3, cp_half, 1.0))
 				else:
 					w = np.where(path <= 3, 0.0,
-						np.where(path == 4, 0.2, 1.0))
+						np.where(path == 4, cp_half, 1.0))
 		sel = sel & (w > 0.0)
 		return (cache['pairs_i'][sel], cache['pairs_j'][sel],
 			cache['pair_d'][sel], w[sel])
@@ -4318,6 +4340,10 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None,
 		if len(pi) == 0: return 0.0, 0.0
 		atrE, repE = ljpair(cache, pi, pj, r)
 		return float(np.sum(w * atrE)), float(np.sum(w * repE))
+	# LK far-region switch: Etable takes the bin at
+	# (max_dis - far_offset); both values come from Port('ref15').
+	lk_max = float((params.get('LkBall') or {})['max_dis'])
+	lk_far_lo = float((params.get('LkBall') or {})['far_lo'])
 	def lkisopair(cache, pi, pj, r):
 		'''
 		Return per-direction analytic fa_sol/lk_iso values (one-sided
@@ -4381,8 +4407,8 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None,
 			e_far = f0 + f1 * d + f2 * d * d + f3 * d * d * d
 			e = np.where(d < cs, cf, e_mid)
 			e = np.where((d >= cs) & (d < ce), e_close, e)
-			e = np.where((d >= 4.5) & (d < 6.0), e_far, e)
-			e = np.where(d >= 6.0, 0.0, e)
+			e = np.where((d >= lk_far_lo) & (d < lk_max), e_far, e)
+			e = np.where(d >= lk_max, 0.0, e)
 			return e * fw
 		lki = _eval(ai_safe, aj_safe)
 		lkj = _eval(aj_safe, ai_safe)
@@ -4446,8 +4472,8 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None,
 		e_far = ((f3 * d + f2) * d + f1) * d + f0
 		e = np.where(d < cs, cf, e_mid)
 		e = np.where((d >= cs) & (d < ce), e_close, e)
-		e = np.where((d >= 4.5) & (d < 6.0), e_far, e)
-		e = np.where(d >= 6.0, 0.0, e)
+		e = np.where((d >= lk_far_lo) & (d < lk_max), e_far, e)
+		e = np.where(d >= lk_max, 0.0, e)
 		e = e * fw
 		e = np.where(valid, e, 0.0)
 		return e
@@ -4622,6 +4648,10 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None,
 			   + (b**3 - b) * ypp_psi_grid[:, j_psi]) / 6.0)
 		ypp_phi = periodic_cubic_spline(col_f)
 		return spline_eval_1d(col_f, ypp_phi, fp, n)
+	# Per-call cache. Must not be module-level: the densities come from
+	# `params`, so a global keyed by tricode alone would hand one score
+	# function's tables to the next one constructed in the same process.
+	nrchi_cache = {}
 	def fadun_nrchi_data(tri):
 		'''
 		Load and cache the per-AA non-rotameric chi_last density tables
@@ -4638,13 +4668,12 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None,
 				chi_last_low, chi_last_step, chi_last_n}}, or {} if
 			missing
 		'''
-		if tri in _FADUN_NRCHI_CACHE:
-			return _FADUN_NRCHI_CACHE[tri]
-		from .pose import DBLoad
-		nrchi_db = DBLoad().get('FaDunNrchiDensities', {}) or {}
+		if tri in nrchi_cache:
+			return nrchi_cache[tri]
+		nrchi_db = params.get('FaDunNrchiDensities') or {}
 		aa_entry = nrchi_db.get(tri)
 		if aa_entry is None:
-			_FADUN_NRCHI_CACHE[tri] = {}
+			nrchi_cache[tri] = {}
 			return {}
 		n_disc_chi = int(aa_entry['n_disc_chi'])
 		chi_last_n = int(aa_entry['chi_last_n'])
@@ -4688,7 +4717,7 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None,
 				'ypp_rot':       ypp_rot,
 				'ypp_Prot':      ypp_Prot,
 				'ypp_dens':      ypp_dens}
-		_FADUN_NRCHI_CACHE[tri] = out
+		nrchi_cache[tri] = out
 		return out
 	def fadun_ypp_psi_grid(grid_2d):
 		'''
@@ -4971,6 +5000,8 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None,
 		--------
 			dict: per-category raw and weighted contributions ('sr_bb', 'lr_bb', 'bb_sc', 'sc')
 		'''
+		# sp2/sp3 hbond shape constants, from Port('ref15')
+		HS = params.get('HBondSp2') or {}
 		hb = params.get('HBond_data') or {}
 		if not hb: return {'SR_BB': 0.0, 'LR_BB': 0.0,
 			'BB_SC': 0.0, 'SC': 0.0}
@@ -5020,9 +5051,10 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None,
 			--------
 				float: burial weight
 			'''
-			if n < 7: return 0.1
-			if n > 24: return 0.5
-			return (n - 2.75) * (0.5 / 21.25)
+			BU = (params.get('HBondSp2') or {})['burial']
+			if n < BU['nb_lo']: return BU['w_lo']
+			if n > BU['nb_hi']: return BU['w_hi']
+			return (n - BU['shift']) * BU['slope']
 		donors = []
 		for ai, info in atoms.items():
 			if info[1] not in ('N', 'O'): continue
@@ -5171,7 +5203,9 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None,
 					sin_chi_sign = float(np.dot(np.cross(m1, m2),
 						b2 / max(np.linalg.norm(b2), 1e-12)))
 					chi = math.atan2(sin_chi_sign, cos_chi)
-					d_p = 0.75; m_p = 1.6; l_p = 0.357
+					d_p = float(HS['BAH180_rise'])
+					m_p = float(HS['fade_slope'])
+					l_p = float(HS['outer_width'])
 					PI = math.pi
 					PI_minus_BAH = math.acos(
 						max(-1.0, min(1.0, xH)))
@@ -5205,7 +5239,7 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None,
 						b2 / max(np.linalg.norm(b2), 1e-12)))
 					chi = math.atan2(sin_chi_sign, cos_chi)
 					PI = math.pi
-					max_penalty = 0.125
+					max_penalty = float(HS['max_penalty'])
 					PI_minus_BAH = math.acos(
 						max(-1.0, min(1.0, xH)))
 					BAH = PI - PI_minus_BAH
@@ -5224,11 +5258,11 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None,
 						* (1 + BAH_bonus * chi_scale))
 					e += sp3_acc_penalty
 			input_e = e
-			if input_e > 0.1:
+			if input_e > HS['fade_hi']:
 				continue
-			if input_e > -0.1:
-				e = -0.025 + 0.5 * input_e \
-					- 2.5 * input_e * input_e
+			if input_e > HS['fade_lo']:
+				e = (HS['fade_c0'] + HS['fade_c1'] * input_e
+					+ HS['fade_c2'] * input_e * input_e)
 			w = entry['weight']
 			don_is_bb = atoms[d['D']][0] == 'N'
 			acc_is_bb = atoms[a['A']][0] in ('O', 'OXT', 'OT1', 'OT2')
@@ -5407,7 +5441,7 @@ class Score():
 		# skin). Energy is unchanged (terms apply their own cutoffs); the
 		# skin lets the pair list be reused across small coordinate moves.
 		c = self.Parameters.setdefault('Constants', {})
-		c['fa_max_dis'] = float(c.get('fa_max_dis', 6.0)) + self._skin
+		c['fa_max_dis'] = float(c['fa_max_dis']) + self._skin
 	def __call__(self, pose, ligand=None, decompose=False,
 			xs_override=None, nrot_override=None):
 		'''
@@ -5737,12 +5771,12 @@ class Score():
 		'''
 		weight = float(self.Parameters['FaElec']['weight'])
 		C = self.Parameters['Constants']
-		C0 = float(C.get('coulomb_C0', 322.0637))
-		D = float(C.get('sigmoidal_D', 80.0))
-		D0 = float(C.get('sigmoidal_D0', 6.0))
-		S = float(C.get('sigmoidal_S', 0.4))
-		d_min = float(C.get('fa_elec_min_dis', 1.45))
-		d_max = float(C.get('fa_elec_max_dis', 5.5))
+		C0 = float(C['coulomb_C0'])
+		D = float(C['sigmoidal_D'])
+		D0 = float(C['sigmoidal_D0'])
+		S = float(C['sigmoidal_S'])
+		d_min = float(C['fa_elec_min_dis'])
+		d_max = float(C['fa_elec_max_dis'])
 		q = cache['charges']
 		def diel(d):
 			'''
@@ -6509,6 +6543,8 @@ class Score():
 			      'inter_weighted', 'intra_weighted' (plus 'raw' for full-atom
 			      terms that decompose intra vs inter)
 		'''
+		# OmegaTether's per-residue weight, from Port('ref15')
+		omega_k = float(self.Parameters['Omega']['tether_k'])
 		weight = float(self.Parameters['Omega']['weight'])
 		omega_tab = self.Parameters.get('Omega_tables') or {}
 		if not omega_tab:
@@ -6557,10 +6593,11 @@ class Score():
 			while om_p > 270: om_p -= 360
 			if om_p < 90:
 				dangle = ((om_p - 0 + 180) % 360) - 180
-				raw += 0.01 * dangle * dangle
+				raw += omega_k * dangle * dangle
 				continue
-			if math.isnan(phi): phi = 0.0
-			if math.isnan(psi): psi = 0.0
+			und = float(self.Parameters['Omega']['undefined_torsion'])
+			if math.isnan(phi): phi = und
+			if math.isnan(psi): psi = und
 			if tri == 'GLY': key = 'gly'
 			elif tri == 'PRO': key = 'pro'
 			elif tri in ('ILE', 'VAL'): key = 'valile'
@@ -6605,11 +6642,12 @@ class Score():
 		atoms = pose.data['Atoms']
 		coords = np.asarray(pose.data['Coordinates'])
 		raw = 0.0
-		sd_sq = 0.01
-		trans_mean = math.radians(176.3)
-		trans_sd = math.radians(6.0158)
-		cis_mean = math.radians(-2.9105)
-		cis_sd = math.radians(5.8239)
+		sd_sq = float(self.Parameters['ProClose']['planar_sd']) ** 2
+		PC = self.Parameters.get('ProClose') or {}
+		trans_mean = math.radians(float(PC['trans_chi4_mean']))
+		trans_sd = math.radians(float(PC['trans_chi4_sd']))
+		cis_mean = math.radians(float(PC['cis_chi4_mean']))
+		cis_sd = math.radians(float(PC['cis_chi4_sd']))
 		def place(p, g, gg, bond, theta, phi):
 			'''
 			Place a virtual atom at a fixed bond length, angle, and dihedral from three reference atoms
@@ -6680,12 +6718,13 @@ class Score():
 			ca = coords[name_to_idx['CA']]
 			cg = coords[name_to_idx['CG']]
 			cd = coords[name_to_idx['CD']]
-			nv = place(cd, cg, n, 1.4754, math.radians(77.3), 0.0)
+			nv = place(cd, cg, n, float(PC['nv_d']),
+				math.radians(float(PC['nv_theta'])), 0.0)
 			d2_n_nv = float(np.sum((nv - n) ** 2))
 			raw += d2_n_nv / sd_sq
 			if int(ri) in n_term_set:
-				cav = place(nv, cd, ca, 1.383018,
-					math.radians(65.869), 0.0)
+				cav = place(nv, cd, ca, float(PC['cav_d']),
+					math.radians(float(PC['cav_theta'])), 0.0)
 				d2_ca_cav = float(np.sum((cav - ca) ** 2))
 				raw += d2_ca_cav / sd_sq
 			prev = ri_to_prev.get(int(ri))
@@ -6731,15 +6770,27 @@ class Score():
 		coords = np.asarray(pose.data['Coordinates'])
 		raw = 0.0
 		shift = 2.0
-		mest = math.exp(-20.0)
-		wt_len = wt_ang = wt_dihSS = wt_dihCS = 0.1
-		d_location = 2.01; d_scale = 0.08; d_shape = 6.0
-		a_logA = -419.8120; a_kappa = 419.7; a_mu = 104.22
-		dss_logA1 = -32.9599; dss_kappa1 = 30.9053; dss_mu1 = -86.0964
-		dss_logA2 = -23.3471; dss_kappa2 = 20.9805; dss_mu2 = 92.3915
-		dcs_logA1 = -15.8644; dcs_mu1 = -72.2016; dcs_kappa1 = 13.3778
-		dcs_logA2 = -16.9017; dcs_mu2 =  78.0303; dcs_kappa2 = 13.6370
-		dcs_logA3 = -7.0219;  dcs_mu3 = -172.5505; dcs_kappa3 = 2.9327
+		mest = math.exp(float(
+			self.Parameters['DslfFa13']['mest_log']))
+		# von Mises / skew-normal fits, installed by tools.Port('ref15')
+		# from Rosetta's FullatomDisulfideParams13 constructor.
+		DS = self.Parameters['DslfFa13']
+		wt_len = float(DS['wt_len']); wt_ang = float(DS['wt_ang'])
+		wt_dihSS = float(DS['wt_dihSS'])
+		wt_dihCS = float(DS['wt_dihCS'])
+		d_location = DS['d_location']; d_scale = DS['d_scale']
+		d_shape = DS['d_shape']
+		a_logA = DS['a_logA']; a_kappa = DS['a_kappa']; a_mu = DS['a_mu']
+		dss_logA1 = DS['dss_logA1']; dss_kappa1 = DS['dss_kappa1']
+		dss_mu1 = DS['dss_mu1']
+		dss_logA2 = DS['dss_logA2']; dss_kappa2 = DS['dss_kappa2']
+		dss_mu2 = DS['dss_mu2']
+		dcs_logA1 = DS['dcs_logA1']; dcs_mu1 = DS['dcs_mu1']
+		dcs_kappa1 = DS['dcs_kappa1']
+		dcs_logA2 = DS['dcs_logA2']; dcs_mu2 = DS['dcs_mu2']
+		dcs_kappa2 = DS['dcs_kappa2']
+		dcs_logA3 = DS['dcs_logA3']; dcs_mu3 = DS['dcs_mu3']
+		dcs_kappa3 = DS['dcs_kappa3']
 		def dihedral(a, b, c, d):
 			'''
 			Dihedral angle of four points in degrees
