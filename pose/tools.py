@@ -3201,7 +3201,9 @@ def Port(name='openff'):
 				['TorsionalPenalty',     {}]]}
 		sp['AutoDock Vina'] = block
 	def ref15():
-		'''Port Rosetta REF15 into db['Score Parameters'] + top-level Rotamer Library'''
+		'''Port Rosetta REF15 into db['Score Parameters'] only. The
+		top-level Rotamer Library is never written: it ships with the
+		database and is not Rosetta-owned.'''
 		sp = db.setdefault('Score Parameters', {})
 		ETABLE_ATOM_TYPES = [
 			'CNH2', 'COO', 'CH0', 'CH1', 'CH2', 'CH3', 'aroC', 'Ntrp',
@@ -4337,67 +4339,6 @@ def Port(name='openff'):
 			if len(toks) >= 2:
 				try: p_aa[toks[0]] = float(toks[1])
 				except ValueError: pass
-		# 3g. Rotamer Library (Shapovalov StpDwn_0-0-0 BBDEP2010). 18 AAs
-		# (everything except ALA / GLY). Pure-rotameric or semi-rotameric
-		# distinction is preserved via packed rotwell indexing.
-		# AA -> (n_chi_total, T = rotameric_chi_count, is_semirot)
-		ROTLIB_AA = {
-			'ARG': (4, 4, False), 'ASN': (2, 1, True),
-			'ASP': (2, 1, True),  'CYS': (1, 1, False),
-			'GLN': (3, 2, True),  'GLU': (3, 2, True),
-			'HIS': (2, 1, True),  'ILE': (2, 2, False),
-			'LEU': (2, 2, False), 'LYS': (4, 4, False),
-			'MET': (3, 3, False), 'PHE': (2, 1, True),
-			'PRO': (3, 3, False), 'SER': (1, 1, False),
-			'THR': (1, 1, False), 'TRP': (2, 1, True),
-			'TYR': (2, 1, True),  'VAL': (1, 1, False)}
-		def packrot(rotwell, n_chi, is_semirot, T):
-			'''Pack the rotwell tuple into a single int matching the
-			database CSR row encoding: fully rotameric pads to 4 digits;
-			semi-rotameric uses T digits.'''
-			if is_semirot:
-				acc = 0
-				for k in range(T):
-					acc = acc * 10 + rotwell[k]
-				return acc
-			acc = 0
-			for k in range(4):
-				acc = acc * 10 + rotwell[k]
-			return acc
-		def parserotamers(txt, n_chi, T, is_semirot):
-			'''Parse one bbdep.rotamers.lib text into a CSR table.'''
-			rows_per_cell = [[] for _ in range(36 * 36)]
-			for ln in txt.splitlines():
-				s = ln.strip()
-				if not s or s.startswith('#'): continue
-				parts = s.split()
-				# Cols: T  Phi  Psi  Count  r1 r2 r3 r4 Probabil -log(P)
-				#       chi1..chi4  sig1..sig4
-				phi = float(parts[1]); psi = float(parts[2])
-				if phi == -180.0 or psi == -180.0: continue
-				rotwell = [int(parts[4 + k]) for k in range(4)]
-				P = float(parts[8])
-				mus = [float(parts[10 + k]) for k in range(n_chi)]
-				sigs = [float(parts[14 + k]) for k in range(n_chi)]
-				rot_idx = packrot(rotwell, n_chi, is_semirot, T)
-				pi = int(round((phi + 180.0) / 10.0))
-				ps = int(round((psi + 180.0) / 10.0))
-				if pi >= 36: pi -= 36
-				if ps >= 36: ps -= 36
-				cell = pi * 36 + ps
-				rows_per_cell[cell].append([rot_idx, P] + mus + sigs)
-			bin_offsets = [0]
-			table = []
-			for rows in rows_per_cell:
-				table.extend(rows)
-				bin_offsets.append(len(table))
-			return {'bin_offsets': bin_offsets, 'table': table}
-		rotamer_db = {}
-		for aa3, (n_chi, T, is_semirot) in ROTLIB_AA.items():
-			gz_path = ('rotamer/shapovalov/StpDwn_0-0-0/'
-				+ aa3.lower() + '.bbdep.rotamers.lib.gz')
-			txt = fetchgz(gz_path)
-			rotamer_db[aa3] = parserotamers(txt, n_chi, T, is_semirot)
 		# 3h. FaDunNrchiDensities (8 semi-rotameric AAs).
 		# Schema documented in former port_nrchi.py.
 		NRCHI_AA = [
@@ -4605,24 +4546,6 @@ def Port(name='openff'):
 				['YhhPlanarityPotential',         {}],
 				['RefPotential',                  {}]]}
 		sp['REF15'] = block
-		# Top-level: rotamer library (consumed by FaDunPotential; the
-		# nrchi densities live in the REF15 block). Preserve other top-level
-		# (Nucleotides / Amino Acids / Energy Parameters)
-		# via read-modify-write — only update REF15-owned keys.
-		rl = db.setdefault('Rotamer Library', {})
-		rl.setdefault('format', 'BBDEP2010-shapovalov-StpDwn_0-0-0')
-		rl.setdefault('version', '0-0-0')
-		rl.setdefault('phi_start', -180.0)
-		rl.setdefault('phi_step',  10.0)
-		rl.setdefault('phi_n',     36)
-		rl.setdefault('psi_start', -180.0)
-		rl.setdefault('psi_step',  10.0)
-		rl.setdefault('psi_n',     36)
-		residues_rl = rl.setdefault('residues', {})
-		for aa3, (n_chi, T, is_semirot) in ROTLIB_AA.items():
-			entry = residues_rl.setdefault(aa3, {})
-			entry['n_chi'] = n_chi
-			entry['rotamers'] = rotamer_db[aa3]
 		sp['REF15']['FaDunNrchiDensities'] = nrchi_db
 		# EtablePairParams (pure-Python LJ/LK analytic fit). It lives inside
 		# the REF15 block rather than at the top level so that every
