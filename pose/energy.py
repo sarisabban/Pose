@@ -10,6 +10,7 @@ import copy
 import base64
 import warnings
 import numpy as np
+from operator import itemgetter
 from . import tools
 from .pose import DBLoad
 
@@ -1349,16 +1350,6 @@ class ForceField():
 		np.add.at(forces, l_idx, Fl)
 		return energy, forces
 
-
-
-
-
-
-
-
-
-
-
 class Score():
 	'''
 	Configurable scoring function for protein design and docking
@@ -1400,9 +1391,6 @@ class Score():
 		self._topo_hash = None
 		self._topo_refX = None
 		self._skin = 1.5
-		# build the cache pair list with a Verlet skin (master cutoff +
-		# skin). Energy is unchanged (terms apply their own cutoffs); the
-		# skin lets the pair list be reused across small coordinate moves.
 		c = self.Parameters.setdefault('Constants', {})
 		if 'fa_max_dis' in c:
 			c['fa_max_dis'] = float(c['fa_max_dis']) + self._skin
@@ -1424,11 +1412,6 @@ class Score():
 			unit (REU, kcal/mol, or dimensionless); when decompose=True
 			also returns a per-term breakdown
 		'''
-		# PERF (item 1): topology/geometry split. The cache is keyed on a
-		# topology-only hash (bonds + atom records + AA info, NOT coords).
-		# On a re-score with the same topology, reuse the cached per-atom
-		# typing/charges/params/BFS/pair-list and refresh only geometry
-		# (coords + pair distances) — Verlet-style pair-list reuse.
 		plain = (ligand is None and xs_override is None
 			and nrot_override is None)
 		h = None
@@ -1446,12 +1429,9 @@ class Score():
 		reuse = False
 		if plain and self._topo_cache is not None and self._topo_hash == h:
 			disp = np.sqrt(((X - self._topo_refX) ** 2).sum(1)).max()
-			reuse = disp < 0.5 * self._skin   # Verlet: safe within skin/2
+			reuse = disp < 0.5 * self._skin
 		if reuse:
 			cache = self._topo_cache
-			# refresh geometry from live coords: recompute distances and
-			# LkBall waters. Coordinates are taken as given, matching the
-			# cache-build path and Rosetta itself.
 			Xc = np.asarray(pose.data['Coordinates'], dtype=np.float64)
 			cache['coords'] = Xc
 			cache['pair_d'] = np.linalg.norm(
@@ -1464,13 +1444,10 @@ class Score():
 		else:
 			self._cache = tools.ScoreMatch(pose, self.Parameters, ligand,
 				xs_override, nrot_override)
-			if plain:
+			if plain and 'pairs_i' in self._cache:
 				self._topo_cache = self._cache
 				self._topo_hash = h
 				self._topo_refX = X.copy()
-		# per-score HBond memo: fullatomhbond is requested once by each of
-		# the 4 HBond terms; clear so it is recomputed for these coords,
-		# then computed once and shared across the 4 terms this call.
 		self._cache['_hbond_memo'] = None
 		self._cache['_dihedral_memo'] = {}
 		per_term = {}
@@ -1525,7 +1502,7 @@ class Score():
 		return cache['gausspair'](cache, 'Gauss1')
 	def Gauss2Potential(self, pose, cache, ligand=None, **kw):
 		'''
-		Small-molecule pair Gaussian centred at d=3 Å (long-range), exp(-((d-3)/2)^2)
+		Small-molecule pair Gaussian centred at 3 A
 		Arguments:
 		----------
 			pose:   Pose or Molecule - source pose
@@ -1538,7 +1515,7 @@ class Score():
 		return cache['gausspair'](cache, 'Gauss2')
 	def RepulsionPotential(self, pose, cache, ligand=None, **kw):
 		'''
-		Small-molecule pair repulsion: d^2 where d < 0 (atomic overlap, quadratic penalty)
+		Small-molecule pair repulsion, quadratic in atomic overlap
 		Arguments:
 		----------
 			pose:   Pose or Molecule - source pose
@@ -1548,32 +1525,33 @@ class Score():
 		--------
 			dict: term result with inter/intra raw and weighted
 		'''
+		weight = float(self.Parameters['Repulsion']['weight'])
+		inter_raw, intra_raw = cache['evalpairs'](
+			cache, 'both', self.repulsionkernel)
+		return cache['termresult'](inter_raw, intra_raw, weight)
+	def repulsionkernel(self, ai, aj, rij, c):
+		'''
+		Per-pair kernel for the repulsion typed-pair sum
+		Arguments:
+		----------
+			ai: np.ndarray - per-pair first-atom indices
+			aj: np.ndarray - per-pair second-atom indices
+			rij: np.ndarray - per-pair distance
+			c: dict - the ScoreMatch cache
+		Returns:
+		--------
+			np.ndarray: per-pair repulsion contribution
+		'''
 		p = self.Parameters['Repulsion']
 		offset = float(p['offset']); cutoff = float(p['cutoff'])
-		weight = float(p['weight'])
-		radii = cache['xs_radii_arr']; xs = cache['xs_types']
-		def fn(ai, aj, rij, c):
-			'''
-			Per-pair kernel for the RepulsionPotential typed-pair sum
-			Arguments:
-			----------
-				ai: np.ndarray - per-pair first-atom indices
-				aj: np.ndarray - per-pair second-atom indices
-				rij: np.ndarray - per-pair distance
-				c: np.ndarray - per-pair connectivity weight
-			Returns:
-			--------
-				np.ndarray: per-pair repulsion contribution
-			'''
-			ri = radii[xs[ai]]; rj = radii[xs[aj]]
-			d = rij - (ri + rj + offset)
-			gate = ((xs[ai] >= 0) & (xs[aj] >= 0) & (rij < cutoff))
-			return np.where(gate & (d < 0), d * d, 0.0)
-		inter_raw, intra_raw = cache['evalpairs'](cache, 'both', fn)
-		return cache['termresult'](inter_raw, intra_raw, weight)
+		radii = c['xs_radii_arr']; xs = c['xs_types']
+		ri = radii[xs[ai]]; rj = radii[xs[aj]]
+		d = rij - (ri + rj + offset)
+		gate = ((xs[ai] >= 0) & (xs[aj] >= 0) & (rij < cutoff))
+		return np.where(gate & (d < 0), d * d, 0.0)
 	def HydrophobicPotential(self, pose, cache, ligand=None, **kw):
 		'''
-		Small-molecule hydrophobic-pair slope-step contact (XS-typed hydrophobic pairs)
+		Small-molecule hydrophobic-pair slope-step contact
 		Arguments:
 		----------
 			pose:   Pose or Molecule - source pose
@@ -1624,9 +1602,8 @@ class Score():
 			**kw:   absorbed; per-term methods take no extra kwargs
 		Returns:
 		--------
-			dict: per-term contribution with keys 'inter_raw', 'intra_raw',
-			      'inter_weighted', 'intra_weighted' (plus 'raw' for full-atom
-			      terms that decompose intra vs inter)
+			dict: per-term contribution with inter and intra raw and
+				weighted values, plus 'raw' where the term decomposes
 		'''
 		raw, _ = cache['fullatomljraw'](cache, same_res=False)
 		weight = float(self.Parameters['FaAtr']['weight'])
@@ -1644,9 +1621,8 @@ class Score():
 			**kw:   absorbed; per-term methods take no extra kwargs
 		Returns:
 		--------
-			dict: per-term contribution with keys 'inter_raw', 'intra_raw',
-			      'inter_weighted', 'intra_weighted' (plus 'raw' for full-atom
-			      terms that decompose intra vs inter)
+			dict: per-term contribution with inter and intra raw and
+				weighted values, plus 'raw' where the term decomposes
 		'''
 		_, raw = cache['fullatomljraw'](cache, same_res=False)
 		weight = float(self.Parameters['FaRep']['weight'])
@@ -1664,9 +1640,8 @@ class Score():
 			**kw:   absorbed; per-term methods take no extra kwargs
 		Returns:
 		--------
-			dict: per-term contribution with keys 'inter_raw', 'intra_raw',
-			      'inter_weighted', 'intra_weighted' (plus 'raw' for full-atom
-			      terms that decompose intra vs inter)
+			dict: per-term contribution with inter and intra raw and
+				weighted values, plus 'raw' where the term decomposes
 		'''
 		raw = cache['fullatomsolraw'](cache, same_res=False)
 		weight = float(self.Parameters['FaSol']['weight'])
@@ -1684,9 +1659,8 @@ class Score():
 			**kw:   absorbed; per-term methods take no extra kwargs
 		Returns:
 		--------
-			dict: per-term contribution with keys 'inter_raw', 'intra_raw',
-			      'inter_weighted', 'intra_weighted' (plus 'raw' for full-atom
-			      terms that decompose intra vs inter)
+			dict: per-term contribution with inter and intra raw and
+				weighted values, plus 'raw' where the term decomposes
 		'''
 		pi, pj, r, w = cache['fullatompairs'](cache, same_res=True, cp='cp3')
 		weight = float(self.Parameters['FaIntraRep']['weight'])
@@ -1710,9 +1684,8 @@ class Score():
 			**kw:   absorbed; per-term methods take no extra kwargs
 		Returns:
 		--------
-			dict: per-term contribution with keys 'inter_raw', 'intra_raw',
-			      'inter_weighted', 'intra_weighted' (plus 'raw' for full-atom
-			      terms that decompose intra vs inter)
+			dict: per-term contribution with inter and intra raw and
+				weighted values, plus 'raw' where the term decomposes
 		'''
 		raw = cache['fullatomsolraw'](cache, same_res=True)
 		weight = float(self.Parameters['FaIntraSolXover4']['weight'])
@@ -1730,9 +1703,8 @@ class Score():
 			**kw:   absorbed; per-term methods take no extra kwargs
 		Returns:
 		--------
-			dict: per-term contribution with keys 'inter_raw', 'intra_raw',
-			      'inter_weighted', 'intra_weighted' (plus 'raw' for full-atom
-			      terms that decompose intra vs inter)
+			dict: per-term contribution with inter and intra raw and
+				weighted values, plus 'raw' where the term decomposes
 		'''
 		weight = float(self.Parameters['FaElec']['weight'])
 		C = self.Parameters['Constants']
@@ -1743,96 +1715,115 @@ class Score():
 		d_min = float(C['fa_elec_min_dis'])
 		d_max = float(C['fa_elec_max_dis'])
 		q = cache['charges']
-		def diel(d):
-			'''
-			Sigmoidal distance-dependent dielectric used by FaElec
-			Arguments:
-			----------
-				r: np.ndarray - per-pair distance
-			Returns:
-			--------
-				np.ndarray: per-pair dielectric value
-			'''
-			rS = d * S
-			return D - 0.5 * (D - D0) * (
-				2 + 2 * rS + rS * rS) * np.exp(-rS)
-		def ddiel_dr(d):
-			'''
-			Derivative of the sigmoidal dielectric with respect to r
-			Arguments:
-			----------
-				r: np.ndarray - per-pair distance
-			Returns:
-			--------
-				np.ndarray: per-pair d(dielectric)/dr
-			'''
-			rS = d * S
-			emr = np.exp(-rS)
-			term1 = 2.0 * S + 2.0 * d * S * S
-			term2 = (2.0 + 2.0 * rS + rS * rS) * (-S)
-			return -0.5 * (D - D0) * (term1 + term2) * emr
 		low_start = d_min - 0.25
 		low_end = d_min + 0.25
 		hi_start = d_max - 1.0
 		hi_end = d_max
-		def pair_sum(pi, pj, r, w):
-			'''
-			Per-pair Coulomb summation kernel for FaElec
-			Arguments:
-			----------
-				ai: np.ndarray - per-pair first-atom indices
-				aj: np.ndarray - per-pair second-atom indices
-				rij: np.ndarray - per-pair distance
-				c: np.ndarray - per-pair connectivity weight
-			Returns:
-			--------
-				np.ndarray: per-pair electrostatic contribution
-			'''
-			if len(pi) == 0: return 0.0
-			qq = q[pi] * q[pj]
-			eps_r = diel(r)
-			base = C0 * qq / (eps_r * np.maximum(r, 1e-9))
-			base_at_max = C0 * qq / (diel(d_max) * d_max)
-			e = base - base_at_max
-			e = np.where(r >= d_max, 0.0, e)
-			e_min_clamp = (C0 * qq / (diel(d_min) * d_min)
-				- base_at_max)
-			e = np.where(r < d_min, e_min_clamp, e)
-			in_low = (r >= low_start) & (r < low_end)
-			if np.any(in_low):
-				h_low = low_end - low_start
-				eps_le = diel(low_end)
-				deps_le = ddiel_dr(low_end)
-				v0_low = e_min_clamp
-				v1_low = C0 * qq / (eps_le * low_end) - base_at_max
-				d1_low = -C0 * qq * (eps_le + low_end * deps_le) \
-					/ (low_end * low_end * eps_le * eps_le)
-				t = (r - low_start) / h_low
-				t2 = t * t; t3 = t2 * t
-				H = ((2*t3 - 3*t2 + 1) * v0_low
-					+ (-2*t3 + 3*t2) * v1_low
-					+ (t3 - t2) * h_low * d1_low)
-				e = np.where(in_low, H, e)
-			in_hi = (r >= hi_start) & (r < hi_end)
-			if np.any(in_hi):
-				h_hi = hi_end - hi_start
-				eps_hs = diel(hi_start)
-				deps_hs = ddiel_dr(hi_start)
-				v0_hi = C0 * qq / (eps_hs * hi_start) - base_at_max
-				d0_hi = -C0 * qq * (eps_hs + hi_start * deps_hs) \
-					/ (hi_start * hi_start * eps_hs * eps_hs)
-				t = (r - hi_start) / h_hi
-				t2 = t * t; t3 = t2 * t
-				H = ((2*t3 - 3*t2 + 1) * v0_hi
-					+ (t3 - 2*t2 + t) * h_hi * d0_hi)
-				e = np.where(in_hi, H, e)
-			return float(np.sum(w * e))
 		pi, pj, r, w = cache['fullatompairs'](cache, same_res=False, cp='cp4',
 			use_cp_rep=True)
-		raw = pair_sum(pi, pj, r, w)
+		raw = self.elecpairsum(pi, pj, r, w, C0, D, D0, S,
+			d_max, d_min, hi_end, hi_start, low_end, low_start, q)
 		return {'inter_raw': raw, 'intra_raw': 0.0,
 			'inter_weighted': raw * weight, 'intra_weighted': 0.0,
 			'raw': raw}
+	def elecpairsum(self, pi, pj, r, w, C0, D, D0, S, d_max, d_min,
+			hi_end, hi_start, low_end, low_start, q):
+		'''
+		Per-pair Coulomb summation kernel for FaElec
+		Arguments:
+		----------
+			ai: np.ndarray - per-pair first-atom indices
+			aj: np.ndarray - per-pair second-atom indices
+			rij: np.ndarray - per-pair distance
+			c: np.ndarray - per-pair connectivity weight
+			C0: float - Coulomb prefactor in kJ/mol
+			D: float - bulk dielectric constant
+			D0: float - dielectric at zero separation
+			S: float - sigmoid steepness parameter
+			d_max: float - outer cutoff distance
+			d_min: float - inner clamp distance
+			hi_end: float - end of the upper fade window
+			hi_start: float - start of the upper fade window
+			low_end: float - end of the lower fade window
+			low_start: float - start of the lower fade window
+			q: np.ndarray - per-atom partial charges
+		Returns:
+		--------
+			np.ndarray: per-pair electrostatic contribution
+		'''
+		if len(pi) == 0: return 0.0
+		qq = q[pi] * q[pj]
+		eps_r = self.dielectric(r, D, D0, S)
+		base = C0 * qq / (eps_r * np.maximum(r, 1e-9))
+		base_at_max = C0 * qq / (self.dielectric(d_max, D, D0, S) * d_max)
+		e = base - base_at_max
+		e = np.where(r >= d_max, 0.0, e)
+		e_min_clamp = (C0 * qq / (self.dielectric(d_min, D, D0, S) * d_min)
+			- base_at_max)
+		e = np.where(r < d_min, e_min_clamp, e)
+		in_low = (r >= low_start) & (r < low_end)
+		if np.any(in_low):
+			h_low = low_end - low_start
+			eps_le = self.dielectric(low_end, D, D0, S)
+			deps_le = self.dielectricderivative(low_end, D, D0, S)
+			v0_low = e_min_clamp
+			v1_low = C0 * qq / (eps_le * low_end) - base_at_max
+			d1_low = -C0 * qq * (eps_le + low_end * deps_le) \
+				/ (low_end * low_end * eps_le * eps_le)
+			t = (r - low_start) / h_low
+			t2 = t * t; t3 = t2 * t
+			H = ((2*t3 - 3*t2 + 1) * v0_low
+				+ (-2*t3 + 3*t2) * v1_low
+				+ (t3 - t2) * h_low * d1_low)
+			e = np.where(in_low, H, e)
+		in_hi = (r >= hi_start) & (r < hi_end)
+		if np.any(in_hi):
+			h_hi = hi_end - hi_start
+			eps_hs = self.dielectric(hi_start, D, D0, S)
+			deps_hs = self.dielectricderivative(hi_start, D, D0, S)
+			v0_hi = C0 * qq / (eps_hs * hi_start) - base_at_max
+			d0_hi = -C0 * qq * (eps_hs + hi_start * deps_hs) \
+				/ (hi_start * hi_start * eps_hs * eps_hs)
+			t = (r - hi_start) / h_hi
+			t2 = t * t; t3 = t2 * t
+			H = ((2*t3 - 3*t2 + 1) * v0_hi
+				+ (t3 - 2*t2 + t) * h_hi * d0_hi)
+			e = np.where(in_hi, H, e)
+		return float(np.sum(w * e))
+	def dielectricderivative(self, d, D, D0, S):
+		'''
+		Derivative of the sigmoidal dielectric with respect to r
+		Arguments:
+		----------
+			r: np.ndarray - per-pair distance
+			D: float - bulk dielectric constant
+			D0: float - dielectric at zero separation
+			S: float - sigmoid steepness parameter
+		Returns:
+		--------
+			np.ndarray: per-pair d(dielectric)/dr
+		'''
+		rS = d * S
+		emr = np.exp(-rS)
+		term1 = 2.0 * S + 2.0 * d * S * S
+		term2 = (2.0 + 2.0 * rS + rS * rS) * (-S)
+		return -0.5 * (D - D0) * (term1 + term2) * emr
+	def dielectric(self, d, D, D0, S):
+		'''
+		Sigmoidal distance-dependent dielectric used by FaElec
+		Arguments:
+		----------
+			r: np.ndarray - per-pair distance
+			D: float - bulk dielectric constant
+			D0: float - dielectric at zero separation
+			S: float - sigmoid steepness parameter
+		Returns:
+		--------
+			np.ndarray: per-pair dielectric value
+		'''
+		rS = d * S
+		return D - 0.5 * (D - D0) * (
+			2 + 2 * rS + rS * rS) * np.exp(-rS)
 	def LkBallWtdPotential(self, pose, cache, ligand=None, **kw):
 		'''
 		Lk_ball_wtd - anisotropic LK solvation. For each polar
@@ -1844,9 +1835,8 @@ class Score():
 			**kw:   absorbed; per-term methods take no extra kwargs
 		Returns:
 		--------
-			dict: per-term contribution with keys 'inter_raw', 'intra_raw',
-			      'inter_weighted', 'intra_weighted' (plus 'raw' for full-atom
-			      terms that decompose intra vs inter)
+			dict: per-term contribution with inter and intra raw and
+				weighted values, plus 'raw' where the term decomposes
 		'''
 		weight = float(self.Parameters['LkBallWtd']['weight'])
 		pi, pj, r, w = cache['fullatompairs'](cache, same_res=False, cp='cp4')
@@ -1871,63 +1861,72 @@ class Score():
 		lk_iso_i, lk_iso_j = cache['lkisopair'](cache, pi, pj, r)
 		lk_iso_i = lk_iso_i * w
 		lk_iso_j = lk_iso_j * w
-		def _frac(p_polar, p_other):
-			'''
-			Fractional water-occupancy weight for one LkBallWtd water site
-			Arguments:
-			----------
-				rsq: float - squared distance from heavy atom to water site
-			Returns:
-			--------
-				float: occupancy fraction in [0, 1]
-			'''
-			out = np.zeros(len(p_polar), dtype=np.float64)
-			cnt = water_cnt[p_polar]
-			if not np.any(cnt > 0):
-				return out
-			has = cnt > 0
-			idx = np.where(has)[0]
-			other_xyz = X[p_other[idx]]
-			polar_off = water_off[p_polar[idx]]
-			polar_cnt = water_cnt[p_polar[idx]]
-			d2_low_other = d2_low[p_other[idx]]
-			MFADE = 1.0
-			frac_loc = np.zeros(len(idx), dtype=np.float64)
-			for k in range(len(idx)):
-				off = int(polar_off[k])
-				n_w = int(polar_cnt[k])
-				ws = water_xyz[off:off + n_w]
-				diff = ws - other_xyz[k]
-				d2_arr = np.einsum('ij,ij->i', diff, diff)
-				weighted = -MFADE * math.log(
-					float(np.sum(np.exp(
-						-(d2_arr - d2_low_other[k]) / MFADE))))
-				if weighted >= ramp_w2:
-					frac_loc[k] = 0.0
-				elif weighted <= 0.0:
-					frac_loc[k] = 1.0
-				else:
-					xprime = weighted / ramp_w2
-					frac_loc[k] = (1 - xprime * xprime) ** 2
-			out[idx] = frac_loc
-			return out
 		w_iso_i = w_iso[pi]; w_ball_i = w_ball[pi]
 		nonzero_i = water_cnt[pi] > 0
 		w_iso_j = w_iso[pj]; w_ball_j = w_ball[pj]
 		nonzero_j = water_cnt[pj] > 0
 		total = 0.0
 		if np.any(nonzero_i):
-			frac_i = _frac(pi, pj)
+			frac_i = self.ballfraction(pi, pj, X, d2_low, ramp_w2,
+				water_cnt, water_off, water_xyz)
 			total += float(np.sum(
 				w_iso_i * lk_iso_i + w_ball_i * lk_iso_i * frac_i))
 		if np.any(nonzero_j):
-			frac_j = _frac(pj, pi)
+			frac_j = self.ballfraction(pj, pi, X, d2_low, ramp_w2,
+				water_cnt, water_off, water_xyz)
 			total += float(np.sum(
 				w_iso_j * lk_iso_j + w_ball_j * lk_iso_j * frac_j))
 		raw = total
 		return {'inter_raw': raw, 'intra_raw': 0.0,
 			'inter_weighted': raw * weight, 'intra_weighted': 0.0,
 			'raw': raw}
+	def ballfraction(self, p_polar, p_other, X, d2_low, ramp_w2, water_cnt,
+			water_off, water_xyz):
+		'''
+		Fractional water-occupancy weight for one LkBallWtd water site
+		Arguments:
+		----------
+			rsq: float - squared distance from heavy atom to water site
+			X: np.ndarray - (N, 3) coordinates
+			d2_low: float - squared distance at which occupancy saturates
+			ramp_w2: float - squared width of the occupancy ramp
+			water_cnt: np.ndarray - per-atom virtual water count
+			water_off: np.ndarray - per-atom offset into water_xyz
+			water_xyz: np.ndarray - virtual water coordinates
+		Returns:
+		--------
+			float: occupancy fraction in [0, 1]
+		'''
+		out = np.zeros(len(p_polar), dtype=np.float64)
+		cnt = water_cnt[p_polar]
+		if not np.any(cnt > 0):
+			return out
+		has = cnt > 0
+		idx = np.where(has)[0]
+		other_xyz = X[p_other[idx]]
+		polar_off = water_off[p_polar[idx]]
+		polar_cnt = water_cnt[p_polar[idx]]
+		d2_low_other = d2_low[p_other[idx]]
+		MFADE = 1.0
+		frac_loc = np.zeros(len(idx), dtype=np.float64)
+		for k in range(len(idx)):
+			off = int(polar_off[k])
+			n_w = int(polar_cnt[k])
+			ws = water_xyz[off:off + n_w]
+			diff = ws - other_xyz[k]
+			d2_arr = np.einsum('ij,ij->i', diff, diff)
+			weighted = -MFADE * math.log(
+				float(np.sum(np.exp(
+					-(d2_arr - d2_low_other[k]) / MFADE))))
+			if weighted >= ramp_w2:
+				frac_loc[k] = 0.0
+			elif weighted <= 0.0:
+				frac_loc[k] = 1.0
+			else:
+				xprime = weighted / ramp_w2
+				frac_loc[k] = (1 - xprime * xprime) ** 2
+		out[idx] = frac_loc
+		return out
 	def FaDunPotential(self, pose, cache, ligand=None, **kw):
 		'''
 		Fa_dun - Dunbrack rotamer probability.
@@ -1939,9 +1938,8 @@ class Score():
 			**kw:   absorbed; per-term methods take no extra kwargs
 		Returns:
 		--------
-			dict: per-term contribution with keys 'inter_raw', 'intra_raw',
-			      'inter_weighted', 'intra_weighted' (plus 'raw' for full-atom
-			      terms that decompose intra vs inter)
+			dict: per-term contribution with inter and intra raw and
+				weighted values, plus 'raw' where the term decomposes
 		'''
 		weight = float(self.Parameters['FaDun']['weight'])
 		per_res = kw.get('per_res')
@@ -1964,395 +1962,438 @@ class Score():
 		LOG_2PI = math.log(2.0 * math.pi)
 		raw = 0.0
 		for ri, info in aas.items():
-			tri = info[5] if len(info) >= 6 else None
-			if tri == 'HIS_D': tri = 'HIS'
-			entry = residues_db.get(tri)
-			if entry is None: continue
-			n_chi = int(entry.get('n_chi', 0))
-			if n_chi <= 0: continue
-			try:
-				phi = cache['cdih'](pose, int(ri), 'PHI')
-				psi = cache['cdih'](pose, int(ri), 'PSI')
-			except Exception:
-				phi = float('nan'); psi = float('nan')
-			if math.isnan(phi): phi = -90.0
-			if math.isnan(psi): psi = 130.0
-			fp = (phi - phi_start) / phi_step
-			fs = (psi - psi_start) / psi_step
-			ip0 = int(math.floor(fp))
-			js0 = int(math.floor(fs))
-			tp = fp - ip0
-			ts = fs - js0
-			rot = entry['rotamers']
-			offs = rot['bin_offsets']
-			tbl = rot['table']
-			chi_now = []
-			bad = False
-			for ci in range(n_chi):
-				try:
-					v = pose.GetDihedral(int(ri),
-						'CHI', chi_type=ci+1)
-				except Exception:
-					bad = True; break
-				if math.isnan(v): bad = True; break
-				chi_now.append(v)
-			if bad: continue
-			def binchi(c):
-				'''
-				Place a chi angle into one of the rotamer wells defined by the FaDun table
-				Arguments:
-				----------
-					chi: float - chi angle in degrees
-					wells: list - per-row rotamer-well centre angles
-				Returns:
-				--------
-					int: index of the matching well
-				'''
-				c = ((c + 180.0) % 360.0) - 180.0
-				if 0.0 <= c <= 120.0: return 1
-				if abs(c) >= 120.0: return 2
-				return 3
-			SEMI_ROT = ('ASP','ASN','GLU','GLN','PHE','TYR','TRP','HIS')
-			n_rot = n_chi - 1 if tri in SEMI_ROT else n_chi
-			if tri in SEMI_ROT:
-				nrdata = cache['fadun_nrchi_data'](tri)
-				if nrdata:
-					rot_bins = tuple(binchi(chi_now[k])
-						for k in range(n_rot))
-					chi_last = chi_now[n_chi - 1]
-					clow = nrdata['chi_last_low']
-					cstep = nrdata['chi_last_step']
-					cn = nrdata['chi_last_n']
-					chigh = clow + cn * cstep
-					if (chigh - clow) < 360.0 - 1e-6:
-						while chi_last < clow:
-							chi_last += 180.0
-						while chi_last >= chigh:
-							chi_last -= 180.0
-					else:
-						chi_last = ((chi_last + 180.0) % 360.0) - 180.0
-					nlr, mus_v, sigs_v, nld = \
-						cache['fadun_nrchi_eval'](tri, rot_bins,
-							phi, psi, chi_last)
-					if nlr is not None:
-						dev_v = 0.0
-						for ci in range(n_rot):
-							d = ((chi_now[ci] - mus_v[ci] + 180.0)
-								% 360.0) - 180.0
-							dev_v += (d / sigs_v[ci]) ** 2
-						contrib = nlr + nld + 0.5 * dev_v
-						raw += contrib
-						if per_res is not None:
-							per_res[int(ri)] = contrib
-						continue
-			if tri not in SEMI_ROT:
-				grids = cache['fadun_rotwell_grid'](
-					tri, n_chi, residues_db)
-				if tri == 'PRO':
-					rot_bins = [
-						(1 if chi_now[k] > 0 else 2) if k == 0 else 1
-						for k in range(n_chi)]
-				else:
-					rot_bins = [binchi(chi_now[k])
-						for k in range(n_chi)]
-				rot_idx_now = sum(rot_bins[k] * (10 ** (3 - k))
-					for k in range(n_chi))
-				grid = grids.get(rot_idx_now)
-				if grid is not None and grid['has_data'].any():
-					MAXE_NL = math.log(1e6)
-					neg_log_P_v = cache['fadun_spline_eval'](
-						grid['neglogP'],
-						grid['neglogP_ypp_psi'], fp, fs)
-					neg_log_P_v = min(MAXE_NL, neg_log_P_v)
-					ip0 = int(math.floor(fp))
-					js0 = int(math.floor(fs))
-					tp = fp - ip0
-					ts = fs - js0
-					w00 = (1 - tp) * (1 - ts)
-					w10 = tp * (1 - ts)
-					w01 = (1 - tp) * ts
-					w11 = tp * ts
-					ip0m = ip0 % 36; ip1m = (ip0 + 1) % 36
-					js0m = js0 % 36; js1m = (js0 + 1) % 36
-					mus_v = []
-					sigs_v = []
-					for ci in range(n_chi):
-						mg = grid['mu'][ci]
-						sg = grid['sd'][ci]
-						a = mg[ip0m, js0m]
-						b = mg[ip1m, js0m]
-						c = mg[ip0m, js1m]
-						d = mg[ip1m, js1m]
-						b_u = a + ((b - a + 180.0) % 360.0 - 180.0)
-						c_u = a + ((c - a + 180.0) % 360.0 - 180.0)
-						d_u = a + ((d - a + 180.0) % 360.0 - 180.0)
-						mus_v.append(w00 * a + w10 * b_u
-							+ w01 * c_u + w11 * d_u)
-						sigs_v.append(max(
-							w00 * sg[ip0m, js0m]
-							+ w10 * sg[ip1m, js0m]
-							+ w01 * sg[ip0m, js1m]
-							+ w11 * sg[ip1m, js1m], SIG_MIN))
-					dev_v = 0.0
-					for ci in range(n_chi):
-						d = ((chi_now[ci] - mus_v[ci] + 180.0)
-							% 360.0) - 180.0
-						dev_v += (d / sigs_v[ci]) ** 2
-					contrib = neg_log_P_v + 0.5 * dev_v
-					raw += contrib
-					if per_res is not None:
-						per_res[int(ri)] = contrib
-					continue
-			if tri == 'PRO':
-				rotwell_now = tuple(
-					(1 if chi_now[k] > 0 else 2) if k == 0 else 1
-					for k in range(n_rot))
-			else:
-				rotwell_now = tuple(binchi(chi_now[k])
-					for k in range(n_rot))
-			def cellrows(i_phi, i_psi):
-				'''
-				Return FaDun rotamer-table rows for the (phi_cell, psi_cell) bin
-				Arguments:
-				----------
-					phi_cell: int - phi grid index
-					psi_cell: int - psi grid index
-				Returns:
-				--------
-					list: rotamer rows associated with the bin
-				'''
-				bi = (i_phi % phi_n) * psi_n + (i_psi % psi_n)
-				if bi + 1 >= len(offs): return []
-				return tbl[offs[bi]:offs[bi+1]]
-			def rowwell(r2):
-				'''
-				Pull rotamer-well mu and sigma values for one row of the FaDun table
-				Arguments:
-				----------
-					row: dict - one FaDun row entry
-				Returns:
-				--------
-					tuple: (mu_arr, sigma_arr) over the row chi angles
-				'''
-				rw = []
-				for ci in range(n_rot):
-					mu = r2[2 + ci]
-					if tri == 'PRO':
-						b = (1 if mu > 0 else 2) if ci == 0 else 1
-					else:
-						b = binchi(mu)
-					rw.append(b)
-				return tuple(rw)
-			def cellmatch(rows_):
-				'''
-				Match a chi vector to the closest rotamer well in a (phi, psi) cell
-				Arguments:
-				----------
-					cell_rows: list - rotamer rows for this cell
-					chi: np.ndarray - observed chi angles
-				Returns:
-				--------
-					tuple: (best_row, best_well_index, distance)
-				'''
-				if n_rot == n_chi:
-					ent = 0.0
-					for r2 in rows_:
-						if r2[1] > 0.0:
-							ent += r2[1] * math.log(r2[1])
-					cand = [r2 for r2 in rows_
-						if r2[1] > 0.0
-						and rowwell(r2) == rotwell_now]
-					if not cand: return (0.0, None, None, ent)
-					match = max(cand, key=lambda r2: r2[1])
-					mus = [match[2 + ci] for ci in range(n_chi)]
-					sigs = [match[2 + n_chi + ci]
-						for ci in range(n_chi)]
-					return (match[1], mus, sigs, ent)
-				groups = {}
-				for r2 in rows_:
-					if r2[1] <= 0.0: continue
-					groups.setdefault(rowwell(r2), []).append(r2)
-				ent = 0.0
-				for grows in groups.values():
-					Pg = sum(r2[1] for r2 in grows)
-					if Pg > 0.0: ent += Pg * math.log(Pg)
-				if rotwell_now not in groups:
-					return (0.0, None, None, ent)
-				grp = groups[rotwell_now]
-				P_rotwell = sum(r2[1] for r2 in grp)
-				chi_last = chi_now[n_chi - 1]
-				def unwrap_to(c, ref):
-					'''
-					Add multiples of 360 to bring angle close to an anchor
-					Arguments:
-					----------
-						x: float - angle to unwrap (degrees)
-						anchor: float - reference angle
-					Returns:
-					--------
-						float: x +/- k*360 closest to anchor
-					'''
-					return ref + ((c - ref + 180.0) % 360.0 - 180.0)
-				pts = sorted(((unwrap_to(r2[2 + (n_chi-1)],
-					chi_last), r2) for r2 in grp),
-					key=lambda x: x[0])
-				cls = [pt[0] for pt in pts]
-				prs = [pt[1] for pt in pts]
-				P_eff = None
-				for k in range(len(cls) - 1):
-					if cls[k] <= chi_last <= cls[k+1]:
-						span = cls[k+1] - cls[k]
-						if span <= 0:
-							P_eff = prs[k][1]
-						else:
-							t = (chi_last - cls[k]) / span
-							P_eff = (1 - t) * prs[k][1] \
-								+ t * prs[k+1][1]
-						break
-				if P_eff is None:
-					P_eff = prs[0][1] if abs(chi_last - cls[0]) < \
-						abs(chi_last - cls[-1]) else prs[-1][1]
-				match = max(grp, key=lambda r2: r2[1])
-				mus = [match[2 + ci] for ci in range(n_chi)]
-				sigs = [match[2 + n_chi + ci]
-					for ci in range(n_chi)]
-				return (P_eff, mus, sigs, ent)
-			def crom(p0, p1, p2, p3, t):
-				'''
-				1D Catmull-Rom interpolation over four equally spaced samples
-				Arguments:
-				----------
-					p0: float - sample at t = -1
-					p1: float - sample at t = 0
-					p2: float - sample at t = +1
-					p3: float - sample at t = +2
-					t: float - interpolation parameter in [0, 1]
-				Returns:
-				--------
-					float: interpolated value at t
-				'''
-				return 0.5 * ((2 * p1) + (-p0 + p2) * t
-					+ (2*p0 - 5*p1 + 4*p2 - p3) * t * t
-					+ (-p0 + 3*p1 - 3*p2 + p3) * t * t * t)
-			samples = [[None]*4 for _ in range(4)]
-			for di in range(4):
-				for dj in range(4):
-					ip = ip0 - 1 + di
-					js = js0 - 1 + dj
-					samples[di][dj] = cellmatch(cellrows(ip, js))
-			ref_p, ref_mu, ref_sig, _ = samples[1][1]
-			if ref_mu is None:
-				for di in range(4):
-					for dj in range(4):
-						if samples[di][dj][1] is not None:
-							ref_mu = samples[di][dj][1]
-							break
-					if ref_mu is not None: break
-			if ref_mu is None:
-				best_dev = None; best_row = None
-				for r2 in cellrows(ip0, js0):
-					if r2[1] <= 0.0: continue
-					dv = 0.0
-					for ci in range(n_rot):
-						mu = r2[2 + ci]
-						sig = r2[2 + n_chi + ci]
-						if sig < SIG_MIN: sig = SIG_MIN
-						d = ((chi_now[ci] - mu + 180.0)
-							% 360.0) - 180.0
-						dv += (d / sig) ** 2
-					if best_dev is None or dv < best_dev:
-						best_dev = dv; best_row = r2
-				if best_row is None: continue
-				P_k = best_row[1]
-				dev = best_dev
-				cent = 0.0
-				cgroups = {}
-				for r2 in cellrows(ip0, js0):
-					if r2[1] <= 0.0: continue
-					cgroups.setdefault(rowwell(r2), 0.0)
-					cgroups[rowwell(r2)] += r2[1]
-				for Pg in cgroups.values():
-					if Pg > 0: cent += Pg * math.log(Pg)
-				contrib = -math.log(P_k) + 0.5 * dev
-				raw += contrib
-				if per_res is not None:
-					per_res[int(ri)] = contrib
-				continue
-			def unwrap(mu_arr, ref):
-				'''
-				Unwrap a 1D periodic angle sequence so consecutive samples are within +/-180 degrees
-				Arguments:
-				----------
-					arr: np.ndarray - 1D array of angles in degrees
-				Returns:
-				--------
-					np.ndarray: unwrapped copy of arr
-				'''
-				out = []
-				for m in mu_arr:
-					d = ((m - ref + 180.0) % 360.0) - 180.0
-					out.append(ref + d)
-				return out
-			MAXE = 18.0
-			neg_log_P = [[MAXE]*4 for _ in range(4)]
-			mu_grid = [[None]*4 for _ in range(4)]
-			sig_grid = [[None]*4 for _ in range(4)]
-			ent_grid = [[0.0]*4 for _ in range(4)]
-			for di in range(4):
-				for dj in range(4):
-					Pk, mus, sigs, ent = samples[di][dj]
-					ent_grid[di][dj] = ent
-					if Pk > 0.0:
-						neg_log_P[di][dj] = -math.log(Pk)
-						# unwrap mus toward ref
-						mu_grid[di][dj] = unwrap(mus, ref_mu[0]) \
-							if ref_mu else mus
-						sig_grid[di][dj] = sigs
-					else:
-						mu_grid[di][dj] = list(ref_mu) \
-							if ref_mu else [0.0]*n_chi
-						sig_grid[di][dj] = list(ref_sig) \
-							if ref_sig else [SIG_MIN]*n_chi
-			def crom2d(grid, tp, ts):
-				'''
-				2D bicubic Catmull-Rom interpolation over a 4x4 sample grid
-				Arguments:
-				----------
-					grid: np.ndarray - 4x4 sample values
-					tx: float - x-direction parameter in [0, 1]
-					ty: float - y-direction parameter in [0, 1]
-				Returns:
-				--------
-					float: interpolated value at (tx, ty)
-				'''
-				cols = []
-				for di in range(4):
-					row = grid[di]
-					cols.append(crom(row[0], row[1], row[2], row[3], ts))
-				return crom(cols[0], cols[1], cols[2], cols[3], tp)
-			neg_log_P_i = crom2d(neg_log_P, tp, ts)
-			ent_i = crom2d(ent_grid, tp, ts)
-			mu_i = []
-			sig_i = []
-			for ci in range(n_chi):
-				gm = [[mu_grid[di][dj][ci]
-					for dj in range(4)] for di in range(4)]
-				gs = [[sig_grid[di][dj][ci]
-					for dj in range(4)] for di in range(4)]
-				mu_i.append(crom2d(gm, tp, ts))
-				sig_i.append(max(crom2d(gs, tp, ts), SIG_MIN))
-			dev = 0.0
-			for ci in range(n_rot):
-				d = ((chi_now[ci] - mu_i[ci] + 180.0)
-					% 360.0) - 180.0
-				dev += (d / sig_i[ci]) ** 2
-			E_r = neg_log_P_i + 0.5 * dev
-			raw += E_r
-			if per_res is not None:
-				per_res[int(ri)] = E_r
+			raw = self.residuerotamer(raw, ri, info, cache, pose,
+				per_res, residues_db, phi_n, phi_start, phi_step,
+				psi_n, psi_start, psi_step, SIG_MIN)
 		return {'inter_raw': 0.0, 'intra_raw': raw,
 			'inter_weighted': 0.0, 'intra_weighted': raw * weight,
 			'raw': raw}
+	def residuerotamer(self, raw, ri, info, cache, pose, per_res,
+			residues_db, phi_n, phi_start, phi_step, psi_n, psi_start,
+			psi_step, SIG_MIN):
+		'''
+		Rotamer energy contribution of one residue
+		Arguments:
+		----------
+			raw: float - the running rotamer energy total
+			ri: int - residue index
+			info: list - the residue record from data['Amino Acids']
+			cache: dict - cache returned by ScoreMatch()
+			pose: Pose - the source pose
+			per_res: dict - per-residue energies, filled in place
+			residues_db: dict - the rotamer library residue table
+			phi_n: int - number of phi bins
+			phi_start: float - first phi bin centre in degrees
+			phi_step: float - phi bin width in degrees
+			psi_n: int - number of psi bins
+			psi_start: float - first psi bin centre in degrees
+			psi_step: float - psi bin width in degrees
+			SIG_MIN: float - lower clamp on a rotamer sigma
+		Returns:
+		--------
+			float: the running total plus this residue's contribution
+		'''
+		tri = info[5] if len(info) >= 6 else None
+		if tri == 'HIS_D': tri = 'HIS'
+		entry = residues_db.get(tri)
+		if entry is None: return raw
+		n_chi = int(entry.get('n_chi', 0))
+		if n_chi <= 0: return raw
+		try:
+			phi = cache['cdih'](pose, int(ri), 'PHI')
+			psi = cache['cdih'](pose, int(ri), 'PSI')
+		except Exception:
+			phi = float('nan'); psi = float('nan')
+		if math.isnan(phi): phi = -90.0
+		if math.isnan(psi): psi = 130.0
+		fp = (phi - phi_start) / phi_step
+		fs = (psi - psi_start) / psi_step
+		ip0 = int(math.floor(fp))
+		js0 = int(math.floor(fs))
+		tp = fp - ip0
+		ts = fs - js0
+		rot = entry['rotamers']
+		offs = rot['bin_offsets']
+		tbl = rot['table']
+		chi_now = []
+		bad = False
+		for ci in range(n_chi):
+			try:
+				v = pose.GetDihedral(int(ri),
+					'CHI', chi_type=ci+1)
+			except Exception:
+				bad = True; break
+			if math.isnan(v): bad = True; break
+			chi_now.append(v)
+		if bad: return raw
+		SEMI_ROT = ('ASP','ASN','GLU','GLN','PHE','TYR','TRP','HIS')
+		n_rot = n_chi - 1 if tri in SEMI_ROT else n_chi
+		if tri in SEMI_ROT:
+			nrdata = cache['fadun_nrchi_data'](tri)
+			if nrdata:
+				rot_bins = tuple(self.binchi(chi_now[k])
+					for k in range(n_rot))
+				chi_last = chi_now[n_chi - 1]
+				clow = nrdata['chi_last_low']
+				cstep = nrdata['chi_last_step']
+				cn = nrdata['chi_last_n']
+				chigh = clow + cn * cstep
+				if (chigh - clow) < 360.0 - 1e-6:
+					while chi_last < clow:
+						chi_last += 180.0
+					while chi_last >= chigh:
+						chi_last -= 180.0
+				else:
+					chi_last = ((chi_last + 180.0) % 360.0) - 180.0
+				nlr, mus_v, sigs_v, nld = \
+					cache['fadun_nrchi_eval'](tri, rot_bins,
+						phi, psi, chi_last)
+				if nlr is not None:
+					dev_v = 0.0
+					for ci in range(n_rot):
+						d = ((chi_now[ci] - mus_v[ci] + 180.0)
+							% 360.0) - 180.0
+						dev_v += (d / sigs_v[ci]) ** 2
+					contrib = nlr + nld + 0.5 * dev_v
+					raw += contrib
+					if per_res is not None:
+						per_res[int(ri)] = contrib
+					return raw
+		if tri not in SEMI_ROT:
+			grids = cache['fadun_rotwell_grid'](
+				tri, n_chi, residues_db)
+			if tri == 'PRO':
+				rot_bins = [
+					(1 if chi_now[k] > 0 else 2) if k == 0 else 1
+					for k in range(n_chi)]
+			else:
+				rot_bins = [self.binchi(chi_now[k])
+					for k in range(n_chi)]
+			rot_idx_now = sum(rot_bins[k] * (10 ** (3 - k))
+				for k in range(n_chi))
+			grid = grids.get(rot_idx_now)
+			if grid is not None and grid['has_data'].any():
+				MAXE_NL = math.log(1e6)
+				neg_log_P_v = cache['fadun_spline_eval'](
+					grid['neglogP'],
+					grid['neglogP_ypp_psi'], fp, fs)
+				neg_log_P_v = min(MAXE_NL, neg_log_P_v)
+				ip0 = int(math.floor(fp))
+				js0 = int(math.floor(fs))
+				tp = fp - ip0
+				ts = fs - js0
+				w00 = (1 - tp) * (1 - ts)
+				w10 = tp * (1 - ts)
+				w01 = (1 - tp) * ts
+				w11 = tp * ts
+				ip0m = ip0 % 36; ip1m = (ip0 + 1) % 36
+				js0m = js0 % 36; js1m = (js0 + 1) % 36
+				mus_v = []
+				sigs_v = []
+				for ci in range(n_chi):
+					mg = grid['mu'][ci]
+					sg = grid['sd'][ci]
+					a = mg[ip0m, js0m]
+					b = mg[ip1m, js0m]
+					c = mg[ip0m, js1m]
+					d = mg[ip1m, js1m]
+					b_u = a + ((b - a + 180.0) % 360.0 - 180.0)
+					c_u = a + ((c - a + 180.0) % 360.0 - 180.0)
+					d_u = a + ((d - a + 180.0) % 360.0 - 180.0)
+					mus_v.append(w00 * a + w10 * b_u
+						+ w01 * c_u + w11 * d_u)
+					sigs_v.append(max(
+						w00 * sg[ip0m, js0m]
+						+ w10 * sg[ip1m, js0m]
+						+ w01 * sg[ip0m, js1m]
+						+ w11 * sg[ip1m, js1m], SIG_MIN))
+				dev_v = 0.0
+				for ci in range(n_chi):
+					d = ((chi_now[ci] - mus_v[ci] + 180.0)
+						% 360.0) - 180.0
+					dev_v += (d / sigs_v[ci]) ** 2
+				contrib = neg_log_P_v + 0.5 * dev_v
+				raw += contrib
+				if per_res is not None:
+					per_res[int(ri)] = contrib
+				return raw
+		if tri == 'PRO':
+			rotwell_now = tuple(
+				(1 if chi_now[k] > 0 else 2) if k == 0 else 1
+				for k in range(n_rot))
+		else:
+			rotwell_now = tuple(self.binchi(chi_now[k])
+				for k in range(n_rot))
+		samples = [[None]*4 for _ in range(4)]
+		for di in range(4):
+			for dj in range(4):
+				ip = ip0 - 1 + di
+				js = js0 - 1 + dj
+				samples[di][dj] = self.cellmatch(
+					self.cellrows(ip, js, offs, phi_n, psi_n, tbl),
+					chi_now, n_chi, n_rot, rotwell_now, tri)
+		ref_p, ref_mu, ref_sig, _ = samples[1][1]
+		if ref_mu is None:
+			for di in range(4):
+				for dj in range(4):
+					if samples[di][dj][1] is not None:
+						ref_mu = samples[di][dj][1]
+						break
+				if ref_mu is not None: break
+		if ref_mu is None:
+			best_dev = None; best_row = None
+			for r2 in self.cellrows(ip0, js0, offs,
+					phi_n, psi_n, tbl):
+				if r2[1] <= 0.0: continue
+				dv = 0.0
+				for ci in range(n_rot):
+					mu = r2[2 + ci]
+					sig = r2[2 + n_chi + ci]
+					if sig < SIG_MIN: sig = SIG_MIN
+					d = ((chi_now[ci] - mu + 180.0)
+						% 360.0) - 180.0
+					dv += (d / sig) ** 2
+				if best_dev is None or dv < best_dev:
+					best_dev = dv; best_row = r2
+			if best_row is None: return raw
+			P_k = best_row[1]
+			dev = best_dev
+			cent = 0.0
+			cgroups = {}
+			for r2 in self.cellrows(ip0, js0, offs,
+					phi_n, psi_n, tbl):
+				if r2[1] <= 0.0: continue
+				cgroups.setdefault(self.rowwell(r2, n_rot, tri), 0.0)
+				cgroups[self.rowwell(r2, n_rot, tri)] += r2[1]
+			for Pg in cgroups.values():
+				if Pg > 0: cent += Pg * math.log(Pg)
+			contrib = -math.log(P_k) + 0.5 * dev
+			raw += contrib
+			if per_res is not None:
+				per_res[int(ri)] = contrib
+			return raw
+		MAXE = 18.0
+		neg_log_P = [[MAXE]*4 for _ in range(4)]
+		mu_grid = [[None]*4 for _ in range(4)]
+		sig_grid = [[None]*4 for _ in range(4)]
+		ent_grid = [[0.0]*4 for _ in range(4)]
+		for di in range(4):
+			for dj in range(4):
+				Pk, mus, sigs, ent = samples[di][dj]
+				ent_grid[di][dj] = ent
+				if Pk > 0.0:
+					neg_log_P[di][dj] = -math.log(Pk)
+					mu_grid[di][dj] = self.unwrap(mus, ref_mu[0]) \
+						if ref_mu else mus
+					sig_grid[di][dj] = sigs
+				else:
+					mu_grid[di][dj] = list(ref_mu) \
+						if ref_mu else [0.0]*n_chi
+					sig_grid[di][dj] = list(ref_sig) \
+						if ref_sig else [SIG_MIN]*n_chi
+		neg_log_P_i = self.crom2d(neg_log_P, tp, ts)
+		ent_i = self.crom2d(ent_grid, tp, ts)
+		mu_i = []
+		sig_i = []
+		for ci in range(n_chi):
+			gm = [[mu_grid[di][dj][ci]
+				for dj in range(4)] for di in range(4)]
+			gs = [[sig_grid[di][dj][ci]
+				for dj in range(4)] for di in range(4)]
+			mu_i.append(self.crom2d(gm, tp, ts))
+			sig_i.append(max(self.crom2d(gs, tp, ts), SIG_MIN))
+		dev = 0.0
+		for ci in range(n_rot):
+			d = ((chi_now[ci] - mu_i[ci] + 180.0)
+				% 360.0) - 180.0
+			dev += (d / sig_i[ci]) ** 2
+		E_r = neg_log_P_i + 0.5 * dev
+		raw += E_r
+		if per_res is not None:
+			per_res[int(ri)] = E_r
+		return raw
+	def cellrows(self, i_phi, i_psi, offs, phi_n, psi_n, tbl):
+		'''
+		Return FaDun rotamer-table rows for the (phi_cell, psi_cell) bin
+		Arguments:
+		----------
+			phi_cell: int - phi grid index
+			psi_cell: int - psi grid index
+			offs: np.ndarray - row offsets into the rotamer table
+			phi_n: int - number of phi bins
+			psi_n: int - number of psi bins
+			tbl: np.ndarray - the packed rotamer table
+		Returns:
+		--------
+			list: rotamer rows associated with the bin
+		'''
+		bi = (i_phi % phi_n) * psi_n + (i_psi % psi_n)
+		if bi + 1 >= len(offs): return []
+		return tbl[offs[bi]:offs[bi+1]]
+	def cellmatch(self, rows_, chi_now, n_chi, n_rot, rotwell_now, tri):
+		'''
+		Match a chi vector to the closest rotamer well in a (phi, psi) cell
+		Arguments:
+		----------
+			cell_rows: list - rotamer rows for this cell
+			chi: np.ndarray - observed chi angles
+			chi_now: list - current chi angles in degrees
+			n_chi: int - number of chi angles for this residue
+			n_rot: int - number of rotamer wells for this residue
+			rotwell_now: tuple - the current rotamer well indices
+			tri: str - residue tricode
+		Returns:
+		--------
+			tuple: (best_row, best_well_index, distance)
+		'''
+		if n_rot == n_chi:
+			ent = 0.0
+			for r2 in rows_:
+				if r2[1] > 0.0:
+					ent += r2[1] * math.log(r2[1])
+			cand = [r2 for r2 in rows_
+				if r2[1] > 0.0
+				and self.rowwell(r2, n_rot, tri) == rotwell_now]
+			if not cand: return (0.0, None, None, ent)
+			match = max(cand, key=itemgetter(1))
+			mus = [match[2 + ci] for ci in range(n_chi)]
+			sigs = [match[2 + n_chi + ci]
+				for ci in range(n_chi)]
+			return (match[1], mus, sigs, ent)
+		groups = {}
+		for r2 in rows_:
+			if r2[1] <= 0.0: continue
+			groups.setdefault(self.rowwell(r2, n_rot, tri), []).append(r2)
+		ent = 0.0
+		for grows in groups.values():
+			Pg = sum(r2[1] for r2 in grows)
+			if Pg > 0.0: ent += Pg * math.log(Pg)
+		if rotwell_now not in groups:
+			return (0.0, None, None, ent)
+		grp = groups[rotwell_now]
+		P_rotwell = sum(r2[1] for r2 in grp)
+		chi_last = chi_now[n_chi - 1]
+		pts = sorted(((self.unwrapto(r2[2 + (n_chi-1)],
+			chi_last), r2) for r2 in grp),
+			key=itemgetter(0))
+		cls = [pt[0] for pt in pts]
+		prs = [pt[1] for pt in pts]
+		P_eff = None
+		for k in range(len(cls) - 1):
+			if cls[k] <= chi_last <= cls[k+1]:
+				span = cls[k+1] - cls[k]
+				if span <= 0:
+					P_eff = prs[k][1]
+				else:
+					t = (chi_last - cls[k]) / span
+					P_eff = (1 - t) * prs[k][1] \
+						+ t * prs[k+1][1]
+				break
+		if P_eff is None:
+			P_eff = prs[0][1] if abs(chi_last - cls[0]) < \
+				abs(chi_last - cls[-1]) else prs[-1][1]
+		match = max(grp, key=itemgetter(1))
+		mus = [match[2 + ci] for ci in range(n_chi)]
+		sigs = [match[2 + n_chi + ci]
+			for ci in range(n_chi)]
+		return (P_eff, mus, sigs, ent)
+	def unwrapto(self, c, ref):
+		'''
+		Add multiples of 360 to bring angle close to an anchor
+		Arguments:
+		----------
+			x: float - angle to unwrap (degrees)
+			anchor: float - reference angle
+		Returns:
+		--------
+			float: x +/- k*360 closest to anchor
+		'''
+		return ref + ((c - ref + 180.0) % 360.0 - 180.0)
+	def rowwell(self, r2, n_rot, tri):
+		'''
+		Pull rotamer-well mu and sigma values for one row of the FaDun table
+		Arguments:
+		----------
+			row: dict - one FaDun row entry
+			n_rot: int - number of rotamer wells for this residue
+			tri: str - residue tricode
+		Returns:
+		--------
+			tuple: (mu_arr, sigma_arr) over the row chi angles
+		'''
+		rw = []
+		for ci in range(n_rot):
+			mu = r2[2 + ci]
+			if tri == 'PRO':
+				b = (1 if mu > 0 else 2) if ci == 0 else 1
+			else:
+				b = self.binchi(mu)
+			rw.append(b)
+		return tuple(rw)
+	def crom2d(self, grid, tp, ts):
+		'''
+		2D bicubic Catmull-Rom interpolation over a 4x4 sample grid
+		Arguments:
+		----------
+			grid: np.ndarray - 4x4 sample values
+			tx: float - x-direction parameter in [0, 1]
+			ty: float - y-direction parameter in [0, 1]
+		Returns:
+		--------
+			float: interpolated value at (tx, ty)
+		'''
+		cols = []
+		for di in range(4):
+			row = grid[di]
+			cols.append(self.crom(row[0], row[1], row[2], row[3], ts))
+		return self.crom(cols[0], cols[1], cols[2], cols[3], tp)
+	def unwrap(self, mu_arr, ref):
+		'''
+		Unwrap a periodic angle sequence to within +/-180 degrees
+		Arguments:
+		----------
+			arr: np.ndarray - 1D array of angles in degrees
+		Returns:
+		--------
+			np.ndarray: unwrapped copy of arr
+		'''
+		out = []
+		for m in mu_arr:
+			d = ((m - ref + 180.0) % 360.0) - 180.0
+			out.append(ref + d)
+		return out
+	def crom(self, p0, p1, p2, p3, t):
+		'''
+		1D Catmull-Rom interpolation over four equally spaced samples
+		Arguments:
+		----------
+			p0: float - sample at t = -1
+			p1: float - sample at t = 0
+			p2: float - sample at t = +1
+			p3: float - sample at t = +2
+			t: float - interpolation parameter in [0, 1]
+		Returns:
+		--------
+			float: interpolated value at t
+		'''
+		return 0.5 * ((2 * p1) + (-p0 + p2) * t
+			+ (2*p0 - 5*p1 + 4*p2 - p3) * t * t
+			+ (-p0 + 3*p1 - 3*p2 + p3) * t * t * t)
+	def binchi(self, c):
+		'''
+		Place a chi angle into one of the rotamer wells
+		Arguments:
+		----------
+			chi: float - chi angle in degrees
+			wells: list - per-row rotamer-well centre angles
+		Returns:
+		--------
+			int: index of the matching well
+		'''
+		c = ((c + 180.0) % 360.0) - 180.0
+		if 0.0 <= c <= 120.0: return 1
+		if abs(c) >= 120.0: return 2
+		return 3
 	def RamaPreProTermPotential(self, pose, cache, ligand=None, **kw):
 		'''
 		Rama_prepro - phi/psi Ramachandran propensity.
@@ -2364,9 +2405,8 @@ class Score():
 			**kw:   absorbed; per-term methods take no extra kwargs
 		Returns:
 		--------
-			dict: per-term contribution with keys 'inter_raw', 'intra_raw',
-			      'inter_weighted', 'intra_weighted' (plus 'raw' for full-atom
-			      terms that decompose intra vs inter)
+			dict: per-term contribution with inter and intra raw and
+				weighted values, plus 'raw' where the term decomposes
 		'''
 		weight = float(self.Parameters['RamaPreProTerm']['weight'])
 		rd = self.Parameters.get('Rama_data') or {}
@@ -2438,9 +2478,8 @@ class Score():
 			**kw:   absorbed; per-term methods take no extra kwargs
 		Returns:
 		--------
-			dict: per-term contribution with keys 'inter_raw', 'intra_raw',
-			      'inter_weighted', 'intra_weighted' (plus 'raw' for full-atom
-			      terms that decompose intra vs inter)
+			dict: per-term contribution with inter and intra raw and
+				weighted values, plus 'raw' where the term decomposes
 		'''
 		weight = float(self.Parameters['PAaPp']['weight'])
 		paa = self.Parameters.get('P_AA') or {}
@@ -2504,11 +2543,9 @@ class Score():
 			**kw:   absorbed; per-term methods take no extra kwargs
 		Returns:
 		--------
-			dict: per-term contribution with keys 'inter_raw', 'intra_raw',
-			      'inter_weighted', 'intra_weighted' (plus 'raw' for full-atom
-			      terms that decompose intra vs inter)
+			dict: per-term contribution with inter and intra raw and
+				weighted values, plus 'raw' where the term decomposes
 		'''
-		# OmegaTether's per-residue weight, from Port('ref15')
 		omega_k = float(self.Parameters['Omega']['tether_k'])
 		weight = float(self.Parameters['Omega']['weight'])
 		omega_tab = self.Parameters.get('Omega_tables') or {}
@@ -2580,7 +2617,6 @@ class Score():
 			sigma = cache['fadun_spline_eval'](sig_g, sig_ypp, fp, fs)
 			if sigma < 1e-6: continue
 			entropy = -math.log(1.0 / (sigma * math.sqrt(2 * math.pi)))
-			# offset = subtract_degree_angles(omega_p, mu)
 			offset = ((om_p - mu + 180) % 360) - 180
 			logprob = offset * offset / (2 * sigma * sigma)
 			raw += normalization + entropy + logprob
@@ -2598,9 +2634,8 @@ class Score():
 			**kw:   absorbed; per-term methods take no extra kwargs
 		Returns:
 		--------
-			dict: per-term contribution with keys 'inter_raw', 'intra_raw',
-			      'inter_weighted', 'intra_weighted' (plus 'raw' for full-atom
-			      terms that decompose intra vs inter)
+			dict: per-term contribution with inter and intra raw and
+				weighted values, plus 'raw' where the term decomposes
 		'''
 		weight = float(self.Parameters['ProClose']['weight'])
 		aas = pose.data.get('Amino Acids') or {}
@@ -2613,52 +2648,6 @@ class Score():
 		trans_sd = math.radians(float(PC['trans_chi4_sd']))
 		cis_mean = math.radians(float(PC['cis_chi4_mean']))
 		cis_sd = math.radians(float(PC['cis_chi4_sd']))
-		def place(p, g, gg, bond, theta, phi):
-			'''
-			Place a virtual atom at a fixed bond length, angle, and dihedral from three reference atoms
-			Arguments:
-			----------
-				a: np.ndarray - first reference atom position
-				b: np.ndarray - second reference atom position
-				c: np.ndarray - third reference atom position
-				r: float - bond length from c
-				theta: float - bond angle b-c-virt in degrees
-				phi: float - dihedral a-b-c-virt in degrees
-			Returns:
-			--------
-				np.ndarray: virtual-atom position
-			'''
-			e_pg = g - p
-			e_pg = e_pg / np.linalg.norm(e_pg)
-			e_ggg = gg - g
-			e_ggg = e_ggg / np.linalg.norm(e_ggg)
-			perp = e_ggg - np.dot(e_ggg, e_pg) * e_pg
-			perp = perp / np.linalg.norm(perp)
-			normal = np.cross(e_pg, perp)
-			d = (-math.cos(theta) * e_pg
-				+ math.sin(theta) * (math.cos(phi) * perp
-					+ math.sin(phi) * normal))
-			return p + bond * d
-		def dihedral(a, b, c, d):
-			'''
-			Dihedral angle of four points in degrees
-			Arguments:
-			----------
-				p1: np.ndarray - first point
-				p2: np.ndarray - second point
-				p3: np.ndarray - third point
-				p4: np.ndarray - fourth point
-			Returns:
-			--------
-				float: dihedral angle in degrees
-			'''
-			b1 = a - b; b2 = c - b; b3 = d - c
-			b2_norm = b2 / np.linalg.norm(b2)
-			v = b1 - np.dot(b1, b2_norm) * b2_norm
-			w = b3 - np.dot(b3, b2_norm) * b2_norm
-			x = float(np.dot(v, w))
-			y = float(np.dot(np.cross(b2_norm, v), w))
-			return math.atan2(y, x)
 		n_term_set = set()
 		if aas:
 			chains = {}
@@ -2683,12 +2672,12 @@ class Score():
 			ca = coords[name_to_idx['CA']]
 			cg = coords[name_to_idx['CG']]
 			cd = coords[name_to_idx['CD']]
-			nv = place(cd, cg, n, float(PC['nv_d']),
+			nv = self.place(cd, cg, n, float(PC['nv_d']),
 				math.radians(float(PC['nv_theta'])), 0.0)
 			d2_n_nv = float(np.sum((nv - n) ** 2))
 			raw += d2_n_nv / sd_sq
 			if int(ri) in n_term_set:
-				cav = place(nv, cd, ca, float(PC['cav_d']),
+				cav = self.place(nv, cd, ca, float(PC['cav_d']),
 					math.radians(float(PC['cav_theta'])), 0.0)
 				d2_ca_cav = float(np.sum((cav - ca) ** 2))
 				raw += d2_ca_cav / sd_sq
@@ -2701,7 +2690,7 @@ class Score():
 			if 'C' not in prev_atoms or 'O' not in prev_atoms: continue
 			c_prev = coords[prev_atoms['C']]
 			o_prev = coords[prev_atoms['O']]
-			chi4 = dihedral(coords[name_to_idx['CD']], n,
+			chi4 = self.dihedralradians(coords[name_to_idx['CD']], n,
 				c_prev, o_prev)
 			if chi4 < -math.pi / 2: chi4 += 2 * math.pi
 			if chi4 > math.pi / 2:
@@ -2713,6 +2702,52 @@ class Score():
 		return {'inter_raw': 0.0, 'intra_raw': raw,
 			'inter_weighted': 0.0, 'intra_weighted': raw * weight,
 			'raw': raw}
+	def dihedralradians(self, a, b, c, d):
+		'''
+		Dihedral angle of four points in degrees
+		Arguments:
+		----------
+			p1: np.ndarray - first point
+			p2: np.ndarray - second point
+			p3: np.ndarray - third point
+			p4: np.ndarray - fourth point
+		Returns:
+		--------
+			float: dihedral angle in degrees
+		'''
+		b1 = a - b; b2 = c - b; b3 = d - c
+		b2_norm = b2 / np.linalg.norm(b2)
+		v = b1 - np.dot(b1, b2_norm) * b2_norm
+		w = b3 - np.dot(b3, b2_norm) * b2_norm
+		x = float(np.dot(v, w))
+		y = float(np.dot(np.cross(b2_norm, v), w))
+		return math.atan2(y, x)
+	def place(self, p, g, gg, bond, theta, phi):
+		'''
+		Place a virtual atom from three anchors by internal coordinates
+		Arguments:
+		----------
+			a: np.ndarray - first reference atom position
+			b: np.ndarray - second reference atom position
+			c: np.ndarray - third reference atom position
+			r: float - bond length from c
+			theta: float - bond angle b-c-virt in degrees
+			phi: float - dihedral a-b-c-virt in degrees
+		Returns:
+		--------
+			np.ndarray: virtual-atom position
+		'''
+		e_pg = g - p
+		e_pg = e_pg / np.linalg.norm(e_pg)
+		e_ggg = gg - g
+		e_ggg = e_ggg / np.linalg.norm(e_ggg)
+		perp = e_ggg - np.dot(e_ggg, e_pg) * e_pg
+		perp = perp / np.linalg.norm(perp)
+		normal = np.cross(e_pg, perp)
+		d = (-math.cos(theta) * e_pg
+			+ math.sin(theta) * (math.cos(phi) * perp
+				+ math.sin(phi) * normal))
+		return p + bond * d
 	def DslfFa13Potential(self, pose, cache, ligand=None, **kw):
 		'''
 		Dslf_fa13 - disulfide geometry potential, per the
@@ -2724,11 +2759,9 @@ class Score():
 			**kw:   absorbed; per-term methods take no extra kwargs
 		Returns:
 		--------
-			dict: per-term contribution with keys 'inter_raw', 'intra_raw',
-			      'inter_weighted', 'intra_weighted' (plus 'raw' for full-atom
-			      terms that decompose intra vs inter)
+			dict: per-term contribution with inter and intra raw and
+				weighted values, plus 'raw' where the term decomposes
 		'''
-		from math import erfc
 		weight = float(self.Parameters['DslfFa13']['weight'])
 		aas = pose.data.get('Amino Acids') or {}
 		atoms = pose.data['Atoms']
@@ -2737,8 +2770,6 @@ class Score():
 		shift = 2.0
 		mest = math.exp(float(
 			self.Parameters['DslfFa13']['mest_log']))
-		# von Mises / skew-normal fits, installed by tools.Port('ref15')
-		# from Rosetta's FullatomDisulfideParams13 constructor.
 		DS = self.Parameters['DslfFa13']
 		wt_len = float(DS['wt_len']); wt_ang = float(DS['wt_ang'])
 		wt_dihSS = float(DS['wt_dihSS'])
@@ -2756,44 +2787,6 @@ class Score():
 		dcs_kappa2 = DS['dcs_kappa2']
 		dcs_logA3 = DS['dcs_logA3']; dcs_mu3 = DS['dcs_mu3']
 		dcs_kappa3 = DS['dcs_kappa3']
-		def dihedral(a, b, c, d):
-			'''
-			Dihedral angle of four points in degrees
-			Arguments:
-			----------
-				p1: np.ndarray - first point
-				p2: np.ndarray - second point
-				p3: np.ndarray - third point
-				p4: np.ndarray - fourth point
-			Returns:
-			--------
-				float: dihedral angle in degrees
-			'''
-			b1 = a - b; b2 = c - b; b3 = d - c
-			n = np.linalg.norm(b2)
-			if n < 1e-9: return 0.0
-			b2n = b2 / n
-			v = b1 - np.dot(b1, b2n) * b2n
-			w = b3 - np.dot(b3, b2n) * b2n
-			x = float(np.dot(v, w))
-			y = float(np.dot(np.cross(b2n, v), w))
-			return math.degrees(math.atan2(y, x))
-		def angle(a, b, c):
-			'''
-			Three-point angle in degrees
-			Arguments:
-			----------
-				p1: np.ndarray - first point
-				p2: np.ndarray - vertex point
-				p3: np.ndarray - third point
-			Returns:
-			--------
-				float: angle p1-p2-p3 in degrees
-			'''
-			v1 = a - b; v2 = c - b
-			c_val = float(np.dot(v1, v2) / max(
-				np.linalg.norm(v1) * np.linalg.norm(v2), 1e-12))
-			return math.degrees(math.acos(max(-1, min(1, c_val))))
 		cys = []
 		for ri, info in aas.items():
 			tri = info[5] if len(info) >= 6 else None
@@ -2815,16 +2808,16 @@ class Score():
 				score = -shift
 				z = (ssdist - d_location) / d_scale
 				score_d = (z * z / 2.0
-					- math.log(erfc(-d_shape * z / math.sqrt(2.0))
+					- math.log(math.erfc(-d_shape * z / math.sqrt(2.0))
 						+ mest))
 				score += wt_len * score_d
-				csang1 = angle(coords[cb1], coords[sg1], coords[sg2])
-				csang2 = angle(coords[cb2], coords[sg2], coords[sg1])
+				csang1 = self.angle(coords[cb1], coords[sg1], coords[sg2])
+				csang2 = self.angle(coords[cb2], coords[sg2], coords[sg1])
 				score += wt_ang * (-a_logA - a_kappa
 					* math.cos(PI / 180 * (csang1 - a_mu)))
 				score += wt_ang * (-a_logA - a_kappa
 					* math.cos(PI / 180 * (csang2 - a_mu)))
-				ss_dih = dihedral(coords[cb1], coords[sg1],
+				ss_dih = self.dihedraldegrees(coords[cb1], coords[sg1],
 					coords[sg2], coords[cb2])
 				e1 = (math.exp(dss_logA1) * math.exp(dss_kappa1
 					* math.cos(PI/180 * (ss_dih - dss_mu1))))
@@ -2834,7 +2827,7 @@ class Score():
 				for ca_, cb_, sg_, sgo_ in (
 						(ca1, cb1, sg1, sg2),
 						(ca2, cb2, sg2, sg1)):
-					ang = dihedral(coords[ca_], coords[cb_],
+					ang = self.dihedraldegrees(coords[ca_], coords[cb_],
 						coords[sg_], coords[sgo_])
 					e1 = (math.exp(dcs_logA1) * math.exp(
 						dcs_kappa1 * math.cos(
@@ -2851,6 +2844,44 @@ class Score():
 		return {'inter_raw': 0.0, 'intra_raw': raw,
 			'inter_weighted': 0.0, 'intra_weighted': raw * weight,
 			'raw': raw}
+	def dihedraldegrees(self, a, b, c, d):
+		'''
+		Dihedral angle of four points in degrees
+		Arguments:
+		----------
+			p1: np.ndarray - first point
+			p2: np.ndarray - second point
+			p3: np.ndarray - third point
+			p4: np.ndarray - fourth point
+		Returns:
+		--------
+			float: dihedral angle in degrees
+		'''
+		b1 = a - b; b2 = c - b; b3 = d - c
+		n = np.linalg.norm(b2)
+		if n < 1e-9: return 0.0
+		b2n = b2 / n
+		v = b1 - np.dot(b1, b2n) * b2n
+		w = b3 - np.dot(b3, b2n) * b2n
+		x = float(np.dot(v, w))
+		y = float(np.dot(np.cross(b2n, v), w))
+		return math.degrees(math.atan2(y, x))
+	def angle(self, a, b, c):
+		'''
+		Three-point angle in degrees
+		Arguments:
+		----------
+			p1: np.ndarray - first point
+			p2: np.ndarray - vertex point
+			p3: np.ndarray - third point
+		Returns:
+		--------
+			float: angle p1-p2-p3 in degrees
+		'''
+		v1 = a - b; v2 = c - b
+		c_val = float(np.dot(v1, v2) / max(
+			np.linalg.norm(v1) * np.linalg.norm(v2), 1e-12))
+		return math.degrees(math.acos(max(-1, min(1, c_val))))
 	def YhhPlanarityPotential(self, pose, cache, ligand=None, **kw):
 		'''
 		yhh_planarity - Tyr hydroxyl planarity, 0.5*(cos(pi-2*chi3)+1)
@@ -2862,9 +2893,8 @@ class Score():
 			**kw:   absorbed; per-term methods take no extra kwargs
 		Returns:
 		--------
-			dict: per-term contribution with keys 'inter_raw', 'intra_raw',
-			      'inter_weighted', 'intra_weighted' (plus 'raw' for full-atom
-			      terms that decompose intra vs inter)
+			dict: per-term contribution with inter and intra raw and
+				weighted values, plus 'raw' where the term decomposes
 		'''
 		weight = float(self.Parameters['YhhPlanarity']['weight'])
 		aas = pose.data.get('Amino Acids') or {}
@@ -2900,9 +2930,8 @@ class Score():
 			**kw:   absorbed; per-term methods take no extra kwargs
 		Returns:
 		--------
-			dict: per-term contribution with keys 'inter_raw', 'intra_raw',
-			      'inter_weighted', 'intra_weighted' (plus 'raw' for full-atom
-			      terms that decompose intra vs inter)
+			dict: per-term contribution with inter and intra raw and
+				weighted values, plus 'raw' where the term decomposes
 		'''
 		weight = float(self.Parameters['Ref']['weight'])
 		refs = self.Parameters.get('METHOD_WEIGHTS_ref', [])
@@ -2920,30 +2949,6 @@ class Score():
 		return {'inter_raw': 0.0, 'intra_raw': raw,
 			'inter_weighted': 0.0, 'intra_weighted': raw * weight,
 			'raw': raw}
-	def DefaultOffsetPotential(self, pose, cache, ligand=None, **kw):
-		'''
-		Default smoke-test calibration term. Returns per_residue x N
-		Arguments:
-		----------
-			pose:   Pose or Molecule - receptor structure being scored
-			cache:  dict - cache returned by ScoreMatch()
-			ligand: Molecule or None - optional small-molecule ligand
-			**kw:   absorbed; per-term methods take no extra kwargs
-		Returns:
-		--------
-			dict: per-term contribution with keys 'inter_raw', 'intra_raw',
-			      'inter_weighted', 'intra_weighted' (plus 'raw' for full-atom
-			      terms that decompose intra vs inter)
-		'''
-		weight = float(self.Parameters.get(
-			'DefaultOffset', {}).get('weight', 0.0))
-		per_res = float(self.Parameters.get(
-			'Constants', {}).get('per_residue', 0.0))
-		aas = pose.data.get('Amino Acids') or {}
-		raw = float(len(aas)) * per_res
-		return {'inter_raw': raw, 'intra_raw': 0.0,
-			'inter_weighted': raw * weight, 'intra_weighted': 0.0,
-			'raw': raw}
 	def HBondSrBbPotential(self, pose, cache, ligand=None, **kw):
 		'''
 		Hbond_sr_bb: short-range bb-bb hbonds
@@ -2955,9 +2960,8 @@ class Score():
 			**kw:   absorbed; per-term methods take no extra kwargs
 		Returns:
 		--------
-			dict: per-term contribution with keys 'inter_raw', 'intra_raw',
-			      'inter_weighted', 'intra_weighted' (plus 'raw' for full-atom
-			      terms that decompose intra vs inter)
+			dict: per-term contribution with inter and intra raw and
+				weighted values, plus 'raw' where the term decomposes
 		'''
 		raw = cache['fullatomhbond'](pose, cache)['SR_BB']
 		w = float(self.Parameters['HBondSrBb']['weight'])
@@ -2975,9 +2979,8 @@ class Score():
 			**kw:   absorbed; per-term methods take no extra kwargs
 		Returns:
 		--------
-			dict: per-term contribution with keys 'inter_raw', 'intra_raw',
-			      'inter_weighted', 'intra_weighted' (plus 'raw' for full-atom
-			      terms that decompose intra vs inter)
+			dict: per-term contribution with inter and intra raw and
+				weighted values, plus 'raw' where the term decomposes
 		'''
 		raw = cache['fullatomhbond'](pose, cache)['LR_BB']
 		w = float(self.Parameters['HBondLrBb']['weight'])
@@ -2995,9 +2998,8 @@ class Score():
 			**kw:   absorbed; per-term methods take no extra kwargs
 		Returns:
 		--------
-			dict: per-term contribution with keys 'inter_raw', 'intra_raw',
-			      'inter_weighted', 'intra_weighted' (plus 'raw' for full-atom
-			      terms that decompose intra vs inter)
+			dict: per-term contribution with inter and intra raw and
+				weighted values, plus 'raw' where the term decomposes
 		'''
 		raw = cache['fullatomhbond'](pose, cache)['BB_SC']
 		w = float(self.Parameters['HBondBbSc']['weight'])
@@ -3015,9 +3017,8 @@ class Score():
 			**kw:   absorbed; per-term methods take no extra kwargs
 		Returns:
 		--------
-			dict: per-term contribution with keys 'inter_raw', 'intra_raw',
-			      'inter_weighted', 'intra_weighted' (plus 'raw' for full-atom
-			      terms that decompose intra vs inter)
+			dict: per-term contribution with inter and intra raw and
+				weighted values, plus 'raw' where the term decomposes
 		'''
 		raw = cache['fullatomhbond'](pose, cache)['SC']
 		w = float(self.Parameters['HBondSc']['weight'])
