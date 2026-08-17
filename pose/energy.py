@@ -12,30 +12,24 @@ import warnings
 import numpy as np
 from .pose import DBLoad
 
-
-
 def SMIRKSMatch(pose, params):
 	'''
-	Assign Sage 2.3.0 parameters to a pose by SMIRKS pattern matching
+	Assign force-field parameters to a pose by SMIRKS pattern matching,
+	or by atom class for the <at=...>-keyed force fields
 	Arguments:
 	----------
 		pose:   Pose - molecule, protein, DNA, or RNA pose
-		params: dict - SMIRKS-keyed force-field section dict containing
-			Constraints/Bonds/Angles/ProperTorsions/ImproperTorsions/vdW/
+		params: dict - force-field section dict containing Constraints/
+			Bonds/Angles/UB/ProperTorsions/ImproperTorsions/vdW/
 			LibraryCharges keys (typically ForceField.mol)
 	Returns:
 	--------
-		dict: keyed assignments consumed by ForceField._compile:
-			'bonds':         {(i, j):       [length, k]} per pair
-			'angles':        {(i, j, k):    [angle, k]} per triplet
-				(matched against the broad Sage Angles section)
-			'ub':            {(i, j, k):    [s0, k_ub]} per angle triplet
-				(matched against the separate, narrow UB section)
-			'propers':       {(i, j, k, l): [[period, phase, k, idivf], ...]}
-			'impropers':     list of (i, j, k, l, period, phase, k_eff)
-			'vdw':           {i: [epsilon, sigma]} (rmin_half pre-converted)
-			'polarisation':  {i: alpha} per atom
-			'charges':       {i: charge or None} (None = Gasteiger fallback)
+		dict: 'bonds' {(i,j): [r_0, K_b]}; 'angles' and 'ub'
+		{(i,j,k): [x_0, K]}; 'propers' {(i,j,k,l): [[n, phi_0, K, idivf]]};
+		'impropers' list of (i,j,k,l,n,phi_0,K); 'vdw' and 'vdw14'
+		{i: [epsilon, sigma]}; 'polarisation' {i: alpha}; 'charges'
+		{i: charge or None}; 'constraints' set of (i,j); 'restri'
+		{residue index: resolved tricode}
 	'''
 	Z_TABLE = {
 		'H':1,'He':2,'Li':3,'Be':4,'B':5,'C':6,'N':7,'O':8,'F':9,'Ne':10,
@@ -43,53 +37,23 @@ def SMIRKSMatch(pose, params):
 		'K':19,'Ca':20,'Sc':21,'Ti':22,'V':23,'Cr':24,'Mn':25,'Fe':26,
 		'Co':27,'Ni':28,'Cu':29,'Zn':30,'Ga':31,'Ge':32,'As':33,'Se':34,
 		'Br':35,'Kr':36,'Rb':37,'Sr':38,'I':53,'Xe':54,'Cs':55,'Ba':56}
-	atoms = pose.data['Atoms']
-	bonds_dict = pose.data['Bonds']
-	bond_orders = pose.data.get('BondOrders', {}) or {}
-	formal_charges = getattr(pose, '_formal_charges', {}) or {}
-	sorted_ids = sorted(atoms.keys())
-	nbr = {i: [] for i in sorted_ids}
-	for i in sorted_ids:
-		for j in bonds_dict.get(i, []):
-			if j in atoms and j != i and j not in nbr[i]:
-				nbr[i].append(j)
-	edges = set()
-	for i in sorted_ids:
-		for j in nbr[i]:
-			edges.add((min(i, j), max(i, j)))
-	edges = sorted(edges)
-	edge_set = set(edges)
-	bo = {}
-	for i in sorted_ids:
-		bos = bond_orders.get(i, [])
-		js = bonds_dict.get(i, [])
-		for k, j in enumerate(js):
-			if j not in atoms or j == i: continue
-			b = bos[k] if k < len(bos) else 1.0
-			bo[(min(i, j), max(i, j))] = float(b)
-	# Per-atom: atomic number, connectivity X, H count, formal charge
-	Z = {i: Z_TABLE.get(atoms[i][1].capitalize(), 0) for i in sorted_ids}
-	X = {i: len(nbr[i]) for i in sorted_ids}
-	Hc = {i: sum(1 for j in nbr[i] if atoms[j][1] == 'H')
-		for i in sorted_ids}
-	fc = {i: int(formal_charges.get(i, 0)) for i in sorted_ids}
-	# is_arom_bond initial state from raw bond orders; updated post-Kekulisation
-	is_arom_bond = {e: (abs(bo.get(e, 1.0) - 1.5) < 1e-6) for e in edges}
-	is_arom_atom = {i: any(is_arom_bond.get((min(i, j), max(i, j)), False)
-		for j in nbr[i]) for i in sorted_ids}
-	def find_rings():
+	VAL = {'C':4,'N':3,'O':2,'S':2,'P':5,'Se':2,
+		'F':1,'Cl':1,'Br':1,'I':1,'H':1,'B':3}
+	HEAVY_ALIAS = {'CD1': 'CD'}
+	def findrings(ctx):
 		'''
 		Smallest set of smallest rings via per-edge BFS shortest cycle
 		Arguments:
 		----------
-			No arguments taken (closes over nbr, sorted_ids)
+			ctx: dict - molecule tables carrying 'edges' and 'nbr'
 		Returns:
 		--------
 			list: each ring as a tuple of atom indices (closed cycle)
 		'''
-		rings_seen = set()
+		nbr = ctx['nbr']
+		seen = set()
 		out = []
-		for u, v in edges:
+		for u, v in ctx['edges']:
 			parent = {u: None}
 			q = [u]
 			while q:
@@ -112,222 +76,493 @@ def SMIRKSMatch(pose, params):
 				cur = parent[cur]
 				path.append(cur)
 			ring = tuple(path)
-			# Canonicalise: rotate so smallest atom is first, pick lex-min orientation
 			mn = min(ring)
-			i0 = ring.index(mn)
-			rotated = ring[i0:] + ring[:i0]
-			fwd = rotated
-			rev = (rotated[0],) + rotated[:0:-1]
-			canon = min(fwd, rev)
-			if canon in rings_seen: continue
-			rings_seen.add(canon)
+			rot = ring[ring.index(mn):] + ring[:ring.index(mn)]
+			canon = min(rot, (rot[0],) + rot[:0:-1])
+			if canon in seen: continue
+			seen.add(canon)
 			out.append(canon)
 		return out
-	rings = find_rings()
-	def hyb_of(rec):
+	def hybof(rec):
 		'''
 		Hybridisation tag from an atom record, defaulting to sp3
 		Arguments:
 		----------
-			rec: atom record from self.data['Atoms'] (list)
+			rec: list - atom record from pose.data['Atoms']
 		Returns:
 		--------
 			str: hybridisation tag at rec[-1], or 'sp3' when rec is empty
 		'''
 		return rec[-1] if rec else 'sp3'
-	def kekulise():
+	def kekulise(ctx, rings):
 		'''
-		Find a valid Kekulé assignment for all 1.5-order bonds via
-		constraint propagation and DFS backtracking. Operates per
-		connected-component of candidate bonds — solvable components
-		(amides, aromatic rings) get a chemically valid assignment;
-		unsolvable ones (carboxylate / guanidinium without explicit
-		formal charges) fall back to "non-ring 1.5 -> 1.0" heuristic
-		for that component only.
+		Assign Kekule bond orders to every 1.5-order bond, per connected
+		component, by budget propagation plus depth-first search. Components
+		with no valid assignment fall back to "non-ring 1.5 -> 1.0"
 		Arguments:
 		----------
-			No arguments taken (closes over bo, edges, nbr, atoms, fc)
+			ctx:   dict - molecule tables; ctx['bo'] is mutated in place
+			rings: list - SSSR rings used to protect in-ring bonds
 		Returns:
 		--------
-			None: bo is mutated in place
+			None: ctx['bo'] is mutated in place
 		'''
-		VAL = {'C':4,'N':3,'O':2,'S':2,'P':5,'Se':2,
-			'F':1,'Cl':1,'Br':1,'I':1,'H':1,'B':3}
-		all_candidates = sorted(e for e in edges
+		bo = ctx['bo']
+		nbr = ctx['nbr']
+		atoms = ctx['atoms']
+		fc = ctx['fc']
+		cands = sorted(e for e in ctx['edges']
 			if abs(bo.get(e, 1.0) - 1.5) < 1e-6)
-		if not all_candidates: return
-		all_cand_set = set(all_candidates)
-		# Group candidates into connected components (sharing atoms)
-		atom_to_cands = {}
-		for e in all_candidates:
-			atom_to_cands.setdefault(e[0], []).append(e)
-			atom_to_cands.setdefault(e[1], []).append(e)
-		seen_edges = set()
-		components = []
-		for start in all_candidates:
-			if start in seen_edges: continue
-			comp = []; queue = [start]; seen_edges.add(start)
+		if not cands: return
+		candset = set(cands)
+		inring = set()
+		for r in rings:
+			for k in range(len(r)):
+				a, b = r[k], r[(k + 1) % len(r)]
+				e = (min(a, b), max(a, b))
+				if e in candset: inring.add(e)
+		byatom = {}
+		for e in cands:
+			byatom.setdefault(e[0], []).append(e)
+			byatom.setdefault(e[1], []).append(e)
+		seen = set()
+		comps = []
+		for start in cands:
+			if start in seen: continue
+			comp = []
+			queue = [start]
+			seen.add(start)
 			while queue:
 				e = queue.pop()
 				comp.append(e)
 				for atom in (e[0], e[1]):
-					for nbr_e in atom_to_cands.get(atom, []):
-						if nbr_e in seen_edges: continue
-						seen_edges.add(nbr_e); queue.append(nbr_e)
-			components.append(sorted(comp))
-		# Mark in-ring candidates so the heuristic fallback knows what to skip
-		in_ring_cand = set()
-		for r in rings:
-			L = len(r)
-			for k in range(L):
-				a, b = r[k], r[(k + 1) % L]
-				e = (min(a, b), max(a, b))
-				if e in all_cand_set: in_ring_cand.add(e)
-		for comp in components:
-			cand_set = set(comp)
+					for ne in byatom.get(atom, []):
+						if ne in seen: continue
+						seen.add(ne)
+						queue.append(ne)
+			comps.append(sorted(comp))
+		for comp in comps:
+			cset = set(comp)
 			touched = set()
 			for (a, b) in comp:
-				touched.add(a); touched.add(b)
-			budget = {}
-			atom_cands = {a: [] for a in touched}
+				touched.add(a)
+				touched.add(b)
+			atcands = {a: [] for a in touched}
 			for ci, e in enumerate(comp):
-				atom_cands[e[0]].append(ci)
-				atom_cands[e[1]].append(ci)
+				atcands[e[0]].append(ci)
+				atcands[e[1]].append(ci)
+			budget = {}
 			ok = True
 			for a in touched:
-				elem = atoms[a][1]
-				if elem not in VAL: ok = False; break
-				v = VAL[elem] + fc.get(a, 0)
+				if atoms[a][1] not in VAL: ok = False; break
+				v = VAL[atoms[a][1]] + fc.get(a, 0)
 				for j in nbr[a]:
 					e = (min(a, j), max(a, j))
-					if e in cand_set: continue
-					v -= bo.get(e, 1.0)
-				n_cands = len(atom_cands[a])
-				v -= n_cands
+					if e not in cset: v -= bo.get(e, 1.0)
+				v -= len(atcands[a])
 				budget[a] = int(round(v))
-				if budget[a] < 0 or budget[a] > n_cands:
+				if budget[a] < 0 or budget[a] > len(atcands[a]):
 					ok = False; break
-			if ok:
-				assn = [-1] * len(comp)
-				def doubles_seen(a, comp_assn):
-					'''
-					Count how many candidate edges for atom a are already assigned bond order 2
-					Arguments:
-					----------
-						a: int - atom index
-						comp_assn: list - per-edge tentative bond-order assignment
-					Returns:
-					--------
-						int: number of candidate edges currently at order 2
-					'''
-					return sum(1 for ci in atom_cands[a] if comp_assn[ci] == 2)
-				def remaining(a, comp_assn):
-					'''
-					List candidate edges for atom a that are still unassigned
-					Arguments:
-					----------
-						a: int - atom index
-						comp_assn: list - per-edge tentative bond-order assignment
-					Returns:
-					--------
-						list of int: indices of candidate edges still unassigned for atom a
-					'''
-					return [ci for ci in atom_cands[a] if comp_assn[ci] == -1]
-				def propagate(comp_assn):
-					'''
-					Force-propagate edges whose budget is fully determined; return False on contradiction
-					Arguments:
-					----------
-						comp_assn: list - per-edge tentative bond-order assignment
-					Returns:
-					--------
-						bool: True if propagation completed without contradiction
-					'''
-					changed = True
-					while changed:
-						changed = False
-						for a in touched:
-							rem = remaining(a, comp_assn)
-							need = budget[a] - doubles_seen(a, comp_assn)
-							if need < 0 or need > len(rem): return False
-							if need == 0 and rem:
-								for ci in rem: comp_assn[ci] = 1
-								changed = True
-							elif need == len(rem) and rem:
-								for ci in rem: comp_assn[ci] = 2
-								changed = True
-					return True
-				def dfs(comp_assn):
-					'''
-					Recursive DFS over edge assignments to find a consistent Kekule bond-order solution
-					Arguments:
-					----------
-						comp_assn: list - per-edge tentative bond-order assignment
-					Returns:
-					--------
-						bool: True if a complete assignment was found
-					'''
-					if not propagate(comp_assn): return False
-					una = [ci for ci in range(len(comp)) if comp_assn[ci] == -1]
-					if not una: return True
-					ci = una[0]
-					for v in (2, 1):
-						saved = list(comp_assn)
-						comp_assn[ci] = v
-						if dfs(comp_assn): return True
-						for k in range(len(comp_assn)): comp_assn[k] = saved[k]
-					return False
-				if dfs(assn):
-					for ci, e in enumerate(comp):
-						bo[e] = 2.0 if assn[ci] == 2 else 1.0
-					continue
-			# Fallback: non-ring 1.5 -> 1.0; ring 1.5 handled by aromatise_rings
+			done = None
+			stack = [[-1] * len(comp)] if ok else []
+			while stack:
+				cur = stack.pop()
+				bad = False
+				changed = True
+				while changed and not bad:
+					changed = False
+					for a in touched:
+						rem = [c for c in atcands[a] if cur[c] == -1]
+						got = sum(1 for c in atcands[a] if cur[c] == 2)
+						need = budget[a] - got
+						if need < 0 or need > len(rem): bad = True; break
+						if not rem: continue
+						if need and need != len(rem): continue
+						for c in rem: cur[c] = 1 if need == 0 else 2
+						changed = True
+				if bad: continue
+				una = [c for c in range(len(comp)) if cur[c] == -1]
+				if not una:
+					done = cur
+					break
+				for v in (1, 2):
+					nxt = list(cur)
+					nxt[una[0]] = v
+					stack.append(nxt)
+			if done is not None:
+				for ci, e in enumerate(comp):
+					bo[e] = 2.0 if done[ci] == 2 else 1.0
+				continue
 			for e in comp:
-				if e not in in_ring_cand:
-					bo[e] = 1.0
-	def aromatise_rings():
+				if e not in inring: bo[e] = 1.0
+	def aromatiserings(ctx, rings):
 		'''
-		Re-mark Kekulé aromatic ring bonds as bo=1.5 for SMIRKS ':' matching
+		Re-mark Kekule aromatic 5- and 6-rings as bo=1.5 for SMIRKS ':'
 		Arguments:
 		----------
-			No arguments taken (closes over rings, atoms, bo)
+			ctx:   dict - molecule tables; ctx['bo'] is mutated in place
+			rings: list - SSSR rings as tuples of atom indices
 		Returns:
 		--------
-			None: bo is mutated in place
+			None: ctx['bo'] is mutated in place
 		'''
+		bo = ctx['bo']
+		atoms = ctx['atoms']
 		for r in rings:
-			L = len(r)
-			if L not in (5, 6): continue
-			if not all(hyb_of(atoms[a]) == 'sp2' for a in r): continue
-			ring_edges = [(min(r[k], r[(k+1) % L]),
-				max(r[k], r[(k+1) % L])) for k in range(L)]
-			has_pi = any(abs(bo.get(e, 1.0) - 2.0) < 0.1
-				or abs(bo.get(e, 1.0) - 1.5) < 0.1 for e in ring_edges)
-			if not has_pi: continue
-			for e in ring_edges:
-				bo[e] = 1.5
-				is_arom_bond[e] = True
-	kekulise()
-	aromatise_rings()
-	# Resync after kekulise+aromatise (initial bo state is stale)
-	is_arom_bond = {e: (abs(bo.get(e, 1.0) - 1.5) < 1e-6) for e in edges}
-	is_arom_atom = {i: any(is_arom_bond.get((min(i, j), max(i, j)), False)
-		for j in nbr[i]) for i in sorted_ids}
-	# SMARTS r<n> is "smallest ring is size n"; R alone is "in any ring"
-	ring_sizes_at = {i: set() for i in sorted_ids}
-	for r in rings:
-		for a in r: ring_sizes_at[a].add(len(r))
-	min_ring_size = {i: (min(ring_sizes_at[i]) if ring_sizes_at[i] else 0)
-		for i in sorted_ids}
-	in_ring_bond = set()
-	for r in rings:
-		L = len(r)
-		for k in range(L):
-			a, b = r[k], r[(k + 1) % L]
-			in_ring_bond.add((min(a, b), max(a, b)))
-	x_count = {i: sum(1 for j in nbr[i]
-		if (min(i, j), max(i, j)) in in_ring_bond)
-		for i in sorted_ids}
+			if len(r) not in (5, 6): continue
+			if not all(hybof(atoms[a]) == 'sp2' for a in r): continue
+			re = [(min(r[k], r[(k + 1) % len(r)]),
+				max(r[k], r[(k + 1) % len(r)])) for k in range(len(r))]
+			if not any(abs(bo.get(e, 1.0) - 2.0) < 0.1
+				or abs(bo.get(e, 1.0) - 1.5) < 0.1 for e in re): continue
+			for e in re: bo[e] = 1.5
+	def peek(st, off=0):
+		'''
+		Peek at the character off positions ahead of the cursor
+		Arguments:
+		----------
+			st:  dict - parser state carrying 's' and 'pos'
+			off: int, default 0 - offset from the cursor
+		Returns:
+		--------
+			str: single character at cursor+off, or '' past end of input
+		'''
+		p = st['pos'][0] + off
+		return st['s'][p] if p < len(st['s']) else ''
+	def take(st, c):
+		'''
+		Consume the expected character at the cursor or raise ValueError
+		Arguments:
+		----------
+			st: dict - parser state carrying 's' and 'pos'
+			c:  str  - expected single character
+		Returns:
+		--------
+			No return value; the cursor advances by one
+		'''
+		if peek(st) != c: raise ValueError(
+			f'Expected {c!r} at {st["pos"][0]} in {st["s"]!r}')
+		st['pos'][0] += 1
+	def readint(st):
+		'''
+		Consume a run of decimal digits at the cursor
+		Arguments:
+		----------
+			st: dict - parser state carrying 's' and 'pos'
+		Returns:
+		--------
+			int or None: value if any digits were read, else None
+		'''
+		s, pos = st['s'], st['pos']
+		start = pos[0]
+		while pos[0] < len(s) and s[pos[0]].isdigit(): pos[0] += 1
+		return int(s[start:pos[0]]) if pos[0] > start else None
+	def atomprim(st):
+		'''
+		Parse one atom primitive: wildcard, aromaticity, ring, degree, H
+		count, formal charge, atomic number, recursion, or element symbol
+		Arguments:
+		----------
+			st: dict - parser state carrying 's' and 'pos'
+		Returns:
+		--------
+			tuple: AST node for the primitive
+		'''
+		s, pos = st['s'], st['pos']
+		c = peek(st)
+		if c == '*':
+			pos[0] += 1; return ('wild',)
+		if c == 'a':
+			pos[0] += 1; return ('arom', True)
+		if c == 'A':
+			pos[0] += 1; return ('arom', False)
+		if c == 'R':
+			pos[0] += 1; return ('Rcount', readint(st))
+		if c == 'r':
+			pos[0] += 1; return ('rsize', readint(st))
+		if c == 'X':
+			pos[0] += 1; n = readint(st)
+			return ('X', n if n is not None else 0)
+		if c == 'x':
+			pos[0] += 1; n = readint(st)
+			return ('x', n if n is not None else 0)
+		if c == 'H':
+			pos[0] += 1; n = readint(st)
+			return ('H', 1 if n is None else n)
+		if c == 'h':
+			pos[0] += 1; n = readint(st)
+			return ('h', 1 if n is None else n)
+		if c == '+':
+			pos[0] += 1; n = readint(st)
+			return ('fc', 1 if n is None else n)
+		if c == '-':
+			pos[0] += 1; n = readint(st)
+			return ('fc', -1 if n is None else -n)
+		if c == '#':
+			pos[0] += 1; return ('Z', readint(st))
+		if c == '$':
+			pos[0] += 1; take(st, '(')
+			depth = 1
+			start = pos[0]
+			while pos[0] < len(s) and depth:
+				if s[pos[0]] == '(': depth += 1
+				elif s[pos[0]] == ')': depth -= 1
+				pos[0] += 1
+			return ('recurse', s[start:pos[0] - 1])
+		if c.isupper():
+			name = c
+			pos[0] += 1
+			if peek(st).islower(): name += peek(st); pos[0] += 1
+			return ('Z', Z_TABLE.get(name, 0))
+		raise ValueError(f'Unknown primitive {c!r} at pos {pos[0]} in {s!r}')
+	def atomneg(st):
+		'''
+		Parse an optionally-negated atom primitive; '!' toggles negation
+		Arguments:
+		----------
+			st: dict - parser state carrying 's' and 'pos'
+		Returns:
+		--------
+			tuple: AST node, wrapped in ('not', ...) when prefixed by '!'
+		'''
+		if peek(st) == '!':
+			st['pos'][0] += 1
+			return ('not', atomneg(st))
+		return atomprim(st)
+	def atomand(st):
+		'''
+		Parse one AND-chain of atom expressions joined by '&' or adjacency
+		Arguments:
+		----------
+			st: dict - parser state carrying 's' and 'pos'
+		Returns:
+		--------
+			tuple: nested AST node for the parsed expression
+		'''
+		left = atomneg(st)
+		while peek(st) not in ('', ',', ';', ']', ':'):
+			if peek(st) == '&': st['pos'][0] += 1
+			left = ('and', left, atomneg(st))
+		return left
+	def atomor(st):
+		'''
+		Parse one OR-chain of atom expressions joined by ','
+		Arguments:
+		----------
+			st: dict - parser state carrying 's' and 'pos'
+		Returns:
+		--------
+			tuple: nested AST node for the parsed expression
+		'''
+		left = atomand(st)
+		while peek(st) == ',':
+			st['pos'][0] += 1
+			left = ('or', left, atomand(st))
+		return left
+	def atomexpr(st):
+		'''
+		Parse a full atom expression: AND-chains joined by ';' (low precedence)
+		Arguments:
+		----------
+			st: dict - parser state carrying 's' and 'pos'
+		Returns:
+		--------
+			tuple: nested AST node for the parsed expression
+		'''
+		left = atomor(st)
+		while peek(st) == ';':
+			st['pos'][0] += 1
+			left = ('and', left, atomor(st))
+		return left
+	def bondprim(st):
+		'''
+		Parse one bond primitive: - = # : ~ @ / or backslash
+		Arguments:
+		----------
+			st: dict - parser state carrying 's' and 'pos'
+		Returns:
+		--------
+			tuple: AST node for the bond primitive
+		'''
+		ORD = {'-': 1.0, '=': 2.0, '#': 3.0, ':': 1.5}
+		c = peek(st)
+		if c in ORD:
+			st['pos'][0] += 1; return ('bo', ORD[c])
+		if c == '@':
+			st['pos'][0] += 1; return ('inring',)
+		if c in ('~', '/', '\\'):
+			st['pos'][0] += 1; return ('any',)
+		raise ValueError(
+			f'Unknown bond op {c!r} at {st["pos"][0]} in {st["s"]!r}')
+	def bondneg(st):
+		'''
+		Parse an optionally-negated bond primitive; '!' toggles negation
+		Arguments:
+		----------
+			st: dict - parser state carrying 's' and 'pos'
+		Returns:
+		--------
+			tuple: AST node, wrapped in ('not', ...) when prefixed by '!'
+		'''
+		if peek(st) == '!':
+			st['pos'][0] += 1
+			return ('not', bondneg(st))
+		return bondprim(st)
+	def bondand(st):
+		'''
+		Parse one AND-chain of bond expressions joined by '&' or adjacency
+		Arguments:
+		----------
+			st: dict - parser state carrying 's' and 'pos'
+		Returns:
+		--------
+			tuple: nested AST node for the parsed bond expression
+		'''
+		left = bondneg(st)
+		while peek(st) in ('&', '-', '=', '#', ':', '~', '@', '!'):
+			if peek(st) == '&': st['pos'][0] += 1
+			left = ('and', left, bondneg(st))
+		return left
+	def bondor(st):
+		'''
+		Parse one OR-chain of bond expressions joined by ','
+		Arguments:
+		----------
+			st: dict - parser state carrying 's' and 'pos'
+		Returns:
+		--------
+			tuple: nested AST node for the parsed bond expression
+		'''
+		left = bondand(st)
+		while peek(st) == ',':
+			st['pos'][0] += 1
+			left = ('or', left, bondand(st))
+		return left
+	def bondexpr(st):
+		'''
+		Parse a full bond expression: AND-chains joined by ';'
+		Arguments:
+		----------
+			st: dict - parser state carrying 's' and 'pos'
+		Returns:
+		--------
+			tuple: nested AST node for the bond expression
+		'''
+		left = bondor(st)
+		while peek(st) == ';':
+			st['pos'][0] += 1
+			left = ('and', left, bondor(st))
+		return left
+	def parseatom(st):
+		'''
+		Parse a bracketed atom '[...]' or a bare atom symbol
+		Arguments:
+		----------
+			st: dict - parser state carrying 's', 'pos', 'atoms' and 'tags'
+		Returns:
+		--------
+			int: index of the newly appended atom in st['atoms']
+		'''
+		pos = st['pos']
+		c = peek(st)
+		if c != '[':
+			if c == '*':
+				pos[0] += 1
+				expr = ('wild',)
+			elif c.isupper():
+				name = c
+				pos[0] += 1
+				if peek(st).islower() and (name + peek(st)) in Z_TABLE:
+					name += peek(st); pos[0] += 1
+				expr = ('Z', Z_TABLE.get(name, 0))
+			elif c.islower():
+				pos[0] += 1
+				expr = ('and', ('Z', Z_TABLE.get(c.upper(), 0)),
+					('arom', True))
+			else:
+				raise ValueError(f'Expected atom at {pos[0]} in {st["s"]!r}')
+			st['atoms'].append({'expr': expr, 'tag': None})
+			return len(st['atoms']) - 1
+		take(st, '[')
+		expr = atomexpr(st)
+		tag = None
+		if peek(st) == ':':
+			pos[0] += 1
+			tag = readint(st)
+		take(st, ']')
+		st['atoms'].append({'expr': expr, 'tag': tag})
+		if tag is not None: st['tags'][tag] = len(st['atoms']) - 1
+		return len(st['atoms']) - 1
+	def parsebranch(st, previdx):
+		'''
+		Parse a parenthesised branch sub-chain attached to atom previdx
+		Arguments:
+		----------
+			st:      dict - parser state
+			previdx: int  - atom index this branch attaches to
+		Returns:
+		--------
+			No return value; st['atoms'] and st['bonds'] are extended
+		'''
+		take(st, '(')
+		c = peek(st)
+		start = c == '[' or c == '*' or (
+			c and (c.isupper() or c.islower()) and c not in 'hRrXx')
+		be = ('bo', 1.0) if (not c or start or c == '(') else bondexpr(st)
+		aidx = parseatom(st)
+		st['bonds'].append((previdx, aidx, be))
+		parsechain(st, aidx)
+		take(st, ')')
+	def parsechain(st, previdx):
+		'''
+		Parse a chain of atoms and bonds at the cursor, extending previdx
+		Arguments:
+		----------
+			st:      dict - parser state
+			previdx: int  - atom index this chain extends from
+		Returns:
+		--------
+			No return value; st['atoms'] and st['bonds'] are extended
+		'''
+		s, pos = st['s'], st['pos']
+		while pos[0] < len(s):
+			c = peek(st)
+			if c == ')' or c == '': return
+			if c == '(':
+				parsebranch(st, previdx); continue
+			start = c == '[' or c == '*' or (
+				c and (c.isupper() or c.islower()) and c not in 'hRrXx')
+			if start:
+				aidx = parseatom(st)
+				st['bonds'].append((previdx, aidx, ('bo', 1.0)))
+				previdx = aidx
+				continue
+			be = None
+			if not (c.isdigit() or c == '%'):
+				be = bondexpr(st)
+				c = peek(st)
+				start = c == '[' or c == '*' or (
+					c and (c.isupper() or c.islower()) and c not in 'hRrXx')
+				if start:
+					aidx = parseatom(st)
+					st['bonds'].append((previdx, aidx, be))
+					previdx = aidx
+					continue
+				if not (c.isdigit() or c == '%'): raise ValueError(
+					f'Unexpected after bond at {pos[0]} in {s!r}')
+			if c == '%':
+				pos[0] += 1
+				digit = int(s[pos[0]:pos[0] + 2])
+				pos[0] += 2
+			else:
+				digit = int(c); pos[0] += 1
+			if digit not in st['ring']:
+				st['ring'][digit] = (previdx, be if be else ('bo', 1.0))
+				continue
+			a, beopen = st['ring'].pop(digit)
+			if be is None: st['bonds'].append((previdx, a, beopen))
+			else: st['bonds'].append((previdx, a,
+				be if be != ('bo', 1.0) else beopen))
 	def parse(smirks):
 		'''
 		Parse a SMIRKS string into an internal pattern graph
@@ -338,453 +573,79 @@ def SMIRKSMatch(pose, params):
 		--------
 			dict: {'atoms': [...], 'bonds': [...], 'tags': {...}}
 		'''
-		s = smirks
-		pos = [0]
-		def peek(off=0):
-			'''
-			Peek at the character `off` positions ahead of the cursor without consuming it
-			Arguments:
-			----------
-				off: int, default 0 - offset from cursor
-			Returns:
-			--------
-				str: single character at cursor+off, or '' past end of input
-			'''
-			p = pos[0] + off
-			return s[p] if p < len(s) else ''
-		def take(c):
-			'''
-			Consume the expected character at the cursor or raise ValueError
-			Arguments:
-			----------
-				c: str - expected single character
-			Returns:
-			--------
-				No return value
-			'''
-			if peek() != c: raise ValueError(
-				f'Expected {c!r} at {pos[0]} in {s!r}')
-			pos[0] += 1
-		def read_int():
-			'''
-			Consume a run of decimal digits at the cursor
-			Arguments:
-			----------
-				No arguments taken
-			Returns:
-			--------
-				int or None: integer value if any digits were read, else None
-			'''
-			start = pos[0]
-			while pos[0] < len(s) and s[pos[0]].isdigit(): pos[0] += 1
-			return int(s[start:pos[0]]) if pos[0] > start else None
-		# atom-expr (until ']' or ':'); precedence low->high: ';' ',' '&' '!'
-		def atom_expr():
-			# parse low-prec AND chain
-			'''
-			Parse a full SMIRKS atom expression: AND-chains joined by ';' (low precedence)
-			Arguments:
-			----------
-				No arguments taken
-			Returns:
-			--------
-				tuple: nested ('and', 'or', 'not', primitive) AST node
-			'''
-			left = atom_or()
-			while peek() == ';':
-				pos[0] += 1
-				right = atom_or()
-				left = ('and', left, right)
-			return left
-		def atom_or():
-			'''
-			Parse one OR-chain of atom expressions joined by ','
-			Arguments:
-			----------
-				No arguments taken
-			Returns:
-			--------
-				tuple: nested AST node for the parsed expression
-			'''
-			left = atom_and()
-			while peek() == ',':
-				pos[0] += 1
-				right = atom_and()
-				left = ('or', left, right)
-			return left
-		def atom_and():
-			'''
-			Parse one AND-chain of atom expressions joined by '&' or by adjacency
-			Arguments:
-			----------
-				No arguments taken
-			Returns:
-			--------
-				tuple: nested AST node for the parsed expression
-			'''
-			left = atom_neg()
-			while peek() not in ('', ',', ';', ']', ':'):
-				if peek() == '&': pos[0] += 1
-				right = atom_neg()
-				left = ('and', left, right)
-			return left
-		def atom_neg():
-			'''
-			Parse an optionally-negated atom primitive: '!' prefix toggles negation
-			Arguments:
-			----------
-				No arguments taken
-			Returns:
-			--------
-				tuple: AST node wrapping the primitive (wrapped in 'not' if prefixed)
-			'''
-			if peek() == '!':
-				pos[0] += 1
-				return ('not', atom_neg())
-			return atom_prim()
-		def atom_prim():
-			'''
-			Parse a single atom primitive (element symbol, '#n', '@chirality', degree, charge, etc.)
-			Arguments:
-			----------
-				No arguments taken
-			Returns:
-			--------
-				tuple: AST node for the primitive
-			'''
-			c = peek()
-			if c == '*':
-				pos[0] += 1
-				return ('wild',)
-			if c == 'a':
-				pos[0] += 1; return ('arom', True)
-			if c == 'A':
-				pos[0] += 1; return ('arom', False)
-			if c == 'R':
-				pos[0] += 1
-				n = read_int()
-				return ('Rcount', n)
-			if c == 'r':
-				pos[0] += 1
-				n = read_int()
-				return ('rsize', n)
-			if c == 'X':
-				pos[0] += 1; n = read_int()
-				return ('X', n if n is not None else 0)
-			if c == 'x':
-				pos[0] += 1; n = read_int()
-				return ('x', n if n is not None else 0)
-			if c == 'H':
-				pos[0] += 1; n = read_int()
-				return ('H', 1 if n is None else n)
-			if c == 'h':
-				pos[0] += 1; n = read_int()
-				return ('h', 1 if n is None else n)
-			if c == '+':
-				pos[0] += 1; n = read_int()
-				return ('fc', 1 if n is None else n)
-			if c == '-':
-				pos[0] += 1; n = read_int()
-				return ('fc', -1 if n is None else -n)
-			if c == '#':
-				pos[0] += 1; n = read_int()
-				return ('Z', n)
-			if c == '$':
-				pos[0] += 1; take('(')
-				# capture balanced parens forming a sub-SMIRKS
-				depth = 1; start = pos[0]
-				while pos[0] < len(s) and depth:
-					ch = s[pos[0]]
-					if ch == '(': depth += 1
-					elif ch == ')': depth -= 1
-					pos[0] += 1
-				sub = s[start:pos[0] - 1]
-				return ('recurse', sub)
-			# Plain element symbol (defensive; not used by Sage 2.3.0 SMIRKS)
-			if c.isupper():
-				name = c; pos[0] += 1
-				if peek().islower(): name += peek(); pos[0] += 1
-				z = Z_TABLE.get(name, 0)
-				return ('Z', z)
-			raise ValueError(f'Unknown primitive {c!r} at pos {pos[0]} in {s!r}')
-		# bond-expr: parse a bond expression between two atoms
-		def bond_expr():
-			# low-prec AND chain (rare in upstream FF)
-			'''
-			Parse a full SMIRKS bond expression: AND-chains joined by ';'
-			Arguments:
-			----------
-				No arguments taken
-			Returns:
-			--------
-				tuple: nested AST node for the bond expression
-			'''
-			left = bond_or()
-			while peek() == ';':
-				pos[0] += 1
-				right = bond_or()
-				left = ('and', left, right)
-			return left
-		def bond_or():
-			'''
-			Parse one OR-chain of bond expressions joined by ','
-			Arguments:
-			----------
-				No arguments taken
-			Returns:
-			--------
-				tuple: nested AST node for the parsed bond expression
-			'''
-			left = bond_and()
-			while peek() == ',':
-				pos[0] += 1
-				right = bond_and()
-				left = ('or', left, right)
-			return left
-		def bond_and():
-			'''
-			Parse one AND-chain of bond expressions joined by '&' or by adjacency
-			Arguments:
-			----------
-				No arguments taken
-			Returns:
-			--------
-				tuple: nested AST node for the parsed bond expression
-			'''
-			left = bond_neg()
-			# Explicit '&' AND, plus implicit AND between adjacent bond primitives
-			while peek() in ('&', '-', '=', '#', ':', '~', '@', '!'):
-				if peek() == '&': pos[0] += 1
-				right = bond_neg()
-				left = ('and', left, right)
-			return left
-		def bond_neg():
-			'''
-			Parse an optionally-negated bond primitive: '!' prefix toggles negation
-			Arguments:
-			----------
-				No arguments taken
-			Returns:
-			--------
-				tuple: AST node wrapping the primitive (wrapped in 'not' if prefixed)
-			'''
-			if peek() == '!':
-				pos[0] += 1
-				return ('not', bond_neg())
-			return bond_prim()
-		def bond_prim():
-			'''
-			Parse a single bond primitive (-, =, #, :, @, ~, /, \\, ring digit)
-			Arguments:
-			----------
-				No arguments taken
-			Returns:
-			--------
-				tuple: AST node for the bond primitive
-			'''
-			c = peek()
-			if c == '-': pos[0] += 1; return ('bo', 1.0)
-			if c == '=': pos[0] += 1; return ('bo', 2.0)
-			if c == '#': pos[0] += 1; return ('bo', 3.0)
-			if c == ':': pos[0] += 1; return ('bo', 1.5)
-			if c == '~': pos[0] += 1; return ('any',)
-			if c == '@': pos[0] += 1; return ('inring',)
-			if c == '/': pos[0] += 1; return ('any',)
-			if c == '\\': pos[0] += 1; return ('any',)
-			raise ValueError(f'Unknown bond op {c!r} at {pos[0]} in {s!r}')
-		# top-level SMIRKS structure
-		atom_list = []
-		bond_list = []
-		tags = {}
-		ring_open = {}  # closure_digit -> (atom_idx, bond_expr_or_None)
-		def parse_atom():
-			# Bare atom forms inside recursion: '*' = wildcard; element symbols
-			'''
-			Parse a bracketed atom '[...]' or a bare atom symbol, advancing the cursor
-			Arguments:
-			----------
-				No arguments taken
-			Returns:
-			--------
-				tuple: AST node for the atom expression
-			'''
-			c = peek()
-			if c != '[':
-				if c == '*':
-					pos[0] += 1
-					expr = ('wild',)
-				elif c.isupper():
-					name = c; pos[0] += 1
-					if peek().islower() and (name + peek()) in Z_TABLE:
-						name += peek(); pos[0] += 1
-					expr = ('Z', Z_TABLE.get(name, 0))
-				elif c.islower():
-					name = c.upper(); pos[0] += 1
-					expr = ('and', ('Z', Z_TABLE.get(name, 0)),
-						('arom', True))
-				else:
-					raise ValueError(
-						f'Expected atom at {pos[0]} in {s!r}')
-				idx = len(atom_list)
-				atom_list.append({'expr': expr, 'tag': None})
-				return idx
-			take('[')
-			expr = atom_expr()
-			tag = None
-			if peek() == ':':
-				pos[0] += 1
-				tag = read_int()
-			take(']')
-			idx = len(atom_list)
-			atom_list.append({'expr': expr, 'tag': tag})
-			if tag is not None: tags[tag] = idx
-			return idx
-		def is_atom_start(c):
-			'''
-			Test whether a character can begin an atom token in SMIRKS
-			Arguments:
-			----------
-				c: str - single character
-			Returns:
-			--------
-				bool: True if c starts an atom (bracket, '*', or element letter)
-			'''
-			return c == '[' or c == '*' or (
-				c and (c.isupper() or c.islower()) and c not in 'hRrXx')
-		def parse_branch(prev_idx):
-			'''
-			Parse a parenthesised branch sub-chain attached to atom prev_idx
-			Arguments:
-			----------
-				prev_idx: int - atom index this branch attaches to
-			Returns:
-			--------
-				No return value
-			'''
-			take('(')
-			# optional bond before the next atom in the branch
-			if peek() and not is_atom_start(peek()) and peek() != '(':
-				be = bond_expr()
-			else:
-				be = ('bo', 1.0)
-			a_idx = parse_atom()
-			bond_list.append((prev_idx, a_idx, be))
-			parse_chain(a_idx)
-			take(')')
-		def parse_chain(prev_idx):
-			'''
-			Parse a chain of atoms-and-bonds at the current cursor, starting from prev_idx
-			Arguments:
-			----------
-				prev_idx: int - atom index this chain extends from (-1 for root)
-			Returns:
-			--------
-				No return value
-			'''
-			while pos[0] < len(s):
-				c = peek()
-				if c == ')' or c == '': return
-				if c == '(':
-					parse_branch(prev_idx); continue
-				if is_atom_start(c):
-					a_idx = parse_atom()
-					bond_list.append((prev_idx, a_idx, ('bo', 1.0)))
-					prev_idx = a_idx; continue
-				# Bare ring-closure digit after atom (e.g. '[*]1...~1'); default bond '-'
-				if c.isdigit() or c == '%':
-					if c == '%':
-						pos[0] += 1
-						digit = int(s[pos[0]:pos[0] + 2])
-						pos[0] += 2
-					else:
-						digit = int(c); pos[0] += 1
-					if digit in ring_open:
-						a, be_open = ring_open.pop(digit)
-						bond_list.append((prev_idx, a, be_open))
-					else:
-						ring_open[digit] = (prev_idx, ('bo', 1.0))
-					continue
-				# bond before an atom or ring digit
-				be = bond_expr()
-				c2 = peek()
-				if is_atom_start(c2):
-					a_idx = parse_atom()
-					bond_list.append((prev_idx, a_idx, be))
-					prev_idx = a_idx
-				elif c2.isdigit() or c2 == '%':
-					if c2 == '%':
-						pos[0] += 1
-						digit = int(s[pos[0]:pos[0] + 2])
-						pos[0] += 2
-					else:
-						digit = int(c2); pos[0] += 1
-					if digit in ring_open:
-						a, be_open = ring_open.pop(digit)
-						chosen = be if be != ('bo', 1.0) else be_open
-						bond_list.append((prev_idx, a, chosen))
-					else:
-						ring_open[digit] = (prev_idx, be)
-				else:
-					raise ValueError(
-						f'Unexpected after bond at {pos[0]} in {s!r}')
-		# bootstrap: leading atom, then chain
-		root = parse_atom()
-		parse_chain(root)
-		if ring_open: raise ValueError(
-			f'Unclosed ring digits {list(ring_open)} in {s!r}')
-		return {'atoms': atom_list, 'bonds': bond_list, 'tags': tags}
-	# ============== expression evaluators =======================
-	def eval_atom(expr, i):
+		st = {'s': smirks, 'pos': [0], 'atoms': [], 'bonds': [],
+			'tags': {}, 'ring': {}}
+		parsechain(st, parseatom(st))
+		if st['ring']: raise ValueError(
+			f'Unclosed ring digits {list(st["ring"])} in {smirks!r}')
+		return {'atoms': st['atoms'], 'bonds': st['bonds'], 'tags': st['tags']}
+	def getpat(smirks, ctx):
+		'''
+		Memoised parser: cache parsed SMIRKS across repeated lookups
+		Arguments:
+		----------
+			smirks: str  - SMIRKS pattern
+			ctx:    dict - molecule tables carrying the 'parsed' cache
+		Returns:
+		--------
+			dict: parsed pattern (atoms, bonds, tags)
+		'''
+		if smirks not in ctx['parsed']:
+			try:
+				ctx['parsed'][smirks] = parse(smirks)
+			except ValueError as e:
+				warnings.warn(f'Unparseable SMIRKS {smirks!r}: {e}')
+				raise
+		return ctx['parsed'][smirks]
+	def evalatom(expr, i, ctx):
 		'''
 		Evaluate a parsed atom expression against atom index i
 		Arguments:
 		----------
 			expr: tuple - parsed AST node
 			i:    int   - candidate atom index in the molecule
+			ctx:  dict  - molecule tables
 		Returns:
 		--------
 			bool: True iff atom i satisfies the expression
 		'''
 		k = expr[0]
 		if k == 'wild':   return True
-		if k == 'Z':      return Z[i] == expr[1]
-		if k == 'X':      return X[i] == expr[1]
-		if k == 'H':      return Hc[i] == expr[1]
-		if k == 'x':      return x_count[i] == expr[1]
-		if k == 'h':      return Hc[i] == expr[1]  # implicit H ~ total H
-		if k == 'fc':     return fc[i] == expr[1]
-		if k == 'arom':   return is_arom_atom[i] == expr[1]
+		if k == 'Z':      return ctx['Z'][i] == expr[1]
+		if k == 'X':      return ctx['X'][i] == expr[1]
+		if k == 'H':      return ctx['Hc'][i] == expr[1]
+		if k == 'x':      return ctx['xcount'][i] == expr[1]
+		if k == 'h':      return ctx['Hc'][i] == expr[1]
+		if k == 'fc':     return ctx['fc'][i] == expr[1]
+		if k == 'arom':   return ctx['aroma'][i] == expr[1]
 		if k == 'rsize':
-			n = expr[1]
-			if n is None:  return bool(ring_sizes_at[i])
-			# SMARTS 'r<n>' = "smallest ring this atom belongs to is size n"
-			return min_ring_size[i] == n
+			if expr[1] is None: return bool(ctx['ringsz'][i])
+			return ctx['minring'][i] == expr[1]
 		if k == 'Rcount':
-			n = expr[1]
-			# count of rings atom i belongs to (approx via SSSR)
-			c = sum(1 for r in rings if i in r)
-			if n is None: return c > 0
-			return c == n
-		if k == 'and':    return eval_atom(expr[1], i) and eval_atom(expr[2], i)
-		if k == 'or':     return eval_atom(expr[1], i) or  eval_atom(expr[2], i)
-		if k == 'not':    return not eval_atom(expr[1], i)
+			c = sum(1 for r in ctx['rings'] if i in r)
+			if expr[1] is None: return c > 0
+			return c == expr[1]
+		if k == 'and':
+			return evalatom(expr[1], i, ctx) and evalatom(expr[2], i, ctx)
+		if k == 'or':
+			return evalatom(expr[1], i, ctx) or evalatom(expr[2], i, ctx)
+		if k == 'not':    return not evalatom(expr[1], i, ctx)
 		if k == 'recurse':
-			# Recursive sub-pattern rooted at i, anchored on tag :1; (sub, i) memoised
 			key = (expr[1], i)
-			if key in recurse_cache: return recurse_cache[key]
-			recurse_cache[key] = False  # tentative, in case of self-cycle
-			sub_pat = parse(expr[1])
-			ok = bool(match_anchored(sub_pat, i))
-			recurse_cache[key] = ok
+			if key in ctx['rcache']: return ctx['rcache'][key]
+			ctx['rcache'][key] = False
+			ok = bool(match(parse(expr[1]), ctx, anchor=i))
+			ctx['rcache'][key] = ok
 			return ok
 		raise ValueError(f'Unknown atom-expr node {k!r}')
-	def eval_bond(expr, e):
+	def evalbond(expr, e, ctx):
 		'''
 		Evaluate a parsed bond expression against canonical edge e=(a,b)
 		Arguments:
 		----------
 			expr: tuple - parsed bond AST
 			e:    tuple - (a_idx, b_idx) with a_idx < b_idx
+			ctx:  dict  - molecule tables
 		Returns:
 		--------
 			bool: True iff the bond satisfies the expression
@@ -792,178 +653,86 @@ def SMIRKSMatch(pose, params):
 		k = expr[0]
 		if k == 'any':    return True
 		if k == 'bo':
-			tgt = expr[1]
-			b = bo.get(e, 1.0)
-			if abs(tgt - 1.5) < 1e-6: return is_arom_bond.get(e, False)
-			return abs(b - tgt) < 1e-6 and not is_arom_bond.get(e, False)
-		if k == 'inring': return e in in_ring_bond
-		if k == 'and':    return eval_bond(expr[1], e) and eval_bond(expr[2], e)
-		if k == 'or':     return eval_bond(expr[1], e) or  eval_bond(expr[2], e)
-		if k == 'not':    return not eval_bond(expr[1], e)
+			if abs(expr[1] - 1.5) < 1e-6: return ctx['aromb'].get(e, False)
+			return abs(ctx['bo'].get(e, 1.0) - expr[1]) < 1e-6 \
+				and not ctx['aromb'].get(e, False)
+		if k == 'inring': return e in ctx['inringbond']
+		if k == 'and':
+			return evalbond(expr[1], e, ctx) and evalbond(expr[2], e, ctx)
+		if k == 'or':
+			return evalbond(expr[1], e, ctx) or evalbond(expr[2], e, ctx)
+		if k == 'not':    return not evalbond(expr[1], e, ctx)
 		raise ValueError(f'Unknown bond-expr node {k!r}')
-	# ============== subgraph isomorphism ========================
-	recurse_cache = {}
-	def match_anchored(pat, anchor_atom):
+	def walk(p, mst, ctx):
 		'''
-		Backtracking match of pat with pat-atom 0 forced to anchor_atom
+		Backtracking subgraph isomorphism over pattern atoms in index order.
+		With an anchor set, pattern atom 0 is pinned and the search stops at
+		the first complete mapping; otherwise every distinct tag tuple is
+		collected into mst['res']
 		Arguments:
 		----------
-			pat:         dict - parsed pattern (atoms, bonds, tags)
-			anchor_atom: int  - molecule atom that pat-atom 0 must map to
+			p:   int  - pattern atom index being mapped
+			mst: dict - match state (pattern, adjacency, mapping, results)
+			ctx: dict - molecule tables
 		Returns:
 		--------
-			bool: True if any complete mapping exists
+			bool: True once a complete consistent mapping is found
 		'''
-		# adjacency by pattern atom
-		pat_n = len(pat['atoms'])
-		pat_adj = {p: [] for p in range(pat_n)}
+		pat, mapping, used = mst['pat'], mst['map'], mst['used']
+		if p == mst['n']:
+			if mst['anchor'] is not None: return True
+			key = tuple(mapping[pat['tags'][t]] for t in mst['tags'])
+			if key not in mst['seen']:
+				mst['seen'].add(key)
+				mst['res'].append(key)
+			return True
+		fixed = [(q, be) for q, be in mst['adj'][p] if mapping[q] >= 0]
+		if p == 0 and mst['anchor'] is not None: cands = [mst['anchor']]
+		elif fixed: cands = [m for m in ctx['nbr'][mapping[fixed[0][0]]]
+			if m not in used]
+		else: cands = [a for a in ctx['ids'] if a not in used]
+		for cand in cands:
+			if cand in used: continue
+			if not evalatom(pat['atoms'][p]['expr'], cand, ctx): continue
+			ok = True
+			for q, be in fixed:
+				e = (min(cand, mapping[q]), max(cand, mapping[q]))
+				if e not in ctx['edgeset']: ok = False; break
+				if not evalbond(be, e, ctx): ok = False; break
+			if not ok: continue
+			mapping[p] = cand
+			used.add(cand)
+			if walk(p + 1, mst, ctx) and mst['anchor'] is not None:
+				return True
+			used.discard(cand)
+			mapping[p] = -1
+		return False
+	def match(pat, ctx, anchor=None):
+		'''
+		Match a parsed pattern against the molecule
+		Arguments:
+		----------
+			pat:    dict - parsed pattern (atoms, bonds, tags)
+			ctx:    dict - molecule tables
+			anchor: int or None - when given, pin pattern atom 0 to it
+		Returns:
+		--------
+			bool when anchor is given, else a list of tuples of atom indices
+			in ascending tag order (only tagged atoms are returned)
+		'''
+		n = len(pat['atoms'])
+		adj = {p: [] for p in range(n)}
 		for a, b, be in pat['bonds']:
-			pat_adj[a].append((b, be))
-			pat_adj[b].append((a, be))
-		used = set()
-		mapping = [-1] * pat_n
-		def go(p):
-			'''
-			Backtracking recursion: try to map pattern atom p to a pose atom
-			Arguments:
-			----------
-				p: int - pattern atom index
-			Returns:
-			--------
-				bool: True when a complete consistent mapping is found
-			'''
-			if p == pat_n: return True
-			# pick candidates
-			anchored = (p == 0)
-			cands = [anchor_atom] if anchored else None
-			# constrain by already-mapped neighbours
-			fixed_nbrs = [(q, be) for q, be in pat_adj[p] if mapping[q] >= 0]
-			if fixed_nbrs and not anchored:
-				q0, be0 = fixed_nbrs[0]
-				cands = [m for m in nbr[mapping[q0]] if m not in used]
-			if cands is None:
-				cands = [a for a in sorted_ids if a not in used]
-			for cand in cands:
-				if cand in used: continue
-				if not eval_atom(pat['atoms'][p]['expr'], cand): continue
-				ok = True
-				for q, be in fixed_nbrs:
-					e = (min(cand, mapping[q]), max(cand, mapping[q]))
-					if e not in edge_set: ok = False; break
-					if not eval_bond(be, e): ok = False; break
-				if not ok: continue
-				mapping[p] = cand; used.add(cand)
-				if go(p + 1): return True
-				used.discard(cand); mapping[p] = -1
-			return False
-		return go(0)
-	def match(pat):
-		'''
-		Enumerate all matches of pat; return tuples of atom indices in
-		ascending tag order (only tagged atoms are returned)
-		Arguments:
-		----------
-			pat: dict - parsed pattern
-		Returns:
-		--------
-			list of tuples: each tuple has length = number of tags
-		'''
-		pat_n = len(pat['atoms'])
-		pat_adj = {p: [] for p in range(pat_n)}
-		for a, b, be in pat['bonds']:
-			pat_adj[a].append((b, be))
-			pat_adj[b].append((a, be))
-		tag_order = sorted(pat['tags'].keys())
-		results = []
-		seen = set()
-		used = set()
-		mapping = [-1] * pat_n
-		def go(p):
-			'''
-			Enumerative recursion: collect every consistent mapping of pattern atom p
-			Arguments:
-			----------
-				p: int - pattern atom index
-			Returns:
-			--------
-				No return value (appends matches to enclosing `results` list)
-			'''
-			if p == pat_n:
-				key = tuple(mapping[pat['tags'][t]] for t in tag_order)
-				if key not in seen:
-					seen.add(key); results.append(key)
-				return
-			fixed_nbrs = [(q, be) for q, be in pat_adj[p] if mapping[q] >= 0]
-			if fixed_nbrs:
-				q0, be0 = fixed_nbrs[0]
-				cands = [m for m in nbr[mapping[q0]] if m not in used]
-			else:
-				cands = [a for a in sorted_ids if a not in used]
-			for cand in cands:
-				if cand in used: continue
-				if not eval_atom(pat['atoms'][p]['expr'], cand): continue
-				ok = True
-				for q, be in fixed_nbrs:
-					e = (min(cand, mapping[q]), max(cand, mapping[q]))
-					if e not in edge_set: ok = False; break
-					if not eval_bond(be, e): ok = False; break
-				if not ok: continue
-				mapping[p] = cand; used.add(cand)
-				go(p + 1)
-				used.discard(cand); mapping[p] = -1
-		go(0)
-		return results
-	# Assignment dict — last-match-wins per pattern
-	out = {'bonds': {}, 'angles': {}, 'ub': {}, 'propers': {},
-		'impropers': [], 'vdw': {}, 'vdw14': {}, 'polarisation': {},
-		'charges': {i: None for i in sorted_ids},
-		'constraints': set(), 'restri': {}}
-	parsed = {}
-	def get(smirks):
-		'''
-		Memoised parser: cache parsed SMIRKS expressions across repeated lookups
-		Arguments:
-		----------
-			smirks: str - SMIRKS pattern
-		Returns:
-		--------
-			dict: parsed pattern (atoms, bonds, tags)
-		'''
-		if smirks not in parsed:
-			try:
-				parsed[smirks] = parse(smirks)
-			except ValueError as e:
-				warnings.warn(f'Unparseable SMIRKS {smirks!r}: {e}')
-				raise
-		return parsed[smirks]
-	rmin2sig = 2.0 / (2.0 ** (1.0 / 6.0))
-	# ===============================================================
-	# Atom-typed force-field layer (AMBER ff19SB / CHARMM36)
-	# ---------------------------------------------------------------
-	# Atom-typed force fields carry per-residue templates under
-	# Constraints['<residue_templates>'] (each atom's name / element /
-	# class / charge plus the intra-residue bond list) and key their
-	# sections with the <at=c1,...> tag prefix in place of real SMIRKS.
-	# Each pose residue is matched to its template by topology (see
-	# maptemplate), so the assignment is independent of the pose's
-	# atom-naming convention (Build/ReBuild vs an imported PDB). When no
-	# templates are present every helper below is inert and the SMIRKS
-	# path runs exactly as before, so OpenFF / Default energies stay
-	# byte-identical.
-	# ===============================================================
-	residue_templates = (params.get('Constraints', {})
-		.get('<residue_templates>'))
-	improper_style = params.get('improper_style', 'smirnoff')
-	atom_name   = {i: atoms[i][0] for i in sorted_ids}
-	atom_elem   = {i: atoms[i][1] for i in sorted_ids}
-	atom_class  = {i: None for i in sorted_ids}
-	atom_charge = {i: None for i in sorted_ids}
-	atom_reskey = {i: None for i in sorted_ids}
-	atom_tname  = dict(atom_name)
-	HEAVY_ALIAS = {'CD1': 'CD'}
+			adj[a].append((b, be))
+			adj[b].append((a, be))
+		mst = {'pat': pat, 'adj': adj, 'n': n, 'map': [-1] * n,
+			'used': set(), 'res': [], 'seen': set(),
+			'tags': sorted(pat['tags'].keys()), 'anchor': anchor}
+		hit = walk(0, mst, ctx)
+		return hit if anchor is not None else mst['res']
 	def v2v3(nm):
 		'''
-		Convert a PDB v2 atom name to v3 (leading digits move to end)
+		Convert a PDB v2 atom name to v3 (leading digits move to the end)
 		Arguments:
 		----------
 			nm: str - an atom name, e.g. '1HB'
@@ -974,160 +743,137 @@ def SMIRKSMatch(pose, params):
 		i = 0
 		while i < len(nm) and nm[i].isdigit(): i += 1
 		return nm[i:] + nm[:i] if 0 < i < len(nm) else nm
-	def assigntypes():
+	def maptemplate(reskeys, ratoms, aliases, tp, ctx):
 		'''
-		Resolve every atom's residue key, atom class and partial charge
-		by matching each pose residue to its force-field residue
-		template, honouring N/C (protein) and 5'/3' (nucleic acid)
-		terminal variants, HIS protonation and disulfide CYX retagging
+		Match one residue's pose atoms to the first template present among
+		reskeys: exact name, alias, PDB v2/v3 transform, then a parent
+		heavy-atom topology fallback
 		Arguments:
 		----------
-			No arguments taken (closes over pose / residue_templates)
+			reskeys: list of str - candidate residue variant keys
+			ratoms:  list of int - the residue's atom indices
+			aliases: dict or None - extra exact-name aliases
+			tp:      dict - typing tables (class, charge, reskey, tname)
+			ctx:     dict - molecule tables
 		Returns:
 		--------
-			None: fills atom_class / atom_charge / atom_reskey /
-			atom_tname and out['restri'] in place
+			None: tp is filled in place for every matched atom
 		'''
-		aas  = pose.data.get('Amino Acids') or {}
+		aliases = aliases or {}
+		tpl, chosen = None, None
+		for k in reskeys:
+			if ctx['templates'].get(k) is not None:
+				tpl, chosen = ctx['templates'][k], k
+				break
+		if tpl is None: return
+		tatoms = {a[0]: (a[1], a[2], a[3]) for a in tpl['atoms']}
+		tadj = {}
+		for x, y in tpl['bonds']:
+			tadj.setdefault(x, set()).add(y)
+			tadj.setdefault(y, set()).add(x)
+		rset = set(ratoms)
+		padj = {a: [b for b in ctx['nbr'][a] if b in rset] for a in ratoms}
+		hmap = {}
+		for a in ratoms:
+			if tp['elem'][a] == 'H': continue
+			nm = tp['name'][a]
+			if nm in tatoms: hmap[a] = nm
+			elif HEAVY_ALIAS.get(nm) in tatoms: hmap[a] = HEAVY_ALIAS[nm]
+		for a in ratoms:
+			nm, el = tp['name'][a], tp['elem'][a]
+			hit, tn = None, None
+			if nm in tatoms: hit, tn = tatoms[nm], nm
+			elif aliases.get(nm) in tatoms:
+				tn = aliases[nm]; hit = tatoms[tn]
+			elif el != 'H' and HEAVY_ALIAS.get(nm) in tatoms:
+				tn = HEAVY_ALIAS[nm]; hit = tatoms[tn]
+			elif el == 'H' and v2v3(nm) in tatoms:
+				tn = v2v3(nm); hit = tatoms[tn]
+			else:
+				parents = [hmap[x] for x in padj[a] if x in hmap]
+				for cn, val in tatoms.items():
+					if val[0] != el: continue
+					if any(p in tadj.get(cn, ()) for p in parents):
+						hit, tn = val, cn
+						break
+			if hit is None: continue
+			tp['class'][a] = hit[1]
+			tp['charge'][a] = hit[2]
+			tp['reskey'][a] = chosen
+			tp['tname'][a] = tn
+	def assigntypes(pose, tp, ctx, out):
+		'''
+		Resolve every atom's residue key, atom class and partial charge from
+		the force-field residue templates, honouring N/C and 5'/3' terminal
+		variants, HIS protonation and disulfide CYX retagging
+		Arguments:
+		----------
+			pose: Pose - the molecule being typed
+			tp:   dict - typing tables filled in place
+			ctx:  dict - molecule tables
+			out:  dict - assignment dict; out['restri'] is filled in place
+		Returns:
+		--------
+			None: tp and out['restri'] are filled in place
+		'''
+		aas = pose.data.get('Amino Acids') or {}
 		nucs = pose.data.get('Nucleotides') or {}
-		def maptemplate(reskeys, ratoms, aliases=None):
-			'''
-			Match one residue's pose atoms to the first template present
-			among reskeys: exact name, then PDB v2<->v3 transform, then
-			parent-heavy-atom fallback
-			Arguments:
-			----------
-				reskeys: list of str - candidate variant keys
-				ratoms:  list of int - the residue's atom indices
-				aliases: dict or None - extra exact-name aliases
-			Returns:
-			--------
-				None: fills atom_class / atom_charge / atom_reskey /
-				atom_tname for every matched atom
-			'''
-			aliases = aliases or {}
-			tpl, chosen = None, None
-			for k in reskeys:
-				t = residue_templates.get(k)
-				if t is not None:
-					tpl, chosen = t, k
-					break
-			if tpl is None: return
-			tatoms = {a[0]: (a[1], a[2], a[3]) for a in tpl['atoms']}
-			tadj = {}
-			for x, y in tpl['bonds']:
-				tadj.setdefault(x, set()).add(y)
-				tadj.setdefault(y, set()).add(x)
-			rset = set(ratoms)
-			padj = {a: [b for b in nbr[a] if b in rset]
-				for a in ratoms}
-			hmap = {}
-			for a in ratoms:
-				if atom_elem[a] == 'H': continue
-				nm = atom_name[a]
-				if nm in tatoms: hmap[a] = nm
-				elif HEAVY_ALIAS.get(nm) in tatoms:
-					hmap[a] = HEAVY_ALIAS[nm]
-			for a in ratoms:
-				nm, el = atom_name[a], atom_elem[a]
-				hit, tn = None, None
-				if nm in tatoms:
-					hit, tn = tatoms[nm], nm
-				elif aliases.get(nm) in tatoms:
-					tn = aliases[nm]; hit = tatoms[tn]
-				elif el != 'H' and HEAVY_ALIAS.get(nm) in tatoms:
-					tn = HEAVY_ALIAS[nm]; hit = tatoms[tn]
-				elif el == 'H' and v2v3(nm) in tatoms:
-					tn = v2v3(nm); hit = tatoms[tn]
-				else:
-					parents = [hmap[x] for x in padj[a]
-						if x in hmap]
-					for cn, val in tatoms.items():
-						if val[0] != el: continue
-						if any(p in tadj.get(cn, ())
-								for p in parents):
-							hit, tn = val, cn
-							break
-				if hit is not None:
-					atom_class[a]  = hit[1]
-					atom_charge[a] = hit[2]
-					atom_reskey[a] = chosen
-					atom_tname[a]  = tn
+		nbr = ctx['nbr']
+		riatoms = {ri: list(aas[ri][2]) + list(aas[ri][3]) for ri in aas}
+		sgof = {a: ri for ri, ats in riatoms.items()
+			for a in ats if tp['name'].get(a) == 'SG'}
+		ssres = set()
+		for a in sgof:
+			for b in nbr[a]:
+				if b in sgof and sgof[b] != sgof[a]:
+					ssres.add(sgof[a]); ssres.add(sgof[b])
+		resof = {a: ri for ri, ats in riatoms.items() for a in ats}
 		prot = {}
 		for ri in sorted(aas):
 			prot.setdefault(aas[ri][1], []).append(ri)
-		ri_atoms = {ri: list(aas[ri][2]) + list(aas[ri][3])
-			for ri in aas}
-		sg_of = {a: ri for ri, ats in ri_atoms.items()
-			for a in ats if atom_name.get(a) == 'SG'}
-		ss_res = set()
-		for a in sg_of:
-			for b in nbr[a]:
-				if b in sg_of and sg_of[b] != sg_of[a]:
-					ss_res.add(sg_of[a]); ss_res.add(sg_of[b])
-		res_of = {a: ri for ri, ats in ri_atoms.items() for a in ats}
-		for chain, ris in prot.items():
-			last = len(ris) - 1
-			for pos, ri in enumerate(ris):
+		for ris in prot.values():
+			for ri in ris:
 				tri = str(aas[ri][5]).upper()
-				ats = ri_atoms[ri]
-				anames = {atom_name.get(a) for a in ats}
-				if tri in ('HIS', 'HID', 'HIE', 'HIP',
-						'HSD', 'HSE', 'HSP'):
+				ats = riatoms[ri]
+				anames = {tp['name'].get(a) for a in ats}
+				if tri in ('HIS', 'HID', 'HIE', 'HIP', 'HSD', 'HSE', 'HSP'):
 					hd1 = 'HD1' in anames
-					he2 = 'HE2' in anames
-					if hd1 and he2: cand = ('HIP', 'HSP')
-					elif hd1:       cand = ('HID', 'HSD')
-					else:           cand = ('HIE', 'HSE')
-					tri = next((v for v in cand if any(
-						(p + v) in residue_templates
-						for p in ('', 'N', 'C'))), cand[0])
-				if tri == 'CYS' and ri in ss_res:
-					tri = 'CYX'
+					if hd1 and 'HE2' in anames: cand = ('HIP', 'HSP')
+					elif hd1: cand = ('HID', 'HSD')
+					else: cand = ('HIE', 'HSE')
+					tri = next((v for v in cand if any((p + v) in
+						ctx['templates'] for p in ('', 'N', 'C'))), cand[0])
+				if tri == 'CYS' and ri in ssres: tri = 'CYX'
 				out['restri'][ri] = tri
-				# bond-based terminus (cyclic-safe): suppress the N-/C-
-				# terminal template when the backbone N/C is peptide-
-				# bonded to another residue. Identical to pos==0/pos==
-				# last for linear chains; a macrocycle has no termini.
-				n_at = next((a for a in ats
-					if atom_name.get(a) == 'N'), None)
-				c_at = next((a for a in ats
-					if atom_name.get(a) == 'C'), None)
-				is_n = n_at is not None and not any(
-					atom_name.get(b) == 'C' and res_of.get(b, ri) != ri
-					for b in nbr.get(n_at, []))
-				is_c = c_at is not None and not any(
-					atom_name.get(b) == 'N' and res_of.get(b, ri) != ri
-					for b in nbr.get(c_at, []))
+				nat = next((a for a in ats if tp['name'].get(a) == 'N'), None)
+				cat = next((a for a in ats if tp['name'].get(a) == 'C'), None)
+				isn = nat is not None and not any(
+					tp['name'].get(b) == 'C' and resof.get(b, ri) != ri
+					for b in nbr.get(nat, []))
+				isc = cat is not None and not any(
+					tp['name'].get(b) == 'N' and resof.get(b, ri) != ri
+					for b in nbr.get(cat, []))
 				keys = []
-				if is_n: keys.append('N' + tri)
-				if is_c: keys.append('C' + tri)
+				if isn: keys.append('N' + tri)
+				if isc: keys.append('C' + tri)
 				keys.append(tri)
-				# OpenMM names the first N-terminal proton 'H'; the
-				# AMBER NXXX templates call it 'H1'.
 				aliases = None
-				if is_n and 'H' in anames and 'H1' not in anames:
+				if isn and 'H' in anames and 'H1' not in anames:
 					aliases = {'H': 'H1'}
-				maptemplate(keys, ats, aliases)
+				maptemplate(keys, ats, aliases, tp, ctx)
 		nuc = {}
 		for ni in sorted(nucs):
 			nuc.setdefault(nucs[ni][1], []).append(ni)
-		for chain, nis in nuc.items():
-			last = len(nis) - 1
+		for nis in nuc.values():
 			for pos, ni in enumerate(nis):
 				tri = str(nucs[ni][4]).upper()
-				ats = list(nucs[ni][2]) + list(nucs[ni][3])
 				keys = []
-				if pos == 0:    keys.append(tri + '5')
-				if pos == last: keys.append(tri + '3')
+				if pos == 0: keys.append(tri + '5')
+				if pos == len(nis) - 1: keys.append(tri + '3')
 				keys.append(tri)
 				keys.append(tri + 'N')
-				maptemplate(keys, ats)
-	if residue_templates is not None:
-		assigntypes()
-		for i in sorted_ids:
-			if atom_charge[i] is not None:
-				out['charges'][i] = atom_charge[i]
+				maptemplate(keys, list(nucs[ni][2]) + list(nucs[ni][3]),
+					None, tp, ctx)
 	def tagparse(key):
 		'''
 		Split a leading <...> tag prefix off a force-field section key
@@ -1136,263 +882,281 @@ def SMIRKSMatch(pose, params):
 			key: str - a force-field section key
 		Returns:
 		--------
-			tuple or None: ('map',) for <residue_templates>;
-				('at', [classes]) for <at=...>; ('res', (tri, name)) for
-				<res=><atom=>; None when the key carries no tag (a real
-				SMIRKS)
+			tuple or None: ('map',) for <residue_templates>; ('at', [classes])
+			for <at=...>; ('res', (tri, name)) for <res=><atom=>; None when
+			the key carries no tag and is therefore a real SMIRKS
 		'''
 		if not key or key[0] != '<': return None
 		if key.startswith('<residue_templates>'): return ('map',)
 		if key.startswith('<at='):
 			return ('at', key[4:key.index('>')].split(','))
 		if key.startswith('<res='):
-			tri  = key[5:key.index('>')]
+			tri = key[5:key.index('>')]
 			rest = key[key.index('>') + 1:]
-			name = rest[rest.index('=') + 1:rest.index('>')]
-			return ('res', (tri, name))
+			return ('res', (tri, rest[rest.index('=') + 1:rest.index('>')]))
 		return None
-	cls_of = atom_class.get
-	def clsmatch(spec, idxs):
+	def clsmatch(spec, idxs, cls):
 		'''
 		Test an atom-class spec (with '*' wildcards) against an atom tuple
 		Arguments:
 		----------
-			spec: list of str - class names; '*' matches any class
+			spec: list of str  - class names; '*' matches any class
 			idxs: tuple of int - candidate atom indices, same length
+			cls:  dict - per-atom class lookup
 		Returns:
 		--------
 			bool: True iff every position matches
 		'''
 		for s, a in zip(spec, idxs):
-			if s != '*' and cls_of(a) != s: return False
+			if s != '*' and cls.get(a) != s: return False
 		return True
-	# Topology tuples reused by the atom-typed section loops
-	tri_list, quad_list = [], []
-	if residue_templates is not None:
-		for j in sorted_ids:
+	atoms = pose.data['Atoms']
+	bonds = pose.data['Bonds']
+	orders = pose.data.get('BondOrders', {}) or {}
+	charges = getattr(pose, '_formal_charges', {}) or {}
+	ids = sorted(atoms.keys())
+	nbr = {i: [] for i in ids}
+	for i in ids:
+		for j in bonds.get(i, []):
+			if j in atoms and j != i and j not in nbr[i]: nbr[i].append(j)
+	edges = sorted({(min(i, j), max(i, j)) for i in ids for j in nbr[i]})
+	bo = {}
+	for i in ids:
+		bos = orders.get(i, [])
+		for k, j in enumerate(bonds.get(i, [])):
+			if j not in atoms or j == i: continue
+			bo[(min(i, j), max(i, j))] = float(
+				bos[k] if k < len(bos) else 1.0)
+	ctx = {'atoms': atoms, 'nbr': nbr, 'ids': ids, 'edges': edges,
+		'edgeset': set(edges), 'bo': bo, 'parsed': {}, 'rcache': {},
+		'Z': {i: Z_TABLE.get(atoms[i][1].capitalize(), 0) for i in ids},
+		'X': {i: len(nbr[i]) for i in ids},
+		'Hc': {i: sum(1 for j in nbr[i] if atoms[j][1] == 'H')
+			for i in ids},
+		'fc': {i: int(charges.get(i, 0)) for i in ids},
+		'templates': params.get('Constraints', {}).get(
+			'<residue_templates>')}
+	rings = findrings(ctx)
+	ctx['rings'] = rings
+	kekulise(ctx, rings)
+	aromatiserings(ctx, rings)
+	ctx['aromb'] = {e: (abs(bo.get(e, 1.0) - 1.5) < 1e-6) for e in edges}
+	ctx['aroma'] = {i: any(ctx['aromb'].get((min(i, j), max(i, j)), False)
+		for j in nbr[i]) for i in ids}
+	ctx['ringsz'] = {i: set() for i in ids}
+	for r in rings:
+		for a in r: ctx['ringsz'][a].add(len(r))
+	ctx['minring'] = {i: (min(ctx['ringsz'][i]) if ctx['ringsz'][i] else 0)
+		for i in ids}
+	ctx['inringbond'] = set()
+	for r in rings:
+		for k in range(len(r)):
+			a, b = r[k], r[(k + 1) % len(r)]
+			ctx['inringbond'].add((min(a, b), max(a, b)))
+	ctx['xcount'] = {i: sum(1 for j in nbr[i]
+		if (min(i, j), max(i, j)) in ctx['inringbond']) for i in ids}
+	out = {'bonds': {}, 'angles': {}, 'ub': {}, 'propers': {},
+		'impropers': [], 'vdw': {}, 'vdw14': {}, 'polarisation': {},
+		'charges': {i: None for i in ids},
+		'constraints': set(), 'restri': {}}
+	tp = {'name': {i: atoms[i][0] for i in ids},
+		'elem': {i: atoms[i][1] for i in ids},
+		'class': {i: None for i in ids},
+		'charge': {i: None for i in ids},
+		'reskey': {i: None for i in ids},
+		'tname': {i: atoms[i][0] for i in ids}}
+	cls = tp['class']
+	rmin2sig = 2.0 / (2.0 ** (1.0 / 6.0))
+	style = params.get('improper_style', 'smirnoff')
+	tris, quads = [], []
+	if ctx['templates'] is not None:
+		assigntypes(pose, tp, ctx, out)
+		for i in ids:
+			if tp['charge'][i] is not None:
+				out['charges'][i] = tp['charge'][i]
+		for j in ids:
 			ns = nbr[j]
 			for x in range(len(ns)):
 				for y in range(x + 1, len(ns)):
-					tri_list.append((ns[x], j, ns[y]))
+					tris.append((ns[x], j, ns[y]))
 		for (j, k) in edges:
 			for i in nbr[j]:
-				if i == k: continue
 				for l in nbr[k]:
-					if l == j or l == i: continue
-					quad_list.append((i, j, k, l))
-	# ---- Constraints (rigid X-H bonds; SMIRKS force fields only) ----
+					if i == k or l == j or l == i: continue
+					quads.append((i, j, k, l))
 	for sm, par in params.get('Constraints', {}).items():
 		if tagparse(sm) is not None: continue
-		try: pat = get(sm)
+		try: pat = getpat(sm, ctx)
 		except Exception: continue
-		for tup in match(pat):
-			if len(tup) >= 2:
-				a, b = int(tup[0]), int(tup[1])
-				out['constraints'].add((min(a, b), max(a, b)))
-	# ---- Bonds ------------------------------------------------------
+		for tup in match(pat, ctx):
+			if len(tup) < 2: continue
+			out['constraints'].add((min(tup[0], tup[1]),
+				max(tup[0], tup[1])))
 	for sm, par in params.get('Bonds', {}).items():
 		tg = tagparse(sm)
+		val = [par['r_0'], par['K_b']]
 		if tg is None:
-			try: pat = get(sm)
+			try: pat = getpat(sm, ctx)
 			except Exception: continue
-			for tup in match(pat):
+			for tup in match(pat, ctx):
 				if len(tup) != 2: continue
 				i, j = sorted(tup)
-				if (i, j) in edge_set:
-					out['bonds'][(i, j)] = [par['r_0'], par['K_b']]
+				if (i, j) in ctx['edgeset']: out['bonds'][(i, j)] = list(val)
 		elif tg[0] == 'at':
-			spec = tg[1]
 			for (a, b) in edges:
-				if clsmatch(spec, (a, b)) or clsmatch(spec, (b, a)):
-					out['bonds'][(a, b)] = [par['r_0'], par['K_b']]
-	# ---- Angles (tag :2 is the centre atom) -------------------------
+				if clsmatch(tg[1], (a, b), cls) or \
+					clsmatch(tg[1], (b, a), cls):
+					out['bonds'][(a, b)] = list(val)
 	for sm, par in params.get('Angles', {}).items():
 		tg = tagparse(sm)
+		val = [par['theta_0'], par['K_theta']]
 		if tg is None:
-			try: pat = get(sm)
+			try: pat = getpat(sm, ctx)
 			except Exception: continue
-			for tup in match(pat):
+			for tup in match(pat, ctx):
 				if len(tup) != 3: continue
 				i, j, k = tup
-				if (min(i, j), max(i, j)) in edge_set and \
-					(min(j, k), max(j, k)) in edge_set:
-					ii, kk = (i, k) if i < k else (k, i)
-					out['angles'][(ii, j, kk)] = \
-						[par['theta_0'], par['K_theta']]
+				if (min(i, j), max(i, j)) not in ctx['edgeset']: continue
+				if (min(j, k), max(j, k)) not in ctx['edgeset']: continue
+				out['angles'][(min(i, k), j, max(i, k))] = list(val)
 		elif tg[0] == 'at':
-			spec = tg[1]
-			val = (par['theta_0'], par['K_theta'])
-			for (i, j, k) in tri_list:
-				if clsmatch(spec, (i, j, k)) or \
-					clsmatch(spec, (k, j, i)):
-					ii, kk = (i, k) if i < k else (k, i)
-					out['angles'][(ii, j, kk)] = list(val)
-	# ---- Urey-Bradley ----------------------------------------------
+			for (i, j, k) in tris:
+				if clsmatch(tg[1], (i, j, k), cls) or \
+					clsmatch(tg[1], (k, j, i), cls):
+					out['angles'][(min(i, k), j, max(i, k))] = list(val)
 	for sm, par in params.get('UB', {}).items():
 		tg = tagparse(sm)
+		val = [par.get('s_0', 0.0), par.get('K_ub', 0.0)]
 		if tg is None:
-			try: pat = get(sm)
+			try: pat = getpat(sm, ctx)
 			except Exception: continue
-			for tup in match(pat):
+			for tup in match(pat, ctx):
 				if len(tup) != 3: continue
 				i, j, k = tup
-				if (min(i, j), max(i, j)) in edge_set and \
-					(min(j, k), max(j, k)) in edge_set:
-					ii, kk = (i, k) if i < k else (k, i)
-					out['ub'][(ii, j, kk)] = [par.get('s_0', 0.0),
-						par.get('K_ub', 0.0)]
+				if (min(i, j), max(i, j)) not in ctx['edgeset']: continue
+				if (min(j, k), max(j, k)) not in ctx['edgeset']: continue
+				out['ub'][(min(i, k), j, max(i, k))] = list(val)
 		elif tg[0] == 'at':
-			spec = tg[1]
-			val = (par.get('s_0', 0.0), par.get('K_ub', 0.0))
-			for (i, j, k) in tri_list:
-				if clsmatch(spec, (i, j, k)) or \
-					clsmatch(spec, (k, j, i)):
-					ii, kk = (i, k) if i < k else (k, i)
-					out['ub'][(ii, j, kk)] = list(val)
-	# ---- Proper torsions -------------------------------------------
-	proper_best = {}
+			for (i, j, k) in tris:
+				if clsmatch(tg[1], (i, j, k), cls) or \
+					clsmatch(tg[1], (k, j, i), cls):
+					out['ub'][(min(i, k), j, max(i, k))] = list(val)
+	best = {}
 	for sm, par in params.get('ProperTorsions', {}).items():
 		tg = tagparse(sm)
+		comps = [[c['n'], c['phi_0'], c['K_phi'], c.get('idivf', 1.0)]
+			for c in par['components']]
 		if tg is None:
-			try: pat = get(sm)
+			try: pat = getpat(sm, ctx)
 			except Exception: continue
-			for tup in match(pat):
+			for tup in match(pat, ctx):
 				if len(tup) != 4: continue
 				i, j, k, l = tup
-				if (min(i, j), max(i, j)) not in edge_set: continue
-				if (min(j, k), max(j, k)) not in edge_set: continue
-				if (min(k, l), max(k, l)) not in edge_set: continue
-				if (i, j, k, l) > (l, k, j, i):
-					i, j, k, l = l, k, j, i
-				out['propers'][(i, j, k, l)] = [
-					[c['n'], c['phi_0'], c['K_phi'],
-						c.get('idivf', 1.0)]
-					for c in par['components']]
+				if (min(i, j), max(i, j)) not in ctx['edgeset']: continue
+				if (min(j, k), max(j, k)) not in ctx['edgeset']: continue
+				if (min(k, l), max(k, l)) not in ctx['edgeset']: continue
+				if (i, j, k, l) > (l, k, j, i): i, j, k, l = l, k, j, i
+				out['propers'][(i, j, k, l)] = [list(c) for c in comps]
 		elif tg[0] == 'at':
-			spec  = tg[1]
-			score = sum(1 for s in spec if s != '*')
-			comps = [[c['n'], c['phi_0'], c['K_phi'],
-				c.get('idivf', 1.0)] for c in par['components']]
-			for (i, j, k, l) in quad_list:
-				if not (clsmatch(spec, (i, j, k, l)) or
-					clsmatch(spec, (l, k, j, i))): continue
-				canon = (i, j, k, l) if (i, j, k, l) <= (l, k, j, i) \
-					else (l, k, j, i)
-				prev = proper_best.get(canon)
+			score = sum(1 for s in tg[1] if s != '*')
+			for (i, j, k, l) in quads:
+				if not (clsmatch(tg[1], (i, j, k, l), cls) or
+					clsmatch(tg[1], (l, k, j, i), cls)): continue
+				canon = min((i, j, k, l), (l, k, j, i))
+				prev = best.get(canon)
 				if prev is None or score >= prev[0]:
-					proper_best[canon] = (score, comps)
-	for canon, (score, comps) in proper_best.items():
-		out['propers'][canon] = [list(c) for c in comps]
-	# ---- Improper torsions -----------------------------------------
-	if improper_style in ('amber', 'charmm'):
-		# Class-typed impropers: AMBER stores the centre at tag :2 with
-		# a Y-shape, CHARMM at tag :1. The match tuple is laid out so
-		# ImproperTorsionPotential evaluates the dihedral as OpenMM does
-		# (AMBER: outer-outer-CENTRE-outer; CHARMM: CENTRE-t2-t3-t4),
-		# at full K with no trefoil expansion.
-		imp_best = {}
-		cpos = 1 if improper_style == 'amber' else 0
-		for sm, par in params.get('ImproperTorsions', {}).items():
-			tg = tagparse(sm)
-			if tg is None or tg[0] != 'at' or len(tg[1]) != 4:
-				continue
-			spec  = tg[1]
-			cspec = spec[cpos]
-			ospec = [spec[p] for p in range(4) if p != cpos]
-			score = sum(1 for s in spec if s != '*')
-			for c in sorted_ids:
-				if cspec != '*' and cls_of(c) != cspec: continue
-				ns = nbr[c]
-				if len(ns) < 3: continue
-				prev = imp_best.get(c)
-				if prev is not None and prev[0] > score: continue
-				trip = None
-				for x in range(len(ns)):
-					for y in range(len(ns)):
-						if y == x: continue
-						for z in range(len(ns)):
-							if z == x or z == y: continue
-							cand = (ns[x], ns[y], ns[z])
-							if clsmatch(ospec, cand):
-								trip = cand; break
-						if trip: break
-					if trip: break
-				if trip is None: continue
-				o1, o2, o3 = trip
-				ent = []
-				for cc in par['components']:
-					if improper_style == 'amber':
-						ent.append((o1, o2, c, o3, cc['n'],
-							cc['phi_0'], cc['K_phi']))
-					else:
-						ent.append((c, o1, o2, o3, cc['n'],
-							cc['phi_0'], cc['K_phi']))
-				imp_best[c] = (score, ent)
-		for score, ent in imp_best.values():
-			out['impropers'].extend(ent)
-	else:
-		# SMIRNOFF trefoil: centre at tag :2, 3 cyclic outer perms, K/3
-		imp_by_centre = {}
-		for sm, par in params.get('ImproperTorsions', {}).items():
-			if tagparse(sm) is not None: continue
-			try: pat = get(sm)
+					best[canon] = (score, comps)
+	for canon in best:
+		out['propers'][canon] = [list(c) for c in best[canon][1]]
+	impbest = {}
+	cpos = 1 if style == 'amber' else 0
+	for sm, par in params.get('ImproperTorsions', {}).items():
+		tg = tagparse(sm)
+		if style not in ('amber', 'charmm'):
+			if tg is not None: continue
+			try: pat = getpat(sm, ctx)
 			except Exception: continue
-			for tup in match(pat):
+			for tup in match(pat, ctx):
 				if len(tup) != 4: continue
 				a1, a2, a3, a4 = tup
-				perms = [(a1, a3, a4), (a3, a4, a1), (a4, a1, a3)]
-				entries = []
-				for o1, o2, o3 in perms:
+				ent = []
+				for o1, o2, o3 in ((a1, a3, a4), (a3, a4, a1),
+						(a4, a1, a3)):
 					for c in par['components']:
-						entries.append((a2, o1, o2, o3, c['n'],
-							c['phi_0'], c['K_phi'] / 3.0))
-				imp_by_centre[a2] = entries
-		for entries in imp_by_centre.values():
-			out['impropers'].extend(entries)
-	# ---- vdW (per-atom eps/sigma; optional separate 1-4 params) -----
+						ent.append((a2, o1, o2, o3, c['n'], c['phi_0'],
+							c['K_phi'] / 3.0))
+				impbest[a2] = (0, ent)
+			continue
+		if tg is None or tg[0] != 'at' or len(tg[1]) != 4: continue
+		cspec = tg[1][cpos]
+		ospec = [tg[1][p] for p in range(4) if p != cpos]
+		score = sum(1 for s in tg[1] if s != '*')
+		for c in ids:
+			if cspec != '*' and cls.get(c) != cspec: continue
+			ns = nbr[c]
+			if len(ns) < 3: continue
+			prev = impbest.get(c)
+			if prev is not None and prev[0] > score: continue
+			trip = next((t for t in ((ns[x], ns[y], ns[z])
+				for x in range(len(ns)) for y in range(len(ns))
+				for z in range(len(ns)) if y != x and z != x and z != y)
+				if clsmatch(ospec, t, cls)), None)
+			if trip is None: continue
+			ent = []
+			for cc in par['components']:
+				if style == 'amber':
+					ent.append((trip[0], trip[1], c, trip[2], cc['n'],
+						cc['phi_0'], cc['K_phi']))
+				else:
+					ent.append((c, trip[0], trip[1], trip[2], cc['n'],
+						cc['phi_0'], cc['K_phi']))
+			impbest[c] = (score, ent)
+	for c in impbest:
+		out['impropers'].extend(impbest[c][1])
 	for sm, par in params.get('vdW', {}).items():
 		tg = tagparse(sm)
-		if tg is not None and tg[0] not in ('at',): continue
+		if tg is not None and tg[0] != 'at': continue
 		eps = par['epsilon']
 		sig = par['sigma'] if 'sigma' in par else par['r'] * rmin2sig
 		has14 = 'epsilon14' in par or 'sigma14' in par
-		if has14:
-			eps14 = par.get('epsilon14', eps)
-			if 'sigma14' in par: sig14 = par['sigma14']
-			elif 'r14' in par:   sig14 = par['r14'] * rmin2sig
-			else:                sig14 = sig
+		sig14 = sig
+		if 'sigma14' in par: sig14 = par['sigma14']
+		elif 'r14' in par: sig14 = par['r14'] * rmin2sig
 		if tg is None:
-			try: pat = get(sm)
+			try: pat = getpat(sm, ctx)
 			except Exception: continue
-			hits = [tup[0] for tup in match(pat) if len(tup) == 1]
+			hits = [t[0] for t in match(pat, ctx) if len(t) == 1]
 		else:
-			spec0 = tg[1][0]
-			hits = [i for i in sorted_ids
-				if spec0 == '*' or cls_of(i) == spec0]
+			hits = [i for i in ids
+				if tg[1][0] == '*' or cls.get(i) == tg[1][0]]
 		for i in hits:
 			out['vdw'][i] = [eps, sig]
 			out['polarisation'][i] = par.get('alpha', 0.0)
-			if has14: out['vdw14'][i] = [eps14, sig14]
-	# ---- Electrostatic / library charges ---------------------------
+			if has14: out['vdw14'][i] = [par.get('epsilon14', eps), sig14]
 	for sm, par in params.get('LibraryCharges', {}).items():
 		tg = tagparse(sm)
+		qs = par.get('q', [])
 		if tg is None:
-			try: pat = get(sm)
+			try: pat = getpat(sm, ctx)
 			except Exception: continue
-			qs = par.get('q', [])
-			for tup in match(pat):
+			for tup in match(pat, ctx):
 				for k, idx in enumerate(tup):
 					if k < len(qs): out['charges'][idx] = float(qs[k])
-		elif tg[0] == 'res':
-			tri, nm = tg[1]
-			qs = par.get('q', [])
-			if not qs: continue
-			q0 = float(qs[0])
-			for i in sorted_ids:
-				if atom_reskey.get(i) == tri and \
-					atom_tname.get(i) == nm:
-					out['charges'][i] = q0
+		elif tg[0] == 'res' and qs:
+			for i in ids:
+				if tp['reskey'].get(i) == tg[1][0] and \
+					tp['tname'].get(i) == tg[1][1]:
+					out['charges'][i] = float(qs[0])
 	return out
+
+
+
+
+
+
+
+
+
 
 class ForceField():
 	'''
