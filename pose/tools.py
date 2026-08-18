@@ -1872,8 +1872,11 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None, nrot_override=None):
 			'HN':'H','HT1':'H','HT2':'H','HT3':'H'}
 		D_TO_L = {'DAL':'ALA','DAR':'ARG','DAS':'ASP','DSG':'ASN','DCY':'CYS',
 			'DGN':'GLN','DGL':'GLU','DHI':'HIS','DIL':'ILE','DLE':'LEU',
-			'DLY':'LYS','MED':'MET','DPN':'PHE','DPR':'PRO','DSE':'SER',
-			'DTH':'THR','DTR':'TRP','DTY':'TYR','DVA':'VAL'}
+			'DLY':'LYS','MED':'MET','DPN':'PHE','DPR':'PRO','DSN':'SER',
+			'DTH':'THR','DTR':'TRP','DTY':'TYR','DVA':'VAL',
+			# DSE is D-MSE (selenomethionine), NOT D-serine; that is DSN.
+			'DRN':'ORN','DSE':'MSE','DPO':'TPO','DEC':'SEC',
+			'DF6':'FT6','DPT':'PTR'}
 		atom_res = np.full(n, -1, dtype=np.int64)
 		for r, info in aas.items():
 			for ai in info[2] + info[3]:
@@ -1884,8 +1887,6 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None, nrot_override=None):
 		for ri, info in aas.items():
 			tri = info[5] if len(info) >= 6 else None
 			if tri is None: continue
-			if tri.startswith('D') and len(tri) == 3:
-				tri = tri
 			if tri == 'HIS':
 				res_atom_names = {atoms[int(ai)][0]
 					for ai in (info[2] + info[3])
@@ -3348,7 +3349,8 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None, nrot_override=None):
 		donor_map = {}; acceptor_map = {}; base_map = {}
 		for tri in ['ALA','ARG','ASN','ASP','CYS','GLN','GLU','GLY','HIS',
 			'HIS_D','ILE','LEU','LYS','MET','PHE','PRO','SER','THR',
-			'TRP','TYR','VAL']:
+			'TRP','TYR','VAL',
+			'ORN','MSE','TPO','SEC','FT6','PTR']:
 			if tri != 'PRO': donor_map[(tri, 'N')] = 'hbdon_PBA'
 		donor_map[('ASN', 'ND2')] = 'hbdon_CXA'
 		donor_map[('GLN', 'NE2')] = 'hbdon_CXA'
@@ -3364,7 +3366,8 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None, nrot_override=None):
 		donor_map[('THR', 'OG1')] = 'hbdon_HXL'
 		for tri in ['ALA','ARG','ASN','ASP','CYS','GLN','GLU','GLY','HIS',
 			'HIS_D','ILE','LEU','LYS','MET','PHE','PRO','SER','THR',
-			'TRP','TYR','VAL']:
+			'TRP','TYR','VAL',
+			'ORN','MSE','TPO','SEC','FT6','PTR']:
 			acceptor_map[(tri, 'O')] = 'hbacc_PBA'
 			base_map[(tri, 'O')] = 'C'
 			acceptor_map[(tri, 'OXT')] = 'hbacc_PBA'
@@ -3389,6 +3392,24 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None, nrot_override=None):
 		acceptor_map[('SER', 'OG')] = 'hbacc_HXL'; base_map[('SER','OG')] = 'CB'
 		acceptor_map[('THR', 'OG1')] = 'hbacc_HXL'
 		base_map[('THR','OG1')] = 'CB'
+		# Non-canonical sidechains. Chemical types follow the closest
+		# canonical analogue: ORN's neutral amine as the amide amine
+		# (its NH2O atom type already is), the phosphate esters as
+		# hydroxyls, and FT6's indole NE1 exactly as TRP's.
+		donor_map[('ORN', 'NE')] = 'hbdon_CXA'
+		donor_map[('FT6', 'NE1')] = 'hbdon_IND'
+		donor_map[('TPO', 'O2P')] = 'hbdon_HXL'
+		donor_map[('TPO', 'O3P')] = 'hbdon_HXL'
+		donor_map[('PTR', 'O2P')] = 'hbdon_HXL'
+		donor_map[('PTR', 'O3P')] = 'hbdon_HXL'
+		for tri in ('TPO', 'PTR'):
+			for o in ('O1P', 'O2P', 'O3P'):
+				acceptor_map[(tri, o)] = 'hbacc_HXL'
+				base_map[(tri, o)] = 'P'
+		acceptor_map[('TPO', 'OG1')] = 'hbacc_HXL'
+		base_map[('TPO', 'OG1')] = 'CB'
+		acceptor_map[('PTR', 'OH')] = 'hbacc_AHX'
+		base_map[('PTR', 'OH')] = 'CZ'
 		return donor_map, acceptor_map, base_map
 	def hbond_eval_lookup(hb):
 		'''
@@ -7198,7 +7219,15 @@ def Port(name='openff'):
 			'CNH2', 'COO', 'CH0', 'CH1', 'CH2', 'CH3', 'aroC', 'Ntrp',
 			'Nhis', 'NtrR', 'NH2O', 'Nlys', 'Narg', 'Npro', 'OH', 'ONH2',
 			'OOC', 'Oaro', 'S', 'SH1', 'Nbb', 'CAbb', 'CObb', 'OCbb',
-			'Hpol', 'Hapo', 'Haro', 'HNbb', 'HOH']
+			'Hpol', 'Hapo', 'Haro', 'HNbb', 'HOH',
+			# Required by the non-canonical residues: 'Phos' for the
+			# TPO/PTR phosphate, 'F' for FT6. New types go at the END so
+			# the indices of the 29 canonical types are unchanged and
+			# EtablePairParams stays identical for canonical structures.
+			# 'HS' is the CYS thiol hydrogen. It was absent from the
+			# original 29, so CYS's HG silently contributed nothing to
+			# fa_atr/fa_rep/fa_sol/lk_ball; SEC made that visible.
+			'Phos', 'F', 'HS']
 
 		def _parsehbonddata(raw):
 			'''
@@ -8261,6 +8290,124 @@ def Port(name='openff'):
 			residues['HIS_D'] = _parseparams(txt)
 		except Exception:
 			pass
+
+		# 3a. The six non-canonical residues Pose ships. Rosetta supplies
+		#     ornithine and 6-fluoro-tryptophan under l-ncaa/ and phosphate
+		#     patches for Thr/Tyr; MSE and SEC have no upstream params and are
+		#     derived from MET and CYS by the S -> Se substitution that
+		#     Rosetta's own MET.params already anticipates (ATOM_ALIAS SD SE).
+		#     Pose's templates are the NEUTRAL forms (NH2 amine, diprotonated
+		#     phosphate) where Rosetta's are charged, so any group whose
+		#     protonation differs is taken from a Rosetta canonical analogue
+		#     and the residue renormalised to net zero. No value is invented.
+		def ncaaresidues(res, fetch, parse):
+			'''
+			Build the six non-canonical residue templates Pose ships
+			Arguments:
+			----------
+				res: dict - the canonical templates already parsed
+				fetch: callable - Rosetta database file fetcher
+				parse: callable - .params text parser
+			Returns:
+			--------
+				dict: Pose tricode to template, same shape as res
+			'''
+			NC = ('chemical/residue_type_sets/fa_standard/'
+				'residue_types/l-ncaa/')
+			def rename(e, m, drop=()):
+				a = dict((m.get(k, k), dict(v))
+					for k, v in e['atoms'].items() if k not in drop)
+				b = [[m.get(x, x), m.get(y, y), o]
+					for x, y, o in e['bonds']
+					if x not in drop and y not in drop]
+				al = dict((k, m.get(v, v)) for k, v in e['aliases'].items()
+					if k not in drop and v not in drop)
+				return {'name': None, 'aa': None, 'atoms': a,
+					'bonds': b, 'aliases': al}
+			def renorm(a, onto):
+				a[onto]['charge'] -= sum(x['charge'] for x in a.values())
+			def finish(e, tri, al=None):
+				e['name'] = tri
+				e['aa'] = tri
+				if al: e['aliases'].update(al)
+				return e
+			out = {}
+			# Selenomethionine: methionine with SD renamed SE
+			mse = rename(res['MET'], {'SD': 'SE'})
+			mse['aliases'].pop('SE', None)
+			out['MSE'] = finish(mse, 'MSE')
+			# Selenocysteine: cysteine with SG -> SE and HG -> HE. Pose names
+			# the two CB hydrogens HB1/HB2, so CYS's PDBv3 aliases (which map
+			# HB2 -> 1HB) would mis-resolve and are replaced outright.
+			sec = rename(res['CYS'], {'SG': 'SE', 'HG': 'HE'})
+			sec['aliases'] = {'HB1': '1HB', 'HB2': '2HB'}
+			out['SEC'] = finish(sec, 'SEC')
+			# Ornithine, neutral amine. Rosetta's ornithine.params is the
+			# NH3+ form with CHARMM-era charges, so the backbone and CH2 chain
+			# are re-taken from LYS and the terminal NH2 from ASN's ND2/HD2x,
+			# which is Rosetta's own neutral primary amine.
+			orn = rename(parse(fetch(NC + 'ornithine.params')), {},
+				drop=('3HE',))
+			lys = res['LYS']['atoms']
+			asn = res['ASN']['atoms']
+			for nm, src, ty in (
+					('N', 'N', 'Nbb'), ('CA', 'CA', 'CAbb'),
+					('C', 'C', 'CObb'), ('O', 'O', 'OCbb'),
+					('H', 'H', 'HNbb'), ('HA', 'HA', 'Hapo'),
+					('CB', 'CB', 'CH2'), ('CG', 'CG', 'CH2'),
+					('CD', 'CD', 'CH2'),
+					('1HB', '1HB', 'Hapo'), ('2HB', '2HB', 'Hapo'),
+					('1HG', '1HG', 'Hapo'), ('2HG', '2HG', 'Hapo'),
+					('1HD', '1HD', 'Hapo'), ('2HD', '2HD', 'Hapo')):
+				orn['atoms'][nm]['type'] = ty
+				orn['atoms'][nm]['charge'] = lys[src]['charge']
+			for nm, src, ty in (('NE', 'ND2', 'NH2O'),
+					('1HE', '1HD2', 'Hpol'), ('2HE', '2HD2', 'Hpol')):
+				orn['atoms'][nm]['type'] = ty
+				orn['atoms'][nm]['charge'] = asn[src]['charge']
+			renorm(orn['atoms'], 'NE')
+			out['ORN'] = finish(orn, 'ORN')
+			# 6-fluoro-L-tryptophan. Charges and types are Rosetta's own; only
+			# the atom names are remapped onto Pose's CCD naming, and the map
+			# comes from the bond graph: Rosetta CZ1 is the carbon bonded to
+			# CE2 (PDB CZ2), CZ2 the one bonded to CE3 (PDB CZ3), CT the one
+			# bearing the fluorine (PDB CH2, indole position 6).
+			FT = {'CZ1': 'CZ2', 'CZ2': 'CZ3', 'CT': 'CH2', 'FI': 'F01',
+				'1HD1': 'HD1', '1HE1': 'HE1', '1HE3': 'HE3',
+				'1HZ1': 'HZ2', '1HZ2': 'HZ3'}
+			tmp = dict((k, '@%d' % i) for i, k in enumerate(FT))
+			ft = parse(fetch(NC + '6-fluoro-tryptophan.params'))
+			ft = rename(rename(ft, tmp),
+				dict((v, FT[k]) for k, v in tmp.items()))
+			renorm(ft['atoms'], 'CH2')
+			out['FT6'] = finish(ft, 'FT6')
+			# Phosphothreonine and phosphotyrosine. Rosetta's patch gives the
+			# dianion (P = Phos +1.50, three OOC at -0.78, hydroxyl proton
+			# deleted). Pose keeps two P-OH protons, so O2P/O3P are hydroxyls
+			# here: type OH with an Hpol proton, charges from SER's OG/HG.
+			def phospho(base, bridge, hs, tri, al):
+				e = rename(res[base], {},
+					drop=({'THR': 'HG1', 'TYR': 'HH'}[base],))
+				ser = res['SER']['atoms']
+				e['atoms']['P'] = {'type': 'Phos', 'mm_type': 'X',
+					'charge': 1.50}
+				e['atoms']['O1P'] = {'type': 'OOC', 'mm_type': 'OC',
+					'charge': -0.78}
+				e['bonds'] += [[bridge, 'P', 1], ['P', 'O1P', 1]]
+				for o, h in zip(('O2P', 'O3P'), hs):
+					e['atoms'][o] = {'type': 'OH', 'mm_type': 'OH1',
+						'charge': ser['OG']['charge']}
+					e['atoms'][h] = {'type': 'Hpol', 'mm_type': 'H',
+						'charge': ser['HG']['charge']}
+					e['bonds'] += [['P', o, 1], [o, h, 1]]
+				renorm(e['atoms'], 'P')
+				return finish(e, tri, al)
+			out['TPO'] = phospho('THR', 'OG1', ('1HOP', '2HOP'), 'TPO',
+				{'1HG': '1HG2', '2HG': '2HG2', '3HG': '3HG2'})
+			out['PTR'] = phospho('TYR', 'OH', ('HO2P', 'HO3P'), 'PTR',
+				{'1HD': 'HD1', '2HD': 'HD2', '1HE': 'HE1', '2HE': 'HE2'})
+			return out
+		residues.update(ncaaresidues(residues, fetch, _parseparams))
 		# 3b. Hbond polynomial / chem-type / eval / fade tables
 		hb_dir = 'scoring/score_functions/hbonds/ref2015_params/'
 		hb_files = ('HBPoly1D.csv', 'HBEval.csv', 'HBFadeIntervals.csv',
