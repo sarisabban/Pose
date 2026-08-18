@@ -14,15 +14,6 @@ from operator import itemgetter
 from . import tools
 from .pose import DBLoad
 
-# Backbone-statistics parent for each non-canonical residue Pose ships.
-# fa_dun, rama_prepro, p_aa_pp, omega and ref are tabulated for the 20
-# canonical residues only, so a non-canonical is scored on its parent's
-# backbone statistics. This mirrors Rosetta, whose ornithine.params declares
-# BACKBONE_AA LYS and RAMA_PREPRO_RESNAME LYS for exactly this reason.
-NCAA_PARENT = {'MSE': 'MET', 'SEC': 'CYS', 'ORN': 'LYS',
-	'FT6': 'TRP', 'TPO': 'THR', 'PTR': 'TYR'}
-
-
 class ForceField():
 	'''
 	Configurable molecular mechanics force field assembled from energy terms
@@ -1403,6 +1394,8 @@ class Score():
 		c = self.Parameters.setdefault('Constants', {})
 		if 'fa_max_dis' in c:
 			c['fa_max_dis'] = float(c['fa_max_dis']) + self._skin
+		self.NCAA_PARENT = {'MSE': 'MET', 'SEC': 'CYS', 'ORN': 'LYS',
+			'FT6': 'TRP', 'TPO': 'THR', 'PTR': 'TYR'}
 	def __call__(self, pose, ligand=None, decompose=False,
 			xs_override=None, nrot_override=None):
 		'''
@@ -2455,7 +2448,7 @@ class Score():
 			if info is None: continue
 			tri = info[5] if len(info) >= 6 else None
 			if tri == 'HIS_D': tri = 'HIS'
-			if tri in NCAA_PARENT: tri = NCAA_PARENT[tri]
+			if tri in self.NCAA_PARENT: tri = self.NCAA_PARENT[tri]
 			try:
 				phi = cache['cdih'](pose, ri, 'PHI')
 				psi = cache['cdih'](pose, ri, 'PSI')
@@ -2545,7 +2538,7 @@ class Score():
 			if int(ri) in nterm or int(ri) in cterm: continue
 			tri = info[5] if len(info) >= 6 else None
 			if tri == 'HIS_D': tri = 'HIS'
-			if tri in NCAA_PARENT: tri = NCAA_PARENT[tri]
+			if tri in self.NCAA_PARENT: tri = self.NCAA_PARENT[tri]
 			if tri not in cache_pp: continue
 			try:
 				phi = cache['cdih'](pose, int(ri), 'PHI')
@@ -2609,7 +2602,7 @@ class Score():
 			if int(ri) in cterm: continue
 			tri = aas[ri][5] if len(aas[ri]) >= 6 else None
 			if tri == 'HIS_D': tri = 'HIS'
-			if tri in NCAA_PARENT: tri = NCAA_PARENT[tri]
+			if tri in self.NCAA_PARENT: tri = self.NCAA_PARENT[tri]
 			try:
 				om = pose.GetDihedral(int(ri), 'OMEGA')
 				phi = cache['cdih'](pose, int(ri), 'PHI')
@@ -2974,7 +2967,7 @@ class Score():
 		for ri, info in aas.items():
 			tri = info[5] if len(info) >= 6 else None
 			if tri == 'HIS_D': tri = 'HIS'
-			if tri in NCAA_PARENT: tri = NCAA_PARENT[tri]
+			if tri in self.NCAA_PARENT: tri = self.NCAA_PARENT[tri]
 			raw += ref_by_tri.get(tri, 0.0)
 		return {'inter_raw': 0.0, 'intra_raw': raw,
 			'inter_weighted': 0.0, 'intra_weighted': raw * weight,
