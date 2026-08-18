@@ -14,6 +14,15 @@ from operator import itemgetter
 from . import tools
 from .pose import DBLoad
 
+# Backbone-statistics parent for each non-canonical residue Pose ships.
+# fa_dun, rama_prepro, p_aa_pp, omega and ref are tabulated for the 20
+# canonical residues only, so a non-canonical is scored on its parent's
+# backbone statistics. This mirrors Rosetta, whose ornithine.params declares
+# BACKBONE_AA LYS and RAMA_PREPRO_RESNAME LYS for exactly this reason.
+NCAA_PARENT = {'MSE': 'MET', 'SEC': 'CYS', 'ORN': 'LYS',
+	'FT6': 'TRP', 'TPO': 'THR', 'PTR': 'TYR'}
+
+
 class ForceField():
 	'''
 	Configurable molecular mechanics force field assembled from energy terms
@@ -2107,11 +2116,22 @@ class Score():
 						+ w10 * sg[ip1m, js0m]
 						+ w01 * sg[ip0m, js1m]
 						+ w11 * sg[ip1m, js1m], SIG_MIN))
+				# has_data is only tested with .any() for the whole grid
+				# above, so the four corners interpolated here may carry
+				# no rotamer data. Where they do not, mu and sigma are
+				# fill values and sigma lands on the SIG_MIN floor, so
+				# squaring a real chi against them invents hundreds of
+				# energy units. The clamped -log(P) is already the
+				# penalty for an unpopulated rotamer well.
+				hd = grid['has_data']
+				corners = (hd[ip0m, js0m] and hd[ip1m, js0m]
+					and hd[ip0m, js1m] and hd[ip1m, js1m])
 				dev_v = 0.0
-				for ci in range(n_chi):
-					d = ((chi_now[ci] - mus_v[ci] + 180.0)
-						% 360.0) - 180.0
-					dev_v += (d / sigs_v[ci]) ** 2
+				if corners:
+					for ci in range(n_chi):
+						d = ((chi_now[ci] - mus_v[ci] + 180.0)
+							% 360.0) - 180.0
+						dev_v += (d / sigs_v[ci]) ** 2
 				contrib = neg_log_P_v + 0.5 * dev_v
 				raw += contrib
 				if per_res is not None:
@@ -2177,10 +2197,12 @@ class Score():
 		mu_grid = [[None]*4 for _ in range(4)]
 		sig_grid = [[None]*4 for _ in range(4)]
 		ent_grid = [[0.0]*4 for _ in range(4)]
+		have_all = True
 		for di in range(4):
 			for dj in range(4):
 				Pk, mus, sigs, ent = samples[di][dj]
 				ent_grid[di][dj] = ent
+				if Pk <= 0.0: have_all = False
 				if Pk > 0.0:
 					neg_log_P[di][dj] = -math.log(Pk)
 					mu_grid[di][dj] = self.unwrap(mus, ref_mu[0]) \
@@ -2202,11 +2224,15 @@ class Score():
 				for dj in range(4)] for di in range(4)]
 			mu_i.append(self.crom2d(gm, tp, ts))
 			sig_i.append(max(self.crom2d(gs, tp, ts), SIG_MIN))
+		# Same reasoning as the primary path: where a cell did not
+		# carry this rotamer well, mu is a stale reference and sigma
+		# is the SIG_MIN floor, so the deviation term is fabricated.
 		dev = 0.0
-		for ci in range(n_rot):
-			d = ((chi_now[ci] - mu_i[ci] + 180.0)
-				% 360.0) - 180.0
-			dev += (d / sig_i[ci]) ** 2
+		if have_all:
+			for ci in range(n_rot):
+				d = ((chi_now[ci] - mu_i[ci] + 180.0)
+					% 360.0) - 180.0
+				dev += (d / sig_i[ci]) ** 2
 		E_r = neg_log_P_i + 0.5 * dev
 		raw += E_r
 		if per_res is not None:
@@ -2429,6 +2455,7 @@ class Score():
 			if info is None: continue
 			tri = info[5] if len(info) >= 6 else None
 			if tri == 'HIS_D': tri = 'HIS'
+			if tri in NCAA_PARENT: tri = NCAA_PARENT[tri]
 			try:
 				phi = cache['cdih'](pose, ri, 'PHI')
 				psi = cache['cdih'](pose, ri, 'PSI')
@@ -2518,6 +2545,7 @@ class Score():
 			if int(ri) in nterm or int(ri) in cterm: continue
 			tri = info[5] if len(info) >= 6 else None
 			if tri == 'HIS_D': tri = 'HIS'
+			if tri in NCAA_PARENT: tri = NCAA_PARENT[tri]
 			if tri not in cache_pp: continue
 			try:
 				phi = cache['cdih'](pose, int(ri), 'PHI')
@@ -2581,6 +2609,7 @@ class Score():
 			if int(ri) in cterm: continue
 			tri = aas[ri][5] if len(aas[ri]) >= 6 else None
 			if tri == 'HIS_D': tri = 'HIS'
+			if tri in NCAA_PARENT: tri = NCAA_PARENT[tri]
 			try:
 				om = pose.GetDihedral(int(ri), 'OMEGA')
 				phi = cache['cdih'](pose, int(ri), 'PHI')
@@ -2945,6 +2974,7 @@ class Score():
 		for ri, info in aas.items():
 			tri = info[5] if len(info) >= 6 else None
 			if tri == 'HIS_D': tri = 'HIS'
+			if tri in NCAA_PARENT: tri = NCAA_PARENT[tri]
 			raw += ref_by_tri.get(tri, 0.0)
 		return {'inter_raw': 0.0, 'intra_raw': raw,
 			'inter_weighted': 0.0, 'intra_weighted': raw * weight,
