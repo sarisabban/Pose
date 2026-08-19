@@ -1391,8 +1391,9 @@ class Score():
 		c = self.Parameters.setdefault('Constants', {})
 		if 'fa_max_dis' in c:
 			c['fa_max_dis'] = float(c['fa_max_dis']) + self._skin
-		self.NCAA_PARENT = {'MSE': 'MET', 'SEC': 'CYS', 'ORN': 'LYS',
-			'FT6': 'TRP', 'TPO': 'THR', 'PTR': 'TYR'}
+		self.NCAA_PARENT = {v['Tricode'][0]: v['Parent']
+			for v in DBLoad()['Amino Acids'].values()
+			if 'Parent' in v and 'Tricode' in v}
 	def __call__(self, pose, ligand=None, decompose=False,
 			xs_override=None, nrot_override=None):
 		'''
