@@ -1394,6 +1394,16 @@ class Score():
 		self.NCAA_PARENT = {v['Tricode'][0]: v['Parent']
 			for v in DBLoad()['Amino Acids'].values()
 			if 'Parent' in v and 'Tricode' in v}
+		self.FUSED = {v['Tricode'][0]
+			for v in DBLoad()['Amino Acids'].values()
+			if v.get('Fused') and 'Tricode' in v}
+		self.SEMIROT = {v['Tricode'][0]
+			for v in DBLoad()['Amino Acids'].values()
+			if 'Tricode' in v and v.get('Chi Angle Atoms')
+			and v.get('Sidechain Atoms')
+			for a in v['Sidechain Atoms']
+			if a[0] == v['Chi Angle Atoms'][-1][2]
+			and (a[1], a[5] if len(a) > 5 else '') == ('C', 'sp2')}
 	def __call__(self, pose, ligand=None, decompose=False,
 			xs_override=None, nrot_override=None):
 		'''
@@ -2026,9 +2036,8 @@ class Score():
 			if math.isnan(v): bad = True; break
 			chi_now.append(v)
 		if bad: return raw
-		SEMI_ROT = ('ASP','ASN','GLU','GLN','PHE','TYR','TRP','HIS')
-		n_rot = n_chi - 1 if tri in SEMI_ROT else n_chi
-		if tri in SEMI_ROT:
+		n_rot = n_chi - 1 if tri in self.SEMIROT else n_chi
+		if tri in self.SEMIROT:
 			nrdata = cache['fadun_nrchi_data'](tri)
 			if nrdata:
 				rot_bins = tuple(self.binchi(chi_now[k])
@@ -2059,10 +2068,10 @@ class Score():
 					if per_res is not None:
 						per_res[int(ri)] = contrib
 					return raw
-		if tri not in SEMI_ROT:
+		if tri not in self.SEMIROT:
 			grids = cache['fadun_rotwell_grid'](
 				tri, n_chi, residues_db)
-			if tri == 'PRO':
+			if tri in self.FUSED:
 				rot_bins = [
 					(1 if chi_now[k] > 0 else 2) if k == 0 else 1
 					for k in range(n_chi)]
@@ -2128,7 +2137,7 @@ class Score():
 				if per_res is not None:
 					per_res[int(ri)] = contrib
 				return raw
-		if tri == 'PRO':
+		if tri in self.FUSED:
 			rotwell_now = tuple(
 				(1 if chi_now[k] > 0 else 2) if k == 0 else 1
 				for k in range(n_rot))
@@ -2341,7 +2350,7 @@ class Score():
 		rw = []
 		for ci in range(n_rot):
 			mu = r2[2 + ci]
-			if tri == 'PRO':
+			if tri in self.FUSED:
 				b = (1 if mu > 0 else 2) if ci == 0 else 1
 			else:
 				b = self.binchi(mu)
@@ -2452,7 +2461,7 @@ class Score():
 				psi = cache['cdih'](pose, ri, 'PSI')
 			except Exception: continue
 			if math.isnan(phi) or math.isnan(psi): continue
-			use_pre = (next_tri.get(ri) == 'PRO'
+			use_pre = (next_tri.get(ri) in self.FUSED
 				and tri in pre_t and pre_t[tri])
 			table = pre_t[tri] if use_pre else all_t.get(tri)
 			if table is None: continue
@@ -2621,7 +2630,7 @@ class Score():
 			if math.isnan(phi): phi = und
 			if math.isnan(psi): psi = und
 			if tri == 'GLY': key = 'gly'
-			elif tri == 'PRO': key = 'pro'
+			elif tri in self.FUSED: key = 'pro'
 			elif tri in ('ILE', 'VAL'): key = 'valile'
 			else: key = 'all'
 			mu_g, mu_ypp, sig_g, sig_ypp = cache_o[key]
@@ -2683,7 +2692,7 @@ class Score():
 			if i > 0: ri_to_prev[r] = ri_sorted[i - 1]
 		for ri, info in aas.items():
 			tri = info[5] if len(info) >= 6 else None
-			if tri != 'PRO': continue
+			if tri not in self.FUSED: continue
 			name_to_idx = {atoms[int(a)][0]: int(a)
 				for a in info[2] + info[3]}
 			needed = ('N', 'CA', 'CG', 'CD')
