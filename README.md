@@ -361,7 +361,7 @@ The `Score()` class evaluates an empirical scoring function on a `Pose`, or a sm
 | `sf.RepulsionPotential(pose, cache, ligand=None)`            | Steric overlap penalty, `d²` for `d < 0` and zero otherwise. Zero unless `ligand` is a `Molecule` |
 | `sf.HydrophobicPotential(pose, cache, ligand=None)`          | Hydrophobic contact, a linear ramp from 1 at `d ≤ good` to 0 at `d ≥ bad`. Zero unless `ligand` is a `Molecule` |
 | `sf.HBondPotential(pose, cache, ligand=None)`                | Donor-acceptor contact, the same linear ramp with no angular term. Zero unless `ligand` is a `Molecule` |
-| `sf.TorsionalPenalty(pose, cache, ligand=None)`              | Marker only, contributing nothing and producing no `per_term` entry. Its presence makes `__call__` divide the intermolecular sum by `1 + 0.05846·N_rot` and drop the intramolecular sum |
+| `sf.TorsionalPenalty(pose, cache, ligand=None)`              | Marker only, contributing nothing and producing no `per_term` entry. Its presence makes `__call__` divide the intermolecular sum by `1 + nrot_w·N_rot`, where `nrot_w` comes from the score set's `Constants`, and drop the intramolecular sum |
 | `sf.FaAtrPotential(pose, cache, ligand=None)`                | Attractive half of the inter-residue 12-6 Lennard-Jones split at the minimum, `−ε` inside `r_min` and `E_LJ` outside, faded cubically to zero between 4.5 and 6 Å |
 | `sf.FaRepPotential(pose, cache, ligand=None)`                | Repulsive half of the same split, `E_LJ + ε` inside `r_min` and zero outside, ramped linearly below 0.6·σ |
 | `sf.FaSolPotential(pose, cache, ligand=None)`                | Inter-residue Lazaridis-Karplus solvation, `−ΔGᵢ·Vⱼ·e^(−x²) / (2π^{3/2}·λᵢ·r²)` with `x = (r − Rᵢ)/λᵢ` |
@@ -424,7 +424,7 @@ These are standalone tools (not Pose() class methods) and thus are called on the
 For Parameterise() this is the workflow:
 
 1. Download the CIF file for the amino acid from the [RCSB Chemical Component Dictionary](https://www.rcsb.org/ligand/) (e.g. `https://files.rcsb.org/ligands/download/PTR.cif`).
-2. Generate a backbone-dependent rotamer library JSON in Dunbrack BBDEP2010 schema from [this repo](https://github.com/sarisabban/ncaarotamers), use the `NCAA_PyRosetta.py` script.
+2. Import or generate a backbone-dependent rotamer library JSON in Dunbrack BBDEP2010 schema from [this repo](https://github.com/sarisabban/ncaarotamers).
 3. Call `Parameterise()` as described above.
 
 ---
@@ -482,7 +482,7 @@ Pose ships a single `database.json` file (~70 MB) under `pose/` with **five** to
 |--------------------|---------|
 | `Amino Acids`      | Per-residue topology templates for amino acids: backbone & sidechain atoms, vectors, bonds, χ angle atoms |
 | `Nucleotides`      | Per-nucleotide topology templates for DNA and RNA |
-| `Rotamer Library`  | Backbone-dependent rotamer mixture data (Dunbrack BBDEP2010 derived), or Rosetta (MakeRotLib) generated for NCAAs |
+| `Rotamer Library`  | Backbone-dependent rotamer mixture data (Dunbrack BBDEP2010 derived), or Rosetta (MakeRotLib) generated for some NCAAs |
 | `Energy Parameters`| Named force-field parameter sets, keyed by force-field name. Two ship today `openFF` (Sage 2.3.0 small-molecule FF, CC-BY-4.0) and `Default` (deterministic smoke-test calibrated to 100.00 kJ/mol anchor) |
 | `Score Parameters` | Named score parameter sets, keyed by score function name. One ships today `Default` (deterministic smoke-test calibrated to 100.00 anchor) |
 
@@ -520,7 +520,7 @@ This information resides in `database['Nucleotides'][NUCEOTIDE_TRICODE]`
 
 ### Description of the Rotamer Library in database.json:
 
-This information resides in `database['Rotamer Library']`. Derived from the Dunbrack BBDEP2010 rotamer library (Shapovalov & Dunbrack 2011, CC-BY-4.0). Rotamers of NCAAs were derived using Rosetta's *MakeRotLib*.
+This information resides in `database['Rotamer Library']`. The 18 canonical side-chain libraries are derived from the Dunbrack BBDEP2010 rotamer library, 5% step-down variant `StpDwn_5-5-5` (Shapovalov & Dunbrack 2011, CC BY 4.0). Of the six non-canonical entries, `MSE`, `SEC` and `FT6` are exact copies of their canonical parents `MET`, `CYS` and `TRP` — no backbone-dependent rotamer library exists for these residues in any published source — while `ORN`, `PTR` and `TPO` were computed independently. See [Third-Party Attribution](#third-party-attribution).
 
 **Top-level shape:**
 
@@ -656,6 +656,31 @@ If Pose is useful in your research, please cite it. The repository ships a `CITA
 
 ## License
 
-Pose is released under the **Apache License, Version 2.0**. The full licence text lives in the [`LICENSE`](LICENSE) file at the project root, and per Apache-2.0 convention a [`NOTICE`](NOTICE) file records the copyright and attribution.
+Pose is released under the **Apache License, Version 2.0**. The full licence text lives in the [`LICENSE`](LICENSE) file at the project root.
+Apache-2.0 covers Pose's own source code; `pose/database.json` additionally bundles third-party data under its own terms, recorded in [Third-Party Attribution](#third-party-attribution) below.
 
 `SPDX-License-Identifier: Apache-2.0`
+
+### Third-Party Attribution
+
+Pose's own source code is Apache-2.0. The data files distributed with it, and the data that `Port()` downloads at runtime, carry the terms below. This section is the project's attribution record; there is no separate `NOTICE` file.
+
+#### Shipped in `pose/database.json`
+
+The CC-BY-4.0 material below is provided by its licensors as-is and without warranties of any kind; see Section 5 of the licence (https://creativecommons.org/licenses/by/4.0/legalcode) for the full disclaimer of warranties and limitation of liability.
+
+**OpenFF Sage 2.3.0** — bonded, vdW and library-charge parameters under `['Energy Parameters']['OpenFF']`. Copyright (c) 2016, Open Forcefield Group. Licensed under [CC-BY-4.0](https://creativecommons.org/licenses/by/4.0/). Source: [openff-forcefields](https://github.com/openforcefield/openff-forcefields). *Modifications:* values are unit-converted from kcal/mol to kJ/mol and re-keyed into Pose's schema (`r_0`, `K_b`, `theta_0`, `K_theta`, `n`, `phi_0`, `K_phi`, `r`, `q`); upstream `id` strings are preserved.
+
+**OpenFF NAGL `openff-gnn-am1bcc-1.0.0`** — graph-neural-network weights for AM1-BCC charge prediction under `['Energy Parameters']['OpenFF']['AM1BCC']`. Copyright (c) 2023, Open Forcefield Group. Licensed under [CC-BY-4.0](https://creativecommons.org/licenses/by/4.0/). Source: [openff-nagl-models](https://github.com/openforcefield/openff-nagl-models). *Modifications:* tensors are extracted from the PyTorch checkpoint and stored as base64 float32; inference is reimplemented in NumPy in `pose.energy.ForceField.NAGLCharges`, with output bit-equivalent to upstream float32 inference.
+
+**Dunbrack backbone-dependent rotamer library (BBDEP2010)** — under `['Rotamer Library']`. Contains information from the 2010 Backbone-Dependent Rotamer Library (https://dunbrack.fccc.edu/bbdep2010), made available under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). Cite: Shapovalov, M. V. & Dunbrack, R. L., Jr. (2011) *Structure* 19:844-858. *Modifications:* the 5% step-down variant (`StpDwn_5-5-5`, the Dunbrack default) reformatted from the `.lib` column layout to JSON, with the redundant +180 deg wrap bins dropped (36x36 rather than 37x37).
+
+#### Downloaded at runtime by `Port()`, never redistributed
+
+**AMBER ff19SB / OL15 / OL3** (`Port('ff19sb')`). The Amber force-field parameter files are placed in the public domain by their authors; AmberTools' GPLv3 covers the code only. Retrieved via [OpenMM](https://github.com/openmm/openmm) (MIT). Cite: Tian, C. *et al.* (2020) *J. Chem. Theory Comput.* 16:528-552.
+
+**CHARMM36** (`Port('charmm36')`). The CHARMM force-field parameter files carry no formal licence; the MacKerell lab has stated they are effectively public domain. Retrieved via [OpenMM](https://github.com/openmm/openmm) (MIT). Note that OpenMM's `charmm36.xml` also carries CGenFF and lipid parameters, which Pose ingests for bonded and vdW terms. Cite: Huang, J. & MacKerell, A. D., Jr. (2013) *J. Comput. Chem.* 34:2135-2145.
+
+**AutoDock Vina** (`Port('autodock vina')`). Copyright (c) 2006-2010, The Scripps Research Institute; author Dr Oleg Trott. Licensed under Apache-2.0. Source: [AutoDock-Vina](https://github.com/ccsb-scripps/AutoDock-Vina). Cite: Eberhardt, J. *et al.* (2021) *J. Chem. Inf. Model.* 61:3891-3898.
+
+**Rosetta REF15** (`Port('ref15')`). **Rosetta is not open-source software.** It is distributed under the Rosetta Software Non-Commercial License Agreement: free for employees of not-for-profit research institutions, government laboratories and universities, and for individuals not acting for or on behalf of a for-profit entity. Commercial use requires a separate licence from University of Washington CoMotion (license@uw.edu). The licence also forbids redistribution, so **Pose ships no Rosetta data** — `Port('ref15')` downloads it to your own installation and requires you to pass `accept_rosetta_license=True` to confirm you qualify. Cite: Alford, R. F. *et al.* (2017) *J. Chem. Theory Comput.* 13:3031-3048.
