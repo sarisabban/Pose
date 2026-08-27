@@ -1400,7 +1400,7 @@ class Pose():
 			r_OH = np.linalg.norm(Oj_b - Hi_b, axis=2)
 			r_CN = np.linalg.norm(Cj_b - Ni_b, axis=2)
 		with np.errstate(divide='ignore', invalid='ignore'):
-			E_mat = 0.084 * 1389.35458 * (
+			E_mat = 0.084 * 1389.3545756874 * (
 				1.0/r_ON + 1.0/r_CH - 1.0/r_OH - 1.0/r_CN)
 		near_zero = (
 			(r_ON < 0.001) | (r_CH < 0.001)
