@@ -6937,10 +6937,10 @@ def Port(name='openff', accept_rosetta_license=False):
 			lam = LK_L[a_self]
 			pre = lk_coeff[a_self][a_other]
 			def f(d):
-				x = (d - sig) / lam
+				x = (d - LJ_R[a_self]) / lam
 				return pre * math.exp(-x * x) / (d * d)
 			def df(d):
-				x = (d - sig) / lam
+				x = (d - LJ_R[a_self]) / lam
 				g = math.exp(-x * x)
 				return pre * g * (-2.0 * x / (lam * d * d)
 					- 2.0 / (d * d * d))
@@ -6963,7 +6963,7 @@ def Port(name='openff', accept_rosetta_license=False):
 			'far_poly':    list(fp_s),
 			'lk_coeff':    lk_coeff[self_idx][other_idx],
 			'lambda_self': lam_s,
-			'R_self':      sig,
+			'R_self':      LJ_R[self_idx],
 			'final_weight': 1.0,
 			'close_flat_comb':  f_s + f_o,
 			'close_poly_comb':  [x + y for x, y in zip(cp_s, cp_o)],
