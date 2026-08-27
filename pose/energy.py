@@ -15,6 +15,9 @@ class ForceField():
 	'''
 	Configurable molecular mechanics force field assembled from energy terms
 	'''
+	_VALSET = {'C': (4,), 'N': (3,), 'O': (2,), 'S': (2, 4, 6),
+				'P': (3, 5), 'Se': (2, 4, 6), 'F': (1,), 'Cl': (1,),
+				'Br': (1,), 'I': (1,), 'B': (3,)}
 	def __init__(self, name='Default', strict=False):
 		'''
 		Initialise the force field with a named parameter set from database.json
@@ -113,6 +116,29 @@ class ForceField():
 					E += fn(pose, cache=self._cache, grad=False,
 						box=box, **kwargs)
 		return (E, F) if grad else E
+	def _perceivecharges(self, pose):
+		'''
+		Perceive per-atom formal charges from the bond graph when the
+		source file did not supply them, so that SMIRKS patterns testing
+		formal charge match and NAGL normalises to the right total
+		Arguments:
+		----------
+			pose: Molecule - only molecules are perceived; a protein or
+				nucleic acid pose is left untouched
+		Returns:
+		--------
+			None: pose._formal_charges is filled in place when it is empty
+		'''
+		if pose.data.get('Type') != 'Molecule': return
+		if getattr(pose, '_formal_charges', {}): return
+		orders = pose.data.get('BondOrders', {}) or {}
+		fcg = {}
+		for i, a in pose.data['Atoms'].items():
+			vs = self._VALSET.get(a[1].capitalize())
+			if vs is None: continue
+			b = int(round(sum(orders.get(i, []))))
+			fcg[i] = b - min([x for x in vs if x >= b] or [max(vs)])
+		pose._formal_charges = {i: q for i, q in fcg.items() if q}
 	def _buildcache(self, pose, v):
 		'''
 		Build the topology and parameter cache for a pose
@@ -124,6 +150,7 @@ class ForceField():
 		--------
 			dict: the cache consumed by every potential method
 		'''
+		self._perceivecharges(pose)
 		atoms = pose.data['Atoms']
 		n = len(atoms)
 		cache = {'n': n}
@@ -582,6 +609,7 @@ class ForceField():
 			raise RuntimeError(
 				'AM1BCC weights missing from database.json. '
 				'Run database_nagl_extract.py to install them.')
+		self._perceivecharges(pose)
 		atoms = pose.data['Atoms']
 		bonds = pose.data['Bonds']
 		sorted_ids = sorted(atoms.keys())
