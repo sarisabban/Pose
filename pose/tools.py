@@ -6879,7 +6879,7 @@ def Port(name='openff', accept_rosetta_license=False):
 		return ds
 	def _etableonepair(at1, at2, self_idx, other_idx, sigma_pair,
 			LJ_R, LJ_W, LK_DG, LK_L, LK_V, lj_r6, lj_r12, lj_si, lj_ss,
-			lk_coeff, far_lo, max_dis, sol_c0, sol_c1, ljrep_d2):
+			lk_coeff, far_lo, max_dis, sol_c0, sol_c1, lk_d2s, ljrep_d2):
 		'''
 		Analytic energy-table fields for one atom pair, following the
 		published definition of the Rosetta all-atom energy function
@@ -6909,6 +6909,7 @@ def Port(name='openff', accept_rosetta_license=False):
 			ScoreMatch reads back out of ['EtablePairParams']['pairs']
 		'''
 		sig = sigma_pair
+		sig_lk = lk_d2s * sig
 		r12 = lj_r12[at1][at2]
 		r6 = lj_r6[at1][at2]
 		def _lj(d):
@@ -6944,8 +6945,8 @@ def Port(name='openff', accept_rosetta_license=False):
 				g = math.exp(-x * x)
 				return pre * g * (-2.0 * x / (lam * d * d)
 					- 2.0 / (d * d * d))
-			lo, hi = sig - sol_c0, sig + sol_c1
-			flat = f(sig)
+			lo, hi = sig_lk - sol_c0, sig_lk + sol_c1
+			flat = f(sig_lk)
 			a2, b2 = _splineddy2(lo, flat, 0.0, hi, f(hi), df(hi))
 			ccp = _cubicfromspline(lo, hi, flat, f(hi), a2, b2)
 			a3, b3 = _splineddy2(far_lo, f(far_lo), df(far_lo),
@@ -6956,8 +6957,8 @@ def Port(name='openff', accept_rosetta_license=False):
 		f_s, cp_s, fp_s, lam_s = _solv(self_idx, other_idx)
 		f_o, cp_o, fp_o, _ = _solv(other_idx, self_idx)
 		return {
-			'close_start': sig - sol_c0,
-			'close_end':   sig + sol_c1,
+			'close_start': sig_lk - sol_c0,
+			'close_end':   sig_lk + sol_c1,
 			'close_flat':  f_s,
 			'close_poly':  list(cp_s),
 			'far_poly':    list(fp_s),
@@ -7060,7 +7061,7 @@ def Port(name='openff', accept_rosetta_license=False):
 					LJ_R, LJ_W, LK_DG, LK_L, LK_V,
 					lj_r6, lj_r12, lj_si, lj_ss, lk_coeff,
 					etopt['FAR_LO'], MAX_DIS,
-					etopt['SOL_C0'], etopt['SOL_C1'],
+					etopt['SOL_C0'], etopt['SOL_C1'], etopt['LK_MIN_D2S'],
 					(LJ_SWITCH_D2S * s_ij) ** 2)
 				pairs[is_ * NTYPES + io_] = pair
 		return {'atom_types': list(_ETABLE_ATOM_TYPES),
@@ -8088,7 +8089,9 @@ def Port(name='openff', accept_rosetta_license=False):
 			+ 'core/scoring/etable/Etable.cc')
 		with urllib.request.urlopen(etb_url, timeout=120) as resp:
 			etb_txt = resp.read().decode('utf-8')
-		etopt = {'LJ_SWITCH_D2S': 0.6, 'SOL_C0': 0.3, 'SOL_C1': 0.2}
+		etopt = {'LJ_SWITCH_D2S': 0.6, 'SOL_C0': 0.3, 'SOL_C1': 0.2,
+			'LK_MIN_D2S': float(re.search(
+			r'lk_min_dis2sigma_\s*\(\s*([\d.]+)\s*\)', etb_txt).group(1))}
 		m = re.search(r'\(\s*max_dis_\s*-\s*([\d.]+)\s*\)\s*\*\s*10\.0',
 			etb_txt)
 		if m is None:
