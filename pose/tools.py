@@ -519,11 +519,6 @@ def Parameterise(cif_file, rotamer_json_file, unicode, tricode,
 	resid[tricode] = {'n_chi': int(rot['n_chi']),
 		'rotamers': rot['rotamers'],
 		'densities': rot.get('densities')}
-	# A semirotameric residue is not scored from the rotamer table: its
-	# terminal chi lives in FaDunNrchiDensities under Score Parameters,
-	# which is where energy.py reads it. Without this the payload a
-	# generated library carries is silently discarded and fa_dun falls
-	# through to the generic interpolation instead.
 	if rot.get('FaDunNrchiDensities'):
 		db.setdefault('Score Parameters', {}).setdefault(
 			'REF15', {}).setdefault('FaDunNrchiDensities', {})[
@@ -1071,7 +1066,7 @@ def HydrogenBondMap(pose):
 			d = [float(np.linalg.norm(o - n)), float(np.linalg.norm(c - h)),
 				float(np.linalg.norm(o - h)), float(np.linalg.norm(c - n))]
 			if min(d) < 0.001: continue
-			e = 0.084 * (1/d[0] + 1/d[1] - 1/d[2] - 1/d[3]) * 1389.35458
+			e = 0.084 * (1/d[0] + 1/d[1] - 1/d[2] - 1/d[3]) * 1389.3545756874
 			if e >= -2.092: continue
 			M[Ni[ki], Oi[kj]] = 1
 			M[Oi[kj], Ni[ki]] = 2
@@ -5363,10 +5358,6 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None, nrot_override=None):
 		acceptor_map[('SER', 'OG')] = 'hbacc_HXL'; base_map[('SER','OG')] = 'CB'
 		acceptor_map[('THR', 'OG1')] = 'hbacc_HXL'
 		base_map[('THR','OG1')] = 'CB'
-		# Non-canonical sidechains. Chemical types follow the closest
-		# canonical analogue: ORN's neutral amine as the amide amine
-		# (its NH2O atom type already is), the phosphate esters as
-		# hydroxyls, and FT6's indole NE1 exactly as TRP's.
 		donor_map[('ORN', 'NE')] = 'hbdon_CXA'
 		donor_map[('FT6', 'NE1')] = 'hbdon_IND'
 		donor_map[('TPO', 'O2P')] = 'hbdon_HXL'

@@ -1003,10 +1003,10 @@ class ForceField():
 		r = np.maximum(r, self._EPS)
 		epsilon_r = self.Parameters['Constants']['epsilon_r']
 		if alg == 'constant':
-			elec = (1389.35458 * qq) / (epsilon_r * r)
+			elec = (1389.3545756874 * qq) / (epsilon_r * r)
 			dU_dr = -elec / r
 		elif alg == 'ddd':
-			elec = (1389.35458 * qq) / (epsilon_r * r * r)
+			elec = (1389.3545756874 * qq) / (epsilon_r * r * r)
 			dU_dr = -2.0 * elec / r
 		else:
 			raise ValueError(
@@ -1196,9 +1196,9 @@ class ForceField():
 		r = np.maximum(r, self._EPS)
 		epsilon_r = self.Parameters['Constants']['epsilon_r']
 		if alg == 'constant':
-			coeff = 1389.35458 * q[None, :] / (epsilon_r * r**3)
+			coeff = 1389.3545756874 * q[None, :] / (epsilon_r * r**3)
 		elif alg == 'ddd':
-			coeff = 1389.35458 * q[None, :] / (epsilon_r * r**4)
+			coeff = 1389.3545756874 * q[None, :] / (epsilon_r * r**4)
 		else:
 			raise ValueError(
 				"PolarisationPotential: unknown alg=%r "
@@ -1206,7 +1206,7 @@ class ForceField():
 		coeff = coeff * weight
 		E = np.einsum('ij,ijk->ik', coeff, dr)
 		E_sq = np.sum(E**2, axis=1)
-		energy = float(-0.5 * np.sum(alpha * E_sq) / 1389.35458)
+		energy = float(-0.5 * np.sum(alpha * E_sq) / 1389.3545756874)
 		if not grad: return energy
 		p_pow = 3.0 if alg == 'constant' else 4.0
 		rhat = dr / r[:, :, None]
@@ -1214,7 +1214,7 @@ class ForceField():
 		G = E[:, None, :] - p_pow * E_dot_rhat[:, :, None] * rhat
 		A = alpha[:, None] * coeff
 		M = A[:, :, None] * G
-		forces = (np.sum(M, axis=1) - np.sum(M, axis=0)) / 1389.35458
+		forces = (np.sum(M, axis=1) - np.sum(M, axis=0)) / 1389.3545756874
 		return energy, forces
 	def CMAPPotential(self, pose, cache, alg='catmullrom', grad=True, box=None):
 		'''
