@@ -344,7 +344,7 @@ A hash of the bond graph + atom records + amino-acid assignments is cached, so r
 | `ff.PolarisationPotential(pose, cache, alg='constant', grad=True, box=None)`    | Induced-dipole polarisation, `−½·Σ αᵢ·|Eᵢ|²`, zero when the force field sets α = 0. The per-atom field falls as `1/r³` under `alg='constant'` and `1/r⁴` under `alg='ddd'` |
 | `ff.CMAPPotential(pose, cache, alg='catmullrom', grad=True, box=None)`          | Backbone (φ, ψ) cross-term correction on the per-residue 24×24 grid. `alg='catmullrom'` is centred-difference bicubic, `alg='openmm'` is periodic-cubic-spline bicubic |
 
-> **Charge model**: under `OpenFF`, partial charges are computed by `ForceField.NAGLCharges(pose)`, a NumPy reimplementation of the [`openff-gnn-am1bcc-1.0.0`](https://github.com/openforcefield/openff-nagl-models) graph neural network released by the [Open Force Field Initiative](https://github.com/openforcefield). Output is bit-equivalent to upstream NAGL float32 inference, with the total constrained to the molecule's formal charge via electronegativity equalisation. NAGL weights live under `['OpenFF']['AM1BCC']`; force fields without that sub-key (e.g. `Default`) skip NAGL and fall back to library charges then atom-record charges. SMIRKS pattern assignment for bonded and vdW parameters is done in `pose.energy.SMIRKSMatch(pose, params)`, a pure-NumPy SMIRKS engine. All numerical values in `database.json` are in **kJ/mol** (lengths in Å, angles in degrees).
+> **Charge model**: under `OpenFF`, partial charges are computed by `ForceField.NAGLCharges(pose)`, a NumPy reimplementation of the [`openff-gnn-am1bcc-1.0.0`](https://github.com/openforcefield/openff-nagl-models) graph neural network released by the [Open Force Field Initiative](https://github.com/openforcefield). Output is equivalent to upstream NAGL float32 inference, with the total constrained to the molecule's formal charge via electronegativity equalisation. NAGL weights live under `['OpenFF']['AM1BCC']`; force fields without that sub-key (e.g. `Default`) skip NAGL and fall back to library charges then atom-record charges. SMIRKS pattern assignment for bonded and vdW parameters is done in `pose.energy.SMIRKSMatch(pose, params)`, a pure-NumPy SMIRKS engine. All numerical values in `database.json` are in **kJ/mol** (lengths in Å, angles in degrees).
 
 ### Energy score methods
 
@@ -666,6 +666,7 @@ Apache-2.0 covers Pose's own source code; `pose/database.json` additionally bund
 
 
 
+**OpenFF NAGL `openff-gnn-am1bcc-1.0.0`** — graph-neural-network weights for AM1-BCC charge prediction under `['Energy Parameters']['OpenFF']['AM1BCC']`. Copyright (c) 2023, Open Forcefield Group. Licensed under [CC-BY-4.0](https://creativecommons.org/licenses/by/4.0/). Source: [openff-nagl-models](https://github.com/openforcefield/openff-nagl-models). *Modifications:* tensors are extracted from the PyTorch checkpoint and stored as base64 float32; inference is reimplemented in NumPy in `pose.energy.ForceField.NAGLCharges`, with output equivalent to upstream float32 inference.
 
 
 
