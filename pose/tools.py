@@ -1023,7 +1023,7 @@ def HydrogenBondMap(pose):
 	Backbone hydrogen bond map from the DSSP electrostatic criterion
 	(Kabsch & Sander 1983, Biopolymers 22:2577)
 	E = 0.084*(1/r_ON + 1/r_CH - 1/r_OH
-	- 1/r_CN)*1389.35458 kJ/mol, accepted when E < -2.092 kJ/mol
+	- 1/r_CN)*1389.3545756874 kJ/mol, accepted when E < -2.092 kJ/mol
 	Arguments:
 	----------
 		pose: Protein pose carrying backbone N, C, and O atoms
