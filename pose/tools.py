@@ -7032,6 +7032,19 @@ def Port(name='openff', accept_rosetta_license=False):
 		LJ_S2W = -12.0 * (LJ_S2D**13 - LJ_S2D**7)
 		sigma = [[max(LJ_R[i] + LJ_R[j], 1e-9) for j in range(NTYPES)]
 			for i in range(NTYPES)]
+		ACC = [bool(atom_types[n].get('acceptor')) for n in _ETABLE_ATOM_TYPES]
+		DON = [bool(atom_types[n].get('donor')) for n in _ETABLE_ATOM_TYPES]
+		POL = [bool(atom_types[n].get('polar_h')) for n in _ETABLE_ATOM_TYPES]
+		OHD = [n[:2] in ('OH', 'OW') or n == 'Oet3'
+			for n in _ETABLE_ATOM_TYPES]
+		for i in range(NTYPES):
+			for j in range(NTYPES):
+				if (ACC[i] and DON[j]) or (DON[i] and ACC[j]):
+					sigma[i][j] = (etopt['LJ_HB_OH']
+						if (DON[i] and OHD[i]) or (DON[j] and OHD[j])
+						else etopt['LJ_HB_DIS'])
+				elif (ACC[i] and POL[j]) or (POL[i] and ACC[j]):
+					sigma[i][j] = etopt['LJ_HB_HDIS']
 		inv_neg2_pi_sqrt_pi = -1.0 / (2.0 * math.pi * math.sqrt(math.pi))
 		lk_coeff_tmp = [inv_neg2_pi_sqrt_pi * LK_DG[i] / LK_L[i]
 			for i in range(NTYPES)]
@@ -8090,6 +8103,13 @@ def Port(name='openff', accept_rosetta_license=False):
 		with urllib.request.urlopen(etb_url, timeout=120) as resp:
 			etb_txt = resp.read().decode('utf-8')
 		etopt = {'LJ_SWITCH_D2S': 0.6, 'SOL_C0': 0.3, 'SOL_C1': 0.2,
+			'LJ_HB_DIS': float(re.search(
+			r'lj_hbond_dis_\s*\(\s*([\d.]+)\s*\)', etb_txt).group(1)),
+			'LJ_HB_HDIS': float(re.search(
+			r"'lj_hbond_hdis'.*?default\s*=\s*'([\d.]+)'", opt_txt).group(1)),
+			'LJ_HB_OH': float(re.search(
+			r"'lj_hbond_OH_donor_dis'.*?default\s*=\s*'([\d.]+)'",
+			opt_txt).group(1)),
 			'LK_MIN_D2S': float(re.search(
 			r'lk_min_dis2sigma_\s*\(\s*([\d.]+)\s*\)', etb_txt).group(1))}
 		m = re.search(r'\(\s*max_dis_\s*-\s*([\d.]+)\s*\)\s*\*\s*10\.0',
