@@ -5350,9 +5350,9 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None, nrot_override=None):
 		base_map[('GLU','OE1')] = 'CD'
 		acceptor_map[('GLU', 'OE2')] = 'hbacc_CXL'
 		base_map[('GLU','OE2')] = 'CD'
-		acceptor_map[('HIS', 'ND1')] = 'hbacc_IME'
+		acceptor_map[('HIS', 'ND1')] = 'hbacc_IMD'
 		base_map[('HIS','ND1')] = 'CG'
-		acceptor_map[('HIS_D', 'NE2')] = 'hbacc_IMD'
+		acceptor_map[('HIS_D', 'NE2')] = 'hbacc_IME'
 		base_map[('HIS_D','NE2')] = 'CD2'
 		acceptor_map[('TYR', 'OH')] = 'hbacc_AHX'; base_map[('TYR','OH')] = 'CZ'
 		acceptor_map[('SER', 'OG')] = 'hbacc_HXL'; base_map[('SER','OG')] = 'CB'
@@ -5509,6 +5509,10 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None, nrot_override=None):
 		if entry is None: return
 		D_xyz = coords[d['D']]; H_xyz = coords[d['H']]
 		A_xyz = coords[a['A']]; B_xyz = coords[a['B']]
+		if (params.get('HBond_data', {}).get('acc_hybridization', {})
+				.get(a['chem']) == 'RING_HYBRID'
+				and a.get('B2') is not None):
+			B_xyz = 0.5 * (B_xyz + coords[a['B2']])
 		AH = float(dHA[ix, iy])
 		vDH = D_xyz - H_xyz; vAH = A_xyz - H_xyz
 		cosAHD = float(np.dot(vDH, vAH) /
@@ -5703,7 +5707,15 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None, nrot_override=None):
 			if b_ai is None: continue
 			chem = acceptor_map[key]
 			b2_ai = None
-			if chem in ('hbacc_HXL', 'hbacc_AHX'):
+			hybk = (params.get('HBond_data', {})
+				.get('acc_hybridization', {}).get(chem))
+			if hybk == 'RING_HYBRID':
+				for k in bonds.get(int(ai), []):
+					k = int(k)
+					if k == b_ai: continue
+					if atoms.get(k, [None, 'H'])[1] == 'H': continue
+					b2_ai = k; break
+			elif chem in ('hbacc_HXL', 'hbacc_AHX'):
 				for k in bonds.get(int(ai), []):
 					k = int(k)
 					if atoms.get(k, [None,'X'])[1] == 'H':
@@ -6879,7 +6891,8 @@ def Port(name='openff', accept_rosetta_license=False):
 		return ds
 	def _etableonepair(at1, at2, self_idx, other_idx, sigma_pair,
 			LJ_R, LJ_W, LK_DG, LK_L, LK_V, lj_r6, lj_r12, lj_si, lj_ss,
-			lk_coeff, far_lo, max_dis, sol_c0, sol_c1, lk_d2s, ljrep_d2):
+			lk_coeff, far_lo, max_dis, bpa2, sol_lo, sol_hi, sol_cap,
+			carb_dis, lk_d2s, ljrep_d2):
 		'''
 		Analytic energy-table fields for one atom pair, following the
 		published definition of the Rosetta all-atom energy function
@@ -6923,6 +6936,19 @@ def Port(name='openff', accept_rosetta_license=False):
 			max_dis, 0.0, 0.0)
 		ljatr_cp = _cubicfromspline(far_lo, max_dis, ylo, 0.0,
 			y2lo, y2hi)
+		CARBS = ('CH1', 'CH2', 'CH3', 'aroC')
+		iscarb = (_ETABLE_ATOM_TYPES[at1] in CARBS
+			and _ETABLE_ATOM_TYPES[at2] in CARBS)
+		ibin = int(carb_dis * carb_dis * bpa2 + 1.0)
+		flat_d = math.sqrt((ibin - 1) / bpa2) if iscarb else sig_lk
+		swtch = (ibin + 1) if iscarb \
+			else int(sig_lk * sig_lk * bpa2 + 1.0) + 1
+		sol_lo_d = math.sqrt((max(1, swtch - sol_lo) - 1) / bpa2)
+		sol_hi_d = math.sqrt((min(swtch + sol_hi, sol_cap) - 1) / bpa2)
+		def _fdslope(fn, x, back):
+			y = math.sqrt(x * x - 1.0 / bpa2) if back \
+				else math.sqrt(x * x + 1.0 / bpa2)
+			return (fn(x) - fn(y)) / (x - y)
 		def _solv(a_self, a_other):
 			'''
 			Solvation curve pieces for one direction of the pair
@@ -6945,20 +6971,27 @@ def Port(name='openff', accept_rosetta_license=False):
 				g = math.exp(-x * x)
 				return pre * g * (-2.0 * x / (lam * d * d)
 					- 2.0 / (d * d * d))
-			lo, hi = sig_lk - sol_c0, sig_lk + sol_c1
-			flat = f(sig_lk)
+			lo, hi = sol_lo_d, sol_hi_d
+			flat = f(flat_d)
 			a2, b2 = _splineddy2(lo, flat, 0.0, hi, f(hi), df(hi))
 			ccp = _cubicfromspline(lo, hi, flat, f(hi), a2, b2)
 			a3, b3 = _splineddy2(far_lo, f(far_lo), df(far_lo),
 				max_dis, 0.0, 0.0)
 			fcp = _cubicfromspline(far_lo, max_dis, f(far_lo), 0.0,
 				a3, b3)
-			return flat, ccp, fcp, lam
-		f_s, cp_s, fp_s, lam_s = _solv(self_idx, other_idx)
-		f_o, cp_o, fp_o, _ = _solv(other_idx, self_idx)
+			a2f, b2f = _splineddy2(lo, flat, 0.0, hi, f(hi),
+				_fdslope(f, hi, False))
+			ccpf = _cubicfromspline(lo, hi, flat, f(hi), a2f, b2f)
+			a3f, b3f = _splineddy2(far_lo, f(far_lo),
+				_fdslope(f, far_lo, True), max_dis, 0.0, 0.0)
+			fcpf = _cubicfromspline(far_lo, max_dis, f(far_lo), 0.0,
+				a3f, b3f)
+			return flat, ccp, fcp, lam, ccpf, fcpf
+		f_s, cp_s, fp_s, lam_s, cpf_s, fpf_s = _solv(self_idx, other_idx)
+		f_o, cp_o, fp_o, _, cpf_o, fpf_o = _solv(other_idx, self_idx)
 		return {
-			'close_start': sig_lk - sol_c0,
-			'close_end':   sig_lk + sol_c1,
+			'close_start': sol_lo_d,
+			'close_end':   sol_hi_d,
 			'close_flat':  f_s,
 			'close_poly':  list(cp_s),
 			'far_poly':    list(fp_s),
@@ -6967,8 +7000,8 @@ def Port(name='openff', accept_rosetta_license=False):
 			'R_self':      LJ_R[self_idx],
 			'final_weight': 1.0,
 			'close_flat_comb':  f_s + f_o,
-			'close_poly_comb':  [x + y for x, y in zip(cp_s, cp_o)],
-			'far_poly_comb':    [x + y for x, y in zip(fp_s, fp_o)],
+			'close_poly_comb':  [x + y for x, y in zip(cpf_s, cpf_o)],
+			'far_poly_comb':    [x + y for x, y in zip(fpf_s, fpf_o)],
 			'lj_minimum':         sig,
 			'lj_r12_coeff':       r12,
 			'lj_r6_coeff':        r6,
@@ -7074,7 +7107,9 @@ def Port(name='openff', accept_rosetta_license=False):
 					LJ_R, LJ_W, LK_DG, LK_L, LK_V,
 					lj_r6, lj_r12, lj_si, lj_ss, lk_coeff,
 					etopt['FAR_LO'], MAX_DIS,
-					etopt['SOL_C0'], etopt['SOL_C1'], etopt['LK_MIN_D2S'],
+					etopt['BPA2'], etopt['SOL_LO'], etopt['SOL_HI'],
+					etopt['SOL_CAP'], etopt['CARB_DIS'],
+					etopt['LK_MIN_D2S'],
 					(LJ_SWITCH_D2S * s_ij) ** 2)
 				pairs[is_ * NTYPES + io_] = pair
 		return {'atom_types': list(_ETABLE_ATOM_TYPES),
@@ -8102,7 +8137,21 @@ def Port(name='openff', accept_rosetta_license=False):
 			+ 'core/scoring/etable/Etable.cc')
 		with urllib.request.urlopen(etb_url, timeout=120) as resp:
 			etb_txt = resp.read().decode('utf-8')
-		etopt = {'LJ_SWITCH_D2S': 0.6, 'SOL_C0': 0.3, 'SOL_C1': 0.2,
+		eto_url = (_REF15_REPO.replace('/database/', '/source/src/')
+			+ 'core/scoring/etable/EtableOptions.cc')
+		with urllib.request.urlopen(eto_url, timeout=120) as resp:
+			eto_txt = resp.read().decode('utf-8')
+		etopt = {'LJ_SWITCH_D2S': 0.6,
+			'BPA2': float(re.search(
+			r'bins_per_A2\s*\(\s*([\d.]+)\s*\)', eto_txt).group(1)),
+			'SOL_LO': int(re.search(
+			r'SWTCH\s*-\s*(\d+)\s*\)', etb_txt).group(1)),
+			'SOL_HI': int(re.search(
+			r'SWTCH\s*\+\s*(\d+)\s*,', etb_txt).group(1)),
+			'SOL_CAP': int(re.search(
+			r'SWTCH\s*\+\s*\d+\s*,\s*(\d+)\s*\)', etb_txt).group(1)),
+			'CARB_DIS': float(re.search(
+			r'Real const bin = \(\s*([\d.]+)\s*\*', etb_txt).group(1)),
 			'LJ_HB_DIS': float(re.search(
 			r'lj_hbond_dis_\s*\(\s*([\d.]+)\s*\)', etb_txt).group(1)),
 			'LJ_HB_HDIS': float(re.search(
