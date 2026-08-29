@@ -3630,10 +3630,14 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None, nrot_override=None):
 				"ScoreMatch: ['TerminalCharges'] or ['TerminalTypes'] is "
 				"missing from the score parameters. Run "
 				"tools.Port('ref15') to install it.")
+		D_TO_L = {v['Tricode'][1]: v['Tricode'][0]
+			for v in DBLoad()['Amino Acids'].values()
+			if len(v.get('Tricode') or []) >= 2}
 		for ri in n_term_res:
 			info = aas.get(ri)
 			if info is None: continue
 			tri = info[5] if len(info) >= 6 else None
+			tri = D_TO_L.get(tri, tri)
 			if tri == 'PRO':
 				for ai in info[2] + info[3]:
 					ai = int(ai)
