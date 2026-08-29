@@ -1974,18 +1974,6 @@ def Anneal(pose, ff=None, n_steps=10000, T_start=2000.0, T_end=10.0,
 		'sigma_history': np.asarray(sigma_history, dtype=np.float64),
 		'best_step': int(best_step)}
 
-
-
-
-
-
-
-
-
-
-
-
-
 def SMIRKSMatch(pose, params):
 	'''
 	Assign force-field parameters to a pose by SMIRKS pattern matching,
