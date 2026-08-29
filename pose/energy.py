@@ -1422,6 +1422,9 @@ class Score():
 		self.NCAA_PARENT = {v['Tricode'][0]: v['Parent']
 			for v in DBLoad()['Amino Acids'].values()
 			if 'Parent' in v and 'Tricode' in v}
+		self.D_TO_L = {v['Tricode'][1]: v['Tricode'][0]
+			for v in DBLoad()['Amino Acids'].values()
+			if len(v.get('Tricode') or []) >= 2}
 		self.FUSED = {v['Tricode'][0]
 			for v in DBLoad()['Amino Acids'].values()
 			if v.get('Fused') and 'Tricode' in v}
@@ -2032,6 +2035,7 @@ class Score():
 			float: the running total plus this residue's contribution
 		'''
 		tri = info[5] if len(info) >= 6 else None
+		tri = self.D_TO_L.get(tri, tri)
 		if tri == 'HIS_D': tri = 'HIS'
 		entry = residues_db.get(tri)
 		if entry is None: return raw
@@ -2042,6 +2046,7 @@ class Score():
 			psi = cache['cdih'](pose, int(ri), 'PSI')
 		except Exception:
 			phi = float('nan'); psi = float('nan')
+		if str(info[0]).islower(): phi, psi = -phi, -psi
 		if math.isnan(phi): phi = -90.0
 		if math.isnan(psi): psi = 130.0
 		fp = (phi - phi_start) / phi_step
@@ -2062,7 +2067,7 @@ class Score():
 			except Exception:
 				bad = True; break
 			if math.isnan(v): bad = True; break
-			chi_now.append(v)
+			chi_now.append(-v if str(info[0]).islower() else v)
 		if bad: return raw
 		n_rot = n_chi - 1 if tri in self.SEMIROT else n_chi
 		if tri in self.SEMIROT:
@@ -2477,17 +2482,19 @@ class Score():
 				nxt = sorted_ris[k+1]
 				nxt_info = aas.get(nxt)
 				if nxt_info and len(nxt_info) >= 6:
-					next_tri[ri] = nxt_info[5]
+					next_tri[ri] = self.D_TO_L.get(nxt_info[5], nxt_info[5])
 		for ri in sorted_ris:
 			info = aas.get(ri)
 			if info is None: continue
 			tri = info[5] if len(info) >= 6 else None
+			tri = self.D_TO_L.get(tri, tri)
 			if tri == 'HIS_D': tri = 'HIS'
 			if tri in self.NCAA_PARENT: tri = self.NCAA_PARENT[tri]
 			try:
 				phi = cache['cdih'](pose, ri, 'PHI')
 				psi = cache['cdih'](pose, ri, 'PSI')
 			except Exception: continue
+			if str(info[0]).islower(): phi, psi = -phi, -psi
 			if math.isnan(phi) or math.isnan(psi): continue
 			use_pre = (next_tri.get(ri) in self.FUSED
 				and tri in pre_t and pre_t[tri])
@@ -2572,6 +2579,7 @@ class Score():
 		for ri, info in aas.items():
 			if int(ri) in nterm or int(ri) in cterm: continue
 			tri = info[5] if len(info) >= 6 else None
+			tri = self.D_TO_L.get(tri, tri)
 			if tri == 'HIS_D': tri = 'HIS'
 			if tri in self.NCAA_PARENT: tri = self.NCAA_PARENT[tri]
 			if tri not in cache_pp: continue
@@ -2579,6 +2587,7 @@ class Score():
 				phi = cache['cdih'](pose, int(ri), 'PHI')
 				psi = cache['cdih'](pose, int(ri), 'PSI')
 			except Exception: continue
+			if str(info[0]).islower(): phi, psi = -phi, -psi
 			if math.isnan(phi) or math.isnan(psi): continue
 			fp = (phi + 175.0) / 10.0
 			fs = (psi + 175.0) / 10.0
@@ -2636,6 +2645,7 @@ class Score():
 		for ri in sorted(aas):
 			if int(ri) in cterm: continue
 			tri = aas[ri][5] if len(aas[ri]) >= 6 else None
+			tri = self.D_TO_L.get(tri, tri)
 			if tri == 'HIS_D': tri = 'HIS'
 			if tri in self.NCAA_PARENT: tri = self.NCAA_PARENT[tri]
 			try:
@@ -2643,6 +2653,7 @@ class Score():
 				phi = cache['cdih'](pose, int(ri), 'PHI')
 				psi = cache['cdih'](pose, int(ri), 'PSI')
 			except Exception: continue
+			if str(aas[ri][0]).islower(): om, phi, psi = -om, -phi, -psi
 			if math.isnan(om): continue
 			om_nn = om
 			while om_nn < 0: om_nn += 360
@@ -2720,6 +2731,7 @@ class Score():
 			if i > 0: ri_to_prev[r] = ri_sorted[i - 1]
 		for ri, info in aas.items():
 			tri = info[5] if len(info) >= 6 else None
+			tri = self.D_TO_L.get(tri, tri)
 			if tri not in self.FUSED: continue
 			name_to_idx = {atoms[int(a)][0]: int(a)
 				for a in info[2] + info[3]}
@@ -2749,6 +2761,7 @@ class Score():
 			o_prev = coords[prev_atoms['O']]
 			chi4 = self.dihedralradians(coords[name_to_idx['CD']], n,
 				c_prev, o_prev)
+			if str(info[0]).islower(): chi4 = -chi4
 			if chi4 < -math.pi / 2: chi4 += 2 * math.pi
 			if chi4 > math.pi / 2:
 				diff = chi4 - trans_mean
@@ -2847,6 +2860,7 @@ class Score():
 		cys = []
 		for ri, info in aas.items():
 			tri = info[5] if len(info) >= 6 else None
+			tri = self.D_TO_L.get(tri, tri)
 			if tri != 'CYS': continue
 			name_to_idx = {atoms[int(a)][0]: int(a)
 				for a in info[2] + info[3]}
@@ -2960,6 +2974,7 @@ class Score():
 		raw = 0.0
 		for ri, info in aas.items():
 			tri = info[5] if len(info) >= 6 else None
+			tri = self.D_TO_L.get(tri, tri)
 			if tri != 'TYR': continue
 			name_to_idx = {atoms[int(a)][0]: int(a)
 				for a in info[2] + info[3]}
@@ -3001,6 +3016,7 @@ class Score():
 		raw = 0.0
 		for ri, info in aas.items():
 			tri = info[5] if len(info) >= 6 else None
+			tri = self.D_TO_L.get(tri, tri)
 			if tri == 'HIS_D': tri = 'HIS'
 			if tri in self.NCAA_PARENT: tri = self.NCAA_PARENT[tri]
 			raw += ref_by_tri.get(tri, 0.0)

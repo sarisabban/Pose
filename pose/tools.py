@@ -2790,6 +2790,13 @@ def SMIRKSMatch(pose, params):
 		--------
 			None: tp and out['restri'] are filled in place
 		'''
+		D_TO_L = {'DAL':'ALA', 'DAR':'ARG', 'DAS':'ASP', 'DSG':'ASN',
+			'DCY':'CYS', 'DGN':'GLN', 'DGL':'GLU', 'DHI':'HIS', 'DIL':'ILE',
+			'DLE':'LEU', 'DLY':'LYS', 'MED':'MET', 'DPN':'PHE', 'DPR':'PRO',
+			'DSN':'SER', 'DTH':'THR', 'DTR':'TRP', 'DTY':'TYR', 'DVA':'VAL',
+			# DSE is D-MSE (selenomethionine), NOT D-serine; that is DSN.
+			'DRN':'ORN', 'DSE':'MSE', 'DPO':'TPO', 'DEC':'SEC',
+			'DF6':'FT6', 'DPT':'PTR'}
 		aas = pose.data.get('Amino Acids') or {}
 		nucs = pose.data.get('Nucleotides') or {}
 		nbr = ctx['nbr']
@@ -2808,6 +2815,7 @@ def SMIRKSMatch(pose, params):
 		for ris in prot.values():
 			for ri in ris:
 				tri = str(aas[ri][5]).upper()
+				tri = D_TO_L.get(tri, tri)
 				ats = riatoms[ri]
 				anames = {tp['name'].get(a) for a in ats}
 				if tri in ('HIS', 'HID', 'HIE', 'HIP', 'HSD', 'HSE', 'HSP'):
@@ -5658,7 +5666,9 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None, nrot_override=None):
 		res_atom = {}
 		for ri, info in aas.items():
 			tri = info[5] if len(info) >= 6 else None
-			if tri == 'HIS': pass
+			if str(info[0]).islower():
+				tri = (pose.aminoacids.get(str(info[0]).upper(),
+					{}).get('Tricode') or [tri])[0]
 			for ai in info[2] + info[3]:
 				ai = int(ai)
 				atom_to_res[ai] = (int(ri), tri)
