@@ -2778,13 +2778,9 @@ def SMIRKSMatch(pose, params):
 		--------
 			None: tp and out['restri'] are filled in place
 		'''
-		D_TO_L = {'DAL':'ALA', 'DAR':'ARG', 'DAS':'ASP', 'DSG':'ASN',
-			'DCY':'CYS', 'DGN':'GLN', 'DGL':'GLU', 'DHI':'HIS', 'DIL':'ILE',
-			'DLE':'LEU', 'DLY':'LYS', 'MED':'MET', 'DPN':'PHE', 'DPR':'PRO',
-			'DSN':'SER', 'DTH':'THR', 'DTR':'TRP', 'DTY':'TYR', 'DVA':'VAL',
-			# DSE is D-MSE (selenomethionine), NOT D-serine; that is DSN.
-			'DRN':'ORN', 'DSE':'MSE', 'DPO':'TPO', 'DEC':'SEC',
-			'DF6':'FT6', 'DPT':'PTR'}
+		D_TO_L = {v['Tricode'][1]: v['Tricode'][0]
+			for v in DBLoad()['Amino Acids'].values()
+			if len(v.get('Tricode') or []) >= 2}
 		aas = pose.data.get('Amino Acids') or {}
 		nucs = pose.data.get('Nucleotides') or {}
 		nbr = ctx['nbr']
@@ -3834,13 +3830,9 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None, nrot_override=None):
 		residue_types_db = params['Residue_types']
 		N_TERM_H = {'H1':'H','H2':'H','H3':'H','1H':'H','2H':'H','3H':'H',
 			'HN':'H','HT1':'H','HT2':'H','HT3':'H'}
-		D_TO_L = {'DAL':'ALA','DAR':'ARG','DAS':'ASP','DSG':'ASN','DCY':'CYS',
-			'DGN':'GLN','DGL':'GLU','DHI':'HIS','DIL':'ILE','DLE':'LEU',
-			'DLY':'LYS','MED':'MET','DPN':'PHE','DPR':'PRO','DSN':'SER',
-			'DTH':'THR','DTR':'TRP','DTY':'TYR','DVA':'VAL',
-			# DSE is D-MSE (selenomethionine), NOT D-serine; that is DSN.
-			'DRN':'ORN','DSE':'MSE','DPO':'TPO','DEC':'SEC',
-			'DF6':'FT6','DPT':'PTR'}
+		D_TO_L = {v['Tricode'][1]: v['Tricode'][0]
+			for v in DBLoad()['Amino Acids'].values()
+			if len(v.get('Tricode') or []) >= 2}
 		atom_res = np.full(n, -1, dtype=np.int64)
 		for r, info in aas.items():
 			for ai in info[2] + info[3]:
