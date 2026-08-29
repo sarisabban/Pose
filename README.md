@@ -324,7 +324,7 @@ The `ForceField()` class evaluates the total potential energy and analytical per
 
 | Name      | Purpose |
 |-----------|---------|
-| `Default` | Deterministic smoke-test for development purposes with dummy parameters, tuned so that `ForceField()(Pose().Build('AaBbCcDdEeFfGgHhIiJjKkLlMmNnOoPpQqRrSsTtUuVvWwXxYyZz')) = 100.00 kJ/mol` exactly. It exercises **every** potential method |
+| `Default` | Deterministic smoke-test for development purposes with dummy parameters, tuned so that `p = Pose(); p.Build('AaBbCcDdEeFfGgHhIiJjKkLlMmNnOoPpQqRrSsTtUuVvWwXxYyZz'); print(ForceField('Default')(p))` = 100.00 kJ/mol exactly. It exercises **every** potential method |
 | `OpenFF`  | Small-molecule force field. Bonded + vdW parameters from [OpenFF Sage 2.3.0](https://github.com/openforcefield/openff-forcefields) ([CC-BY-4.0](https://creativecommons.org/licenses/by/4.0/)); per-atom AM1BCC charges from a NumPy reimplementation of [NAGL](https://github.com/openforcefield/openff-nagl-models) |
 
 A hash of the bond graph + atom records + amino-acid assignments is cached, so repeated calls during minimisation, MD, or annealing only recompute coordinate-dependent quantities.
@@ -577,7 +577,7 @@ D-amino acid handling: the library is keyed on the L-form 3-letter code only. Co
 
 **Field name conventions**, keys follow physics-textbook naming so the schema reads as formulas: `r_0` (equilibrium bond length), `K_b` (bond force constant), `theta_0`/`K_theta` (angles), `s_0`/`K_ub` (Urey-Bradley), `n`/`phi_0`/`K_phi` (torsion multiplicity / phase / barrier height), `r` (vdW half-min-distance), `q` (literal partial charges). The optional `id` field on `openFF` entries carries the upstream Sage identifier (e.g. `'b1'`, `'a1'`, `'t1'`); `Default` entries omit it.
 
-**`Default` (smoke-test / regression FF, 9 terms)**, one broad-wildcard SMIRKS per section (`[*:1]~[*:2]` for bonds, `[*:1]~[*:2]~[*:3]` for angles + UB, etc.). All linear coefficients (`K_b`, `K_theta`, `K_ub`, `K_phi`, `vdW.epsilon`, `CMAP` grid values) were uniformly calibrated so that `ForceField()(Pose().Build('AaBbCcDdEeFfGgHhIiJjKkLlMmNnOoPpQqRrSsTtUuVvWwXxYyZz'))` returns **100.00 kJ/mol** exactly (within float64 ulps). `Electrostatic.q = [0.0]` and `vdW.alpha = 0` by design, so `ElectrostaticPotential` and `PolarisationPotential` both evaluate to 0, this isolates the calibration from quadratic charge-dependent terms. `CMAP` carries a 24×24 constant grid for every A-Z one-letter code. `Default` is not for production; its only purpose is to drive every potential method, every cache path, and every dispatch branch in `ForceField` through a deterministic check.
+**`Default` (smoke-test / regression FF, 9 terms)**, one broad-wildcard SMIRKS per section (`[*:1]~[*:2]` for bonds, `[*:1]~[*:2]~[*:3]` for angles + UB, etc.). All linear coefficients (`K_b`, `K_theta`, `K_ub`, `K_phi`, `vdW.epsilon`, `CMAP` grid values) were uniformly calibrated so that `p = Pose(); p.Build('AaBbCcDdEeFfGgHhIiJjKkLlMmNnOoPpQqRrSsTtUuVvWwXxYyZz'); print(ForceField('Default')(p))` returns **100.00 kJ/mol** exactly (within float64 ulps). `Electrostatic.q = [0.0]` and `vdW.alpha = 0` by design, so `ElectrostaticPotential` and `PolarisationPotential` both evaluate to 0, this isolates the calibration from quadratic charge-dependent terms. `CMAP` carries a 24×24 constant grid for every A-Z one-letter code. `Default` is not for production; its only purpose is to drive every potential method, every cache path, and every dispatch branch in `ForceField` through a deterministic check.
 
 ### Description of score parameters in database.json:
 
@@ -632,7 +632,7 @@ D-amino acid handling: the library is keyed on the L-form 3-letter code only. Co
 | `CartBonded`         | Dict       | `{weight}`. Cartesian bond/angle/torsion deviation penalty (declared; not dispatched by `Default`'s `Terms`). **`REF15` only, weight 0, not dispatched — absent from `Default`** |
 | `Terms`              | List       | Ordered list of `[method_name, kwargs_dict]` pairs to evaluate. `Score.__call__` iterates this list and dispatches to each named method on `Score`. The `Default` set carries 24 entries,  every potential method except `TorsionalPenalty`, which is a docking-only marker |
 
-**`Default` (smoke-test / regression set, 24 dispatched terms)** (all except for one term). They contains dummy parameter values, it is used as a smoke-test to ensure that all `Score()` methods are correctly working. `Score()(Pose().Build('AaBbCcDdEeFfGgHhIiJjKkLlMmNnOoPpQqRrSsTtUuVvWwXxYyZz'))` returns **100.00** exactly.
+**`Default` (smoke-test / regression set, 24 dispatched terms)** (all except for one term). They contains dummy parameter values, it is used as a smoke-test to ensure that all `Score()` methods are correctly working. `p = Pose(); p.Build('AaBbCcDdEeFfGgHhIiJjKkLlMmNnOoPpQqRrSsTtUuVvWwXxYyZz'); print(Score('Default')(p))` returns **100.00** exactly.
 
 ---
 
