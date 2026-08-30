@@ -2866,13 +2866,13 @@ class Score():
 				for a in info[2] + info[3]}
 			if all(nm in name_to_idx
 					for nm in ('SG', 'CB', 'CA')):
-				cys.append((name_to_idx['SG'],
-					name_to_idx['CB'], name_to_idx['CA']))
+				cys.append((name_to_idx['SG'], name_to_idx['CB'],
+					name_to_idx['CA'], str(info[0]).islower()))
 		PI = math.pi
 		for i in range(len(cys)):
 			for j in range(i + 1, len(cys)):
-				sg1, cb1, ca1 = cys[i]
-				sg2, cb2, ca2 = cys[j]
+				sg1, cb1, ca1, d1 = cys[i]
+				sg2, cb2, ca2, d2 = cys[j]
 				ssdist = float(np.linalg.norm(
 					coords[sg1] - coords[sg2]))
 				if ssdist > 3.0: continue
@@ -2890,16 +2890,18 @@ class Score():
 					* math.cos(PI / 180 * (csang2 - a_mu)))
 				ss_dih = self.dihedraldegrees(coords[cb1], coords[sg1],
 					coords[sg2], coords[cb2])
+				if d1 and d2: ss_dih = -ss_dih
 				e1 = (math.exp(dss_logA1) * math.exp(dss_kappa1
 					* math.cos(PI/180 * (ss_dih - dss_mu1))))
 				e2 = (math.exp(dss_logA2) * math.exp(dss_kappa2
 					* math.cos(PI/180 * (ss_dih - dss_mu2))))
 				score += wt_dihSS * (-math.log(e1 + e2 + mest))
-				for ca_, cb_, sg_, sgo_ in (
-						(ca1, cb1, sg1, sg2),
-						(ca2, cb2, sg2, sg1)):
+				for ca_, cb_, sg_, sgo_, d_ in (
+						(ca1, cb1, sg1, sg2, d1),
+						(ca2, cb2, sg2, sg1, d2)):
 					ang = self.dihedraldegrees(coords[ca_], coords[cb_],
 						coords[sg_], coords[sgo_])
+					if d_: ang = -ang
 					e1 = (math.exp(dcs_logA1) * math.exp(
 						dcs_kappa1 * math.cos(
 							PI/180 * (ang - dcs_mu1))))
