@@ -434,8 +434,9 @@ class Pose():
 			self.data['BondOrders'] = {}
 			self.data['Coordinates'] = np.zeros((0, 3))
 		aa_db = self.aminoacids
-		Eadj = (0.400, 1.472, 0)
-		Oadj = (0.812, 0.940, 0)
+		Eadj = (0.521239, 1.418101, 0)
+		Oadj = (0.698352, 1.130728, 0)
+		Faxis = (0.851304, 0.524672, 0)
 		n = len(sequence)
 		aa_start = len(self.data['Amino Acids'])
 		atom_start = len(self.data['Atoms'])
@@ -468,8 +469,7 @@ class Pose():
 				AA = AA_co
 				p = AA[2]
 				AA = AA - p
-				H1, H2 = AA[3], AA[4]
-				u = np.cross(H1, H2)
+				u = np.array(Faxis)
 				nu = np.linalg.norm(u)
 				if nu >= 1e-10:
 					u = u / nu
