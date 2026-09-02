@@ -17,7 +17,7 @@ import numpy as np
 import urllib.request
 import xml.etree.ElementTree as ET
 from .pose import *
-from .energy import ForceField
+from .energy import ForceField, Score
 from collections import defaultdict, deque
 
 def _blosum(a, b):
@@ -1624,7 +1624,7 @@ def MSA(sequences):
 	return '\n'.join(out), final, conservation, entropy, pssm, dca
 
 def Cyclise(pose, mode='head-to-tail', res1=None, atom1=None,
-		res2=None, atom2=None, precoil=True):
+		res2=None, atom2=None, precoil=True, recoil=True):
 	'''
 	Form an intramolecular bond to build a cyclic peptide (macrocycle)
 	Arguments:
@@ -1668,12 +1668,13 @@ def Cyclise(pose, mode='head-to-tail', res1=None, atom1=None,
 			if atoms[a][0] == nm), None)
 	rr = sorted(src)
 	if mode == 'head-to-tail' and precoil:
-		for ri in rr:
-			for ang, val in (('PHI', 0.0), ('PSI', 180.0)):
-				try:
-					if not np.isnan(pose.GetDihedral(ri, ang)):
-						pose.RotateDihedral(ri, val, ang)
-				except Exception: pass
+		if recoil:
+			for ri in rr:
+				for ang, val in (('PHI', 0.0), ('PSI', 180.0)):
+					try:
+						if not np.isnan(pose.GetDihedral(ri, ang)):
+							pose.RotateDihedral(ri, val, ang)
+					except Exception: pass
 		nC, n0 = atomof(rr[-1], 'C'), atomof(rr[0], 'N')
 		hd = atomof(rr[0], '2H') or atomof(rr[0], '3H')
 		co = np.asarray(pose.data['Coordinates'], dtype=float)
@@ -1715,6 +1716,10 @@ def Cyclise(pose, mode='head-to-tail', res1=None, atom1=None,
 	else:
 		a_n, a_c = atomof(rr[0], 'N'), atomof(rr[-1], 'C')
 		drop = {atomof(rr[0], nm) for nm in ('2H', '3H', 'H2', 'H3')}
+		co = np.asarray(pose.data['Coordinates'], dtype=float)
+		d = float(np.linalg.norm(co[a_c] - co[a_n]))
+		if d > 2.0: raise Exception(
+			'Cyclise: closure failed, C-N is %.2f A' % d)
 		drop |= {atomof(rr[-1], nm)
 			for nm in ('OXT', 'OT1', 'OT2', "O''")}
 		drop.discard(None)
