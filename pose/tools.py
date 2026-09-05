@@ -1713,6 +1713,25 @@ def Cyclise(pose, mode='head-to-tail', res1=None, atom1=None,
 		if i1 is None or i2 is None:
 			raise Exception('Cyclize: sidechain atoms not found')
 		bov, rec = 1.0, [int(res1), int(res2)]
+		bonds, bo = pose.data['Bonds'], pose.data['BondOrders']
+		if i2 in bonds.get(i1, []): return
+		drop = set()
+		for s in (i1, i2):
+			h = next((j for j in bonds.get(s, []) if atoms[j][1] == 'H'), None)
+			if h is not None: drop.add(h)
+		keep = [i for i in sorted(atoms) if i not in drop]
+		nx = {old: k for k, old in enumerate(keep)}
+		pose.data['Coordinates'] = np.asarray(
+			pose.data['Coordinates'], dtype=float)[keep]
+		pose.data['Atoms'] = {nx[i]: atoms[i] for i in keep}
+		pose.data['Bonds'] = {nx[i]: [nx[j] for j in bonds.get(i, [])
+			if j in nx] for i in keep}
+		pose.data['BondOrders'] = {nx[i]: [o for j, o in zip(
+			bonds.get(i, []), bo.get(i, [])) if j in nx] for i in keep}
+		for ri in src:
+			src[ri][2] = [nx[i] for i in src[ri][2] if i in nx]
+			src[ri][3] = [nx[i] for i in src[ri][3] if i in nx]
+		i1, i2 = nx[i1], nx[i2]
 	else:
 		a_n, a_c = atomof(rr[0], 'N'), atomof(rr[-1], 'C')
 		drop = {atomof(rr[0], nm) for nm in ('2H', '3H', 'H2', 'H3')}
