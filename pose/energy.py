@@ -530,7 +530,9 @@ class ForceField():
 				self._addbond(bonds, orders, bondset, i, j)
 				added += 1
 		if pose.data.get('Type') == 'Protein':
-			sg = [i for i in ids if atoms[i][0] == 'SG']
+			sg = [i for i in ids if atoms[i][0] == 'SG'
+				and not any(atoms[j][1] == 'H'
+				for j in bonds.get(i, []))]
 			for a in range(len(sg)):
 				for b in range(a + 1, len(sg)):
 					i, j = sg[a], sg[b]

@@ -2737,6 +2737,13 @@ class Pose():
 				for ai in info[2] + info[3]:
 					aname = self.data['Atoms'][ai][0]
 					orig_coords[(i,aname)] = self.data['Coordinates'][ai].copy()
+			a2r = {ai: i for i in range(N)
+				for ai in AAs[i][2] + AAs[i][3]}
+			orig_ss = [(a2r[i1], a2r[i2])
+				for i1, nb in self.data['Bonds'].items()
+				for i2 in nb if i1 < i2
+				and self.data['Atoms'][i1][0] == 'SG'
+				and self.data['Atoms'][i2][0] == 'SG']
 			self.data = {
 				'Type': None, 'Energy': 0,
 				'Rg': 0, 'Mass': 0, 'Size': {},
@@ -2816,6 +2823,38 @@ class Pose():
 						aa[0] = sym.upper()
 						aa[5] = self.aminoacids[sym.upper()]['Tricode'][0]
 			self.data['Coordinates'] = coords
+			for r1, r2 in orig_ss:
+				atoms = self.data['Atoms']
+				aas = self.data['Amino Acids']
+				sgs = [next((a for a in aas[r][2] + aas[r][3]
+					if atoms[a][0] == 'SG'), None)
+					for r in (r1, r2)]
+				if None in sgs: continue
+				bonds = self.data['Bonds']
+				bor = self.data['BondOrders']
+				drop = {j for s in sgs for j in bonds.get(s, [])
+					if atoms[j][1] == 'H'}
+				keep = [i for i in sorted(atoms) if i not in drop]
+				nx = {o: k for k, o in enumerate(keep)}
+				self.data['Coordinates'] = np.asarray(
+					self.data['Coordinates'], dtype=float)[keep]
+				self.data['Atoms'] = {nx[i]: atoms[i] for i in keep}
+				self.data['Bonds'] = {nx[i]: [nx[j]
+					for j in bonds.get(i, []) if j in nx]
+					for i in keep}
+				self.data['BondOrders'] = {nx[i]: [o
+					for j, o in zip(bonds.get(i, []),
+					bor.get(i, [])) if j in nx] for i in keep}
+				for ri in aas:
+					aas[ri][2] = [nx[i] for i in aas[ri][2]
+						if i in nx]
+					aas[ri][3] = [nx[i] for i in aas[ri][3]
+						if i in nx]
+				s1, s2 = nx[sgs[0]], nx[sgs[1]]
+				self.data['Bonds'].setdefault(s1, []).append(s2)
+				self.data['BondOrders'].setdefault(s1, []).append(1.0)
+				self.data['Bonds'].setdefault(s2, []).append(s1)
+				self.data['BondOrders'].setdefault(s2, []).append(1.0)
 			self.CalcCharge()
 			self.CalcSASA()
 			self.CalcDSSP()
