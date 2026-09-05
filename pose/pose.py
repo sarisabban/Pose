@@ -604,6 +604,7 @@ class Pose():
 			bbi, bsi = [], []
 			for li in range(n_bb):
 				am = bbm[li]
+				if i == 0 and bbm[li][0] in ("P", "OP1", "OP2"): continue
 				self.data['Atoms'][ai]=[am[0],am[1],am[2],1.0,0.0,am[5]]
 				Co.append(tr[li])
 				ltg[li] = ai
@@ -654,6 +655,7 @@ class Pose():
 				bbi, bsi = [], []
 				for li in range(n_bb):
 					am = bbm[li]
+					if j == 0 and bbm[li][0] in ("P", "OP1", "OP2"): continue
 					self.data['Atoms'][ai]=[am[0],am[1],am[2],1.0,0.0,am[5]]
 					Co.append(tr[li])
 					ltg[li] = ai
@@ -684,6 +686,23 @@ class Pose():
 				self.data['Nucleotides'][ni] = [sym, chain, bbi, bsi, tricode]
 				nt_ch[chain].append(ni)
 				ni += 1
+		for ch5 in nt_ch.values():
+			nr = self.data['Nucleotides'][ch5[0]]
+			nx = {self.data['Atoms'][a][0]: a for a in nr[2] + nr[3]}
+			ov, cv = Co[nx["O5'"]], Co[nx["C5'"]]
+			u = (cv - ov) / np.linalg.norm(cv - ov)
+			ax = np.array([0., 0., 1.]) if abs(u[2]) < 0.9 else np.array([1., 0., 0.])
+			pp = ax - np.dot(ax, u) * u
+			pp = pp / np.linalg.norm(pp)
+			th = math.radians(108.5)
+			self.data['Atoms'][ai] = ["HO5'", 'H', 0.0, 1.0, 0.0, 's']
+			Co.append(ov + 0.96 * (math.cos(th) * u + math.sin(th) * pp))
+			nr[2].append(ai)
+			self.data['Bonds'].setdefault(ai, []).append(nx["O5'"])
+			self.data['BondOrders'].setdefault(ai, []).append(1)
+			self.data['Bonds'].setdefault(nx["O5'"], []).append(ai)
+			self.data['BondOrders'].setdefault(nx["O5'"], []).append(1)
+			ai += 1
 		self.data['Coordinates'] = (
 			np.array(Co) if Co else np.zeros((0, 3)))
 		self._phosphobonds(nt_ch)
