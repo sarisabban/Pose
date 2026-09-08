@@ -708,7 +708,7 @@ class Pose():
 		self._phosphobonds(nt_ch)
 	def _mutatefastprotein(self, index, residue):
 		'''
-		In-place single-residue sidechain swap, ~90x faster than Mutate()
+		In-place single-residue sidechain swap, ~10x faster than Mutate()
 		Arguments:
 		----------
 			index:   Residue index to mutate
