@@ -89,6 +89,80 @@ def _rotliblookup(rotlib, tri, phi, psi):
 	b = i * sn + j
 	return int(entry['n_chi']), rot['table'][off[b]:off[b + 1]]
 
+def _ringpuck(pose, res, theta, chi_type=1):
+	'''
+	Set one torsion of a fused side chain ring and re-close the ring,
+	preserving every ring bond length and every ring bond angle except
+	the one at the closure bond, which absorbs the pucker
+	Arguments:
+	----------
+		res:      Residue index carrying the fused side chain
+		theta:    Requested torsion in degrees
+		chi_type: Which chi angle theta refers to, 1 based
+	Returns:
+	--------
+		bool: True when the ring closed and the pose was updated,
+		False when the requested torsion is unreachable for this ring,
+		in which case nothing is changed
+	'''
+	def frame(p, q, r):
+		''' Orthonormal rows of a local frame with its origin at q '''
+		e1 = (p - q) / np.linalg.norm(p - q)
+		e2 = (r - q) - e1 * float(e1 @ (r - q))
+		e2 = e2 / np.linalg.norm(e2)
+		return np.stack([e1, e2, np.cross(e1, e2)])
+	def carry(heavy, p0, q0, r0, p1, q1, r1):
+		''' Move the hydrogens of one heavy atom with its own frame '''
+		M = frame(p1, q1, r1).T @ frame(p0, q0, r0)
+		for h in pose.data['Bonds'].get(heavy, []):
+			if pose.data['Atoms'][h][1] != 'H': continue
+			xyz[h] = q1 + M @ (xyz[h] - q0)
+	sym = pose.data['Amino Acids'][res][0].upper()
+	sets = pose.aminoacids[sym]['Chi Angle Atoms']
+	ring = list(sets[0])
+	for s in sets[1:]:
+		if s[3] not in ring: ring.append(s[3])
+	if len(ring) != 5: return False
+	iA, iB, iC, iD, iE = [pose.GetAtomIdx(res, n) for n in ring]
+	xyz = pose.data['Coordinates']
+	if chi_type != 1:
+		now = pose.GetDihedral(res, 'CHI', chi_type=chi_type)
+		return abs((now - theta + 180.0) % 360.0 - 180.0) < 1e-6
+	cur = pose.GetDihedral(res, 'CHI', chi_type=1)
+	if not math.isfinite(cur): return False
+	dDE = np.linalg.norm(xyz[iE] - xyz[iD])
+	dEA = np.linalg.norm(xyz[iA] - xyz[iE])
+	v1, v2 = xyz[iC] - xyz[iD], xyz[iE] - xyz[iD]
+	cosa = float(v1 @ v2) / (np.linalg.norm(v1) * np.linalg.norm(v2))
+	u = (xyz[iC] - xyz[iB]) / np.linalg.norm(xyz[iC] - xyz[iB])
+	phi = math.radians(theta - cur)
+	w = xyz[iD] - xyz[iC]
+	Dn = xyz[iC] + (w * math.cos(phi) + np.cross(u, w) * math.sin(phi)
+		+ u * float(u @ w) * (1.0 - math.cos(phi)))
+	n = (xyz[iC] - Dn) / np.linalg.norm(xyz[iC] - Dn)
+	cen = Dn + n * (dDE * cosa)
+	rad = dDE * math.sqrt(max(0.0, 1.0 - cosa * cosa))
+	e1 = np.cross(n, [1.0, 0.0, 0.0])
+	if np.linalg.norm(e1) < 1e-6: e1 = np.cross(n, [0.0, 1.0, 0.0])
+	e1 = e1 / np.linalg.norm(e1)
+	e2 = np.cross(n, e1)
+	g = cen - xyz[iA]
+	K = dEA ** 2 - float(g @ g) - rad ** 2
+	aa, bb = 2.0 * rad * float(g @ e1), 2.0 * rad * float(g @ e2)
+	R = math.hypot(aa, bb)
+	if R < 1e-9 or abs(K) > R: return False
+	f0 = math.atan2(bb, aa)
+	off = math.acos(max(-1.0, min(1.0, K / R)))
+	cands = [cen + rad * (math.cos(f0 + s * off) * e1
+		+ math.sin(f0 + s * off) * e2) for s in (1.0, -1.0)]
+	En = min(cands, key=lambda c: np.linalg.norm(c - xyz[iE]))
+	D0, E0 = xyz[iD].copy(), xyz[iE].copy()
+	carry(iC, xyz[iB], xyz[iC], D0, xyz[iB], xyz[iC], Dn)
+	carry(iD, xyz[iC], D0, E0, xyz[iC], Dn, En)
+	carry(iE, D0, E0, xyz[iA], Dn, En, xyz[iA])
+	xyz[iD], xyz[iE] = Dn, En
+	return True
+
 def Parameterise(cif_file, rotamer_json_file, unicode, tricode,
 		parent='', backup=True):
 	'''
@@ -1788,7 +1862,8 @@ def Rotamers(index, pose):
 	tri = (db.get('Tricode') or [None])[0]
 	if not tri: return
 	phi, psi = pose.GetDihedral(index, 'PHI'), pose.GetDihedral(index, 'PSI')
-	if math.isnan(phi) or math.isnan(psi): return
+	if math.isnan(phi): phi = 0.0
+	if math.isnan(psi): psi = 0.0
 	flip = c != c.upper()
 	n_chi, rows = _rotliblookup(DBLoad().get('Rotamer Library'), tri,
 		-phi if flip else phi, -psi if flip else psi)
@@ -1796,9 +1871,12 @@ def Rotamers(index, pose):
 	best = max(rows, key=lambda r: r[1])
 	for ci in range(n_chi):
 		mu = best[2 + ci]
-		pose.RotateDihedral(index, float(-mu if flip else mu),
-			'CHI', ci + 1)
-
+#		pose.RotateDihedral(index, float(-mu if flip else mu),
+#			'CHI', ci + 1)
+		if db.get('Fused'):
+			_ringpuck(pose, index, float(-mu if flip else mu), ci + 1)
+		else:
+			pose.RotateDihedral(index, float(-mu if flip else mu), 'CHI', ci+1)
 def Pack(pose, ff=None, n_steps=2000, T_start=10.0, T_end=0.1,
 		patience=400, seed=None):
 	'''
@@ -1833,7 +1911,8 @@ def Pack(pose, ff=None, n_steps=2000, T_start=10.0, T_end=0.1,
 		if not (db.get('Chi Angle Atoms') or []) or not tri: continue
 		phi = pose.GetDihedral(r, 'PHI')
 		psi = pose.GetDihedral(r, 'PSI')
-		if math.isnan(phi) or math.isnan(psi): continue
+		if math.isnan(phi): phi = 0.0
+		if math.isnan(psi): psi = 0.0
 		flip = c != c.upper()
 		n_chi, rows = _rotliblookup(rotlib, tri,
 			-phi if flip else phi, -psi if flip else psi)
@@ -1851,6 +1930,8 @@ def Pack(pose, ff=None, n_steps=2000, T_start=10.0, T_end=0.1,
 			'accepts': np.array([], dtype=bool), 'best_E': E0,
 			'steps_run': 0, 'converged': True, 'n_residues': 0}
 	res_ids = list(candidates.keys())
+	fused = {i for i in res_ids if pose.aminoacids[
+		pose.data['Amino Acids'][i][0].upper()].get('Fused')}
 	E_curr = float(ff(pose))
 	E_best = E_curr
 	best_state = {q: tuple(pose.GetDihedral(q, 'CHI', chi_type=ci+1)
@@ -1868,13 +1949,15 @@ def Pack(pose, ff=None, n_steps=2000, T_start=10.0, T_end=0.1,
 		snap = tuple(pose.GetDihedral(r, 'CHI', chi_type=ci+1)
 			for ci in range(n_chi))
 		for ci in range(n_chi):
-			pose.RotateDihedral(r, float(mus[k, ci]), 'CHI', ci+1)
+			if r in fused: _ringpuck(pose, r, float(mus[k, ci]), ci+1)
+			else: pose.RotateDihedral(r, float(mus[k, ci]), 'CHI', ci+1)
 		E_trial = float(ff(pose))
 		dE = E_trial - E_curr
 		ok = dE <= 0.0 or rng.random() < math.exp(-dE / max(T, 1e-12))
 		accepts[step] = ok
 		for ci in range(n_chi if not ok else 0):
-			pose.RotateDihedral(r, float(snap[ci]), 'CHI', ci+1)
+			if r in fused: _ringpuck(pose, r, float(snap[ci]), ci+1)
+			else: pose.RotateDihedral(r, float(snap[ci]), 'CHI', ci+1)
 		if ok: E_curr, last_accept = E_trial, step
 		if ok and E_curr < E_best:
 			E_best = E_curr
@@ -1887,7 +1970,8 @@ def Pack(pose, ff=None, n_steps=2000, T_start=10.0, T_end=0.1,
 	steps_run = step + 1
 	for q, chis in best_state.items():
 		for ci in range(candidates[q][2]):
-			pose.RotateDihedral(q, float(chis[ci]), 'CHI', ci+1)
+			if q in fused: _ringpuck(pose, q, float(chis[ci]), ci+1)
+			else: pose.RotateDihedral(q, float(chis[ci]), 'CHI', ci+1)
 	return float(ff(pose)), {
 		'energies': energies[:steps_run],
 		'temperatures': temperatures[:steps_run],
