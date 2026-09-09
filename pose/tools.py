@@ -1942,7 +1942,11 @@ def Anneal(pose, ff=None, n_steps=10000, T_start=2000.0, T_end=10.0,
 	large_arr = rng.random(size=n_steps) < p_large
 	noise_arr = rng.standard_normal(size=n_steps)
 	uni_arr = rng.random(size=n_steps)
-	E_curr = float(ff(pose, grad=False, box=box))
+	kw = {'grad': False, 'box': box}
+	try: E_curr = float(ff(pose, **kw))
+	except TypeError:
+		kw = {}
+		E_curr = float(ff(pose))
 	E_best = E_curr
 	coords_best = pose.data['Coordinates'].copy()
 	energies = np.empty(n_steps, dtype=np.float64)
@@ -1969,7 +1973,7 @@ def Anneal(pose, ff=None, n_steps=10000, T_start=2000.0, T_end=10.0,
 			energies[s] = E_curr
 			continue
 		move_types[s] = 1 if shear else 0
-		E_new = float(ff(pose, grad=False, box=box))
+		E_new = float(ff(pose, **kw))
 		dE = E_new - E_curr
 		RT = kB * float(T_arr[s])
 		boltz = math.exp(-dE / RT) if (dE > 0.0 and RT > 0.0) else 1.0
