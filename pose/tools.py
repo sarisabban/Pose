@@ -1799,7 +1799,7 @@ def Rotamers(index, pose):
 		pose.RotateDihedral(index, float(-mu if flip else mu),
 			'CHI', ci + 1)
 
-def Pack(pose, score=None, n_steps=2000, T_start=10.0, T_end=0.1,
+def Pack(pose, ff=None, n_steps=2000, T_start=10.0, T_end=0.1,
 		patience=400, seed=None):
 	'''
 	Repack side chains by simulated annealing over the rotamer ensemble
@@ -1807,9 +1807,9 @@ def Pack(pose, score=None, n_steps=2000, T_start=10.0, T_end=0.1,
 	Arguments:
 	----------
 		pose:     Protein pose carrying an Amino Acids table
-		score:    Score function to minimise, Score() when None
+		ff:       Score() or ForceField() to minimise, ForceField() if None
 		n_steps:  Maximum number of annealing proposals
-		T_start:  Initial temperature in score units
+		T_start:  Initial temperature in the units of the function supplied
 		T_end:    Final temperature, reached by geometric cooling
 		patience: Stop early after this many consecutive rejections
 		seed:     Seed for the random generator, None for unseeded
@@ -1820,7 +1820,7 @@ def Pack(pose, score=None, n_steps=2000, T_start=10.0, T_end=0.1,
 		dict: Log holding 'energies', 'temperatures', 'accepts',
 		'best_E', 'steps_run', 'converged' and 'n_residues'
 	'''
-	if score is None: score = Score()
+	if ff is None: ff = ForceField()
 	if pose.data.get('Amino Acids') is None:
 		raise ValueError('Pack requires a protein pose with Amino Acids')
 	rng = np.random.default_rng(seed)
@@ -1845,13 +1845,13 @@ def Pack(pose, score=None, n_steps=2000, T_start=10.0, T_end=0.1,
 			for row in rows], dtype=np.float64)
 		candidates[r] = (-mus if flip else mus, probs / probs.sum(), n_chi)
 	if not candidates:
-		E0 = float(score(pose))
+		E0 = float(ff(pose))
 		return E0, {'energies': np.array([E0]),
 			'temperatures': np.array([T_start]),
 			'accepts': np.array([], dtype=bool), 'best_E': E0,
 			'steps_run': 0, 'converged': True, 'n_residues': 0}
 	res_ids = list(candidates.keys())
-	E_curr = float(score(pose))
+	E_curr = float(ff(pose))
 	E_best = E_curr
 	best_state = {q: tuple(pose.GetDihedral(q, 'CHI', chi_type=ci+1)
 		for ci in range(candidates[q][2])) for q in res_ids}
@@ -1869,7 +1869,7 @@ def Pack(pose, score=None, n_steps=2000, T_start=10.0, T_end=0.1,
 			for ci in range(n_chi))
 		for ci in range(n_chi):
 			pose.RotateDihedral(r, float(mus[k, ci]), 'CHI', ci+1)
-		E_trial = float(score(pose))
+		E_trial = float(ff(pose))
 		dE = E_trial - E_curr
 		ok = dE <= 0.0 or rng.random() < math.exp(-dE / max(T, 1e-12))
 		accepts[step] = ok
@@ -1888,7 +1888,7 @@ def Pack(pose, score=None, n_steps=2000, T_start=10.0, T_end=0.1,
 	for q, chis in best_state.items():
 		for ci in range(candidates[q][2]):
 			pose.RotateDihedral(q, float(chis[ci]), 'CHI', ci+1)
-	return float(score(pose)), {
+	return float(ff(pose)), {
 		'energies': energies[:steps_run],
 		'temperatures': temperatures[:steps_run],
 		'accepts': accepts[:steps_run],
@@ -1907,7 +1907,7 @@ def Anneal(pose, ff=None, n_steps=10000, T_start=2000.0, T_end=10.0,
 	Arguments:
 	----------
 		pose:         Protein pose carrying an Amino Acids table
-		ff:           ForceField to evaluate, created when None
+		ff:           Score() or ForceField() to evaluate, ForceField() if None
 		n_steps:      Total Metropolis steps in the cooling schedule
 		T_start:      Starting temperature in Kelvin
 		T_end:        Final temperature in Kelvin
