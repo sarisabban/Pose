@@ -1493,6 +1493,8 @@ class Score():
 				self._topo_refX = X.copy()
 		self._cache['_hbond_memo'] = None
 		self._cache['_dihedral_memo'] = {}
+		self._cache['_pairs_memo'] = {}
+		self._cache['_ljraw_memo'] = {}
 		per_term = {}
 		torsional = False
 		for method_name, kwargs in self.terms:
@@ -1952,22 +1954,23 @@ class Score():
 		d2_low_other = d2_low[p_other[idx]]
 		MFADE = 1.0
 		frac_loc = np.zeros(len(idx), dtype=np.float64)
-		for k in range(len(idx)):
-			off = int(polar_off[k])
-			n_w = int(polar_cnt[k])
-			ws = water_xyz[off:off + n_w]
-			diff = ws - other_xyz[k]
-			d2_arr = np.einsum('ij,ij->i', diff, diff)
-			weighted = -MFADE * math.log(
-				float(np.sum(np.exp(
-					-(d2_arr - d2_low_other[k]) / MFADE))))
-			if weighted >= ramp_w2:
-				frac_loc[k] = 0.0
-			elif weighted <= 0.0:
-				frac_loc[k] = 1.0
-			else:
-				xprime = weighted / ramp_w2
-				frac_loc[k] = (1 - xprime * xprime) ** 2
+		weight_all = np.empty(len(idx), dtype=np.float64)
+		for n_w in np.unique(polar_cnt):
+			sel = np.where(polar_cnt == n_w)[0]
+			nw = int(n_w)
+			gi = polar_off[sel].astype(np.intp)[:, None] \
+				+ np.arange(nw, dtype=np.intp)
+			diff = water_xyz[gi] - other_xyz[sel][:, None, :]
+			d2_arr = np.einsum('kij,kij->ki', diff, diff)
+			weight_all[sel] = -MFADE * np.log(np.sum(np.exp(
+				-(d2_arr - d2_low_other[sel][:, None])
+				/ MFADE), axis=1))
+		hi = weight_all >= ramp_w2
+		lo = (~hi) & (weight_all <= 0.0)
+		frac_loc[lo] = 1.0
+		mid = np.where(~(hi | lo))[0]
+		xprime = (weight_all[mid] / ramp_w2).tolist()
+		frac_loc[mid] = [(1 - x * x) ** 2 for x in xprime]
 		out[idx] = frac_loc
 		return out
 	def FaDunPotential(self, pose, cache, ligand=None, **kw):
@@ -2064,7 +2067,7 @@ class Score():
 		bad = False
 		for ci in range(n_chi):
 			try:
-				v = pose.GetDihedral(int(ri),
+				v = cache['cdih'](pose, int(ri),
 					'CHI', chi_type=ci+1)
 			except Exception:
 				bad = True; break
@@ -2151,13 +2154,6 @@ class Score():
 						+ w10 * sg[ip1m, js0m]
 						+ w01 * sg[ip0m, js1m]
 						+ w11 * sg[ip1m, js1m], SIG_MIN))
-				# has_data is only tested with .any() for the whole grid
-				# above, so the four corners interpolated here may carry
-				# no rotamer data. Where they do not, mu and sigma are
-				# fill values and sigma lands on the SIG_MIN floor, so
-				# squaring a real chi against them invents hundreds of
-				# energy units. The clamped -log(P) is already the
-				# penalty for an unpopulated rotamer well.
 				hd = grid['has_data']
 				corners = (hd[ip0m, js0m] and hd[ip1m, js0m]
 					and hd[ip0m, js1m] and hd[ip1m, js1m])
@@ -2259,9 +2255,6 @@ class Score():
 				for dj in range(4)] for di in range(4)]
 			mu_i.append(self.crom2d(gm, tp, ts))
 			sig_i.append(max(self.crom2d(gs, tp, ts), SIG_MIN))
-		# Same reasoning as the primary path: where a cell did not
-		# carry this rotamer well, mu is a stale reference and sigma
-		# is the SIG_MIN floor, so the deviation term is fabricated.
 		dev = 0.0
 		if have_all:
 			for ci in range(n_rot):
@@ -2651,7 +2644,7 @@ class Score():
 			if tri == 'HIS_D': tri = 'HIS'
 			if tri in self.NCAA_PARENT: tri = self.NCAA_PARENT[tri]
 			try:
-				om = pose.GetDihedral(int(ri), 'OMEGA')
+				om = cache['cdih'](pose, int(ri), 'OMEGA')
 				phi = cache['cdih'](pose, int(ri), 'PHI')
 				psi = cache['cdih'](pose, int(ri), 'PSI')
 			except Exception: continue
