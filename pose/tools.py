@@ -89,22 +89,51 @@ def _rotliblookup(rotlib, tri, phi, psi):
 	b = i * sn + j
 	return int(entry['n_chi']), rot['table'][off[b]:off[b + 1]]
 
-def _ringpuck(pose, res, theta, chi_type=1):
-	'''
-	Set one torsion of a fused side chain ring and re-close the ring,
-	preserving every ring bond length and every ring bond angle except
-	the one at the closure bond, which absorbs the pucker
+_IDEALRING = {}
+
+def _idealring(sym, ring):
+	"""
+	Ring bond lengths and angle cosines of this residue built from scratch
+	Arguments:
+	----------
+		sym:  One letter code of the fused residue
+		ring: Ordered ring atom names, five of them
+	Returns:
+	--------
+		tuple: (bond C-D, bond D-E, bond E-A, cos angle B-C-D,
+		cos angle C-D-E) taken from idealised geometry
+	"""
+	if sym in _IDEALRING: return _IDEALRING[sym]
+	q = Pose()
+	q.Build('A' + sym + 'A')
+	xyz = q.data['Coordinates']
+	atoms = q.data['Atoms']
+	info = q.data['Amino Acids'][1]
+	ix = {atoms[i][0]: i for i in info[2] + info[3]}
+	A, B, C, D, E = [np.asarray(xyz[ix[n]], dtype=float) for n in ring]
+	nm = np.linalg.norm
+	cs = lambda u, v, w: float((u - v) @ (w - v)) / (nm(u - v) * nm(w - v))
+	out = (float(nm(D - C)), float(nm(E - D)), float(nm(E - A)),
+		cs(B, C, D), cs(C, D, E))
+	_IDEALRING[sym] = out
+	return out
+
+def _ringpuck(pose, res, theta, chi_type=1, ideal=False):
+	"""
+	Set one torsion of a fused side chain ring and re-close the ring
 	Arguments:
 	----------
 		res:      Residue index carrying the fused side chain
 		theta:    Requested torsion in degrees
 		chi_type: Which chi angle theta refers to, 1 based
+		ideal:    Rebuild the ring at idealised geometry when True, which
+			reaches every pucker, or preserve the residue's own measured
+			geometry when False, which restores exactly
 	Returns:
 	--------
-		bool: True when the ring closed and the pose was updated,
-		False when the requested torsion is unreachable for this ring,
-		in which case nothing is changed
-	'''
+		bool: True when the ring closed and the pose was updated, False
+		when the requested torsion is unreachable, nothing changed
+	"""
 	def frame(p, q, r):
 		''' Orthonormal rows of a local frame with its origin at q '''
 		e1 = (p - q) / np.linalg.norm(p - q)
@@ -120,8 +149,8 @@ def _ringpuck(pose, res, theta, chi_type=1):
 	sym = pose.data['Amino Acids'][res][0].upper()
 	sets = pose.aminoacids[sym]['Chi Angle Atoms']
 	ring = list(sets[0])
-	for s in sets[1:]:
-		if s[3] not in ring: ring.append(s[3])
+	for t in sets[1:]:
+		if t[3] not in ring: ring.append(t[3])
 	if len(ring) != 5: return False
 	iA, iB, iC, iD, iE = [pose.GetAtomIdx(res, n) for n in ring]
 	xyz = pose.data['Coordinates']
@@ -130,21 +159,29 @@ def _ringpuck(pose, res, theta, chi_type=1):
 		return abs((now - theta + 180.0) % 360.0 - 180.0) < 1e-6
 	cur = pose.GetDihedral(res, 'CHI', chi_type=1)
 	if not math.isfinite(cur): return False
-	dDE = np.linalg.norm(xyz[iE] - xyz[iD])
-	dEA = np.linalg.norm(xyz[iA] - xyz[iE])
-	v1, v2 = xyz[iC] - xyz[iD], xyz[iE] - xyz[iD]
-	cosa = float(v1 @ v2) / (np.linalg.norm(v1) * np.linalg.norm(v2))
-	u = (xyz[iC] - xyz[iB]) / np.linalg.norm(xyz[iC] - xyz[iB])
-	phi = math.radians(theta - cur)
-	w = xyz[iD] - xyz[iC]
-	Dn = xyz[iC] + (w * math.cos(phi) + np.cross(u, w) * math.sin(phi)
-		+ u * float(u @ w) * (1.0 - math.cos(phi)))
-	n = (xyz[iC] - Dn) / np.linalg.norm(xyz[iC] - Dn)
-	cen = Dn + n * (dDE * cosa)
-	rad = dDE * math.sqrt(max(0.0, 1.0 - cosa * cosa))
+	nm = np.linalg.norm
+	cs = lambda u, v, w: float((u - v) @ (w - v)) / (nm(u - v) * nm(w - v))
+	if ideal:
+		dCD, dDE, dEA, cosB, cosD = _idealring(sym, ring)
+	else:
+		dCD, dDE = float(nm(xyz[iD] - xyz[iC])), float(nm(xyz[iE] - xyz[iD]))
+		dEA = float(nm(xyz[iA] - xyz[iE]))
+		cosB, cosD = cs(xyz[iB], xyz[iC], xyz[iD]), cs(xyz[iC], xyz[iD], xyz[iE])
+	u = (xyz[iC] - xyz[iB]) / nm(xyz[iC] - xyz[iB])
+	w = np.cross(xyz[iB] - xyz[iA], u)
+	if nm(w) < 1e-9: return False
+	w = w / nm(w)
+	v = np.cross(w, u)
+	sinB = math.sqrt(max(0.0, 1.0 - cosB * cosB))
+	th = math.radians(theta)
+	Dn = xyz[iC] + dCD * (-cosB * u + sinB * math.cos(th) * v
+		+ sinB * math.sin(th) * w)
+	n = (xyz[iC] - Dn) / nm(xyz[iC] - Dn)
+	cen = Dn + n * (dDE * cosD)
+	rad = dDE * math.sqrt(max(0.0, 1.0 - cosD * cosD))
 	e1 = np.cross(n, [1.0, 0.0, 0.0])
-	if np.linalg.norm(e1) < 1e-6: e1 = np.cross(n, [0.0, 1.0, 0.0])
-	e1 = e1 / np.linalg.norm(e1)
+	if nm(e1) < 1e-6: e1 = np.cross(n, [0.0, 1.0, 0.0])
+	e1 = e1 / nm(e1)
 	e2 = np.cross(n, e1)
 	g = cen - xyz[iA]
 	K = dEA ** 2 - float(g @ g) - rad ** 2
@@ -153,9 +190,9 @@ def _ringpuck(pose, res, theta, chi_type=1):
 	if R < 1e-9 or abs(K) > R: return False
 	f0 = math.atan2(bb, aa)
 	off = math.acos(max(-1.0, min(1.0, K / R)))
-	cands = [cen + rad * (math.cos(f0 + s * off) * e1
-		+ math.sin(f0 + s * off) * e2) for s in (1.0, -1.0)]
-	En = min(cands, key=lambda c: np.linalg.norm(c - xyz[iE]))
+	cands = [cen + rad * (math.cos(f0 + sg * off) * e1
+		+ math.sin(f0 + sg * off) * e2) for sg in (1.0, -1.0)]
+	En = min(cands, key=lambda c: nm(c - xyz[iE]))
 	D0, E0 = xyz[iD].copy(), xyz[iE].copy()
 	carry(iC, xyz[iB], xyz[iC], D0, xyz[iB], xyz[iC], Dn)
 	carry(iD, xyz[iC], D0, E0, xyz[iC], Dn, En)
@@ -1877,8 +1914,29 @@ def Rotamers(index, pose):
 			_ringpuck(pose, index, float(-mu if flip else mu), ci + 1)
 		else:
 			pose.RotateDihedral(index, float(-mu if flip else mu), 'CHI', ci+1)
+def _apply(pose, res, chis, n_chi, fused):
+	"""
+	Set the side chain of one residue, routing fused rings through the ring
+	Arguments:
+	----------
+		pose:  Protein pose holding the residue
+		res:   Residue index
+		chis:  Target chi angles in degrees, one per chi angle
+		n_chi: How many chi angles the residue carries
+		fused: Set of residue indexes whose side chain is a closed ring
+	Returns:
+	--------
+		bool: True when the side chain was placed, False when a fused ring
+		could not reach the requested pucker and nothing moved
+	"""
+	if res in fused:
+		return _ringpuck(pose, res, float(chis[0]), 1, ideal=True)
+	for ci in range(n_chi):
+		pose.RotateDihedral(res, float(chis[ci]), 'CHI', ci + 1)
+	return True
+
 def Pack(pose, ff=None, n_steps=2000, T_start=10.0, T_end=0.1,
-		patience=400, seed=None):
+		patience=400, seed=None, ex=1):
 	'''
 	Repack side chains by simulated annealing over the rotamer ensemble
 	available to each residue at its current backbone phi and psi
@@ -1922,7 +1980,19 @@ def Pack(pose, ff=None, n_steps=2000, T_start=10.0, T_end=0.1,
 		if probs.sum() <= 0.0: continue
 		mus = np.array([[float(row[2 + ci]) for ci in range(n_chi)]
 			for row in rows], dtype=np.float64)
-		candidates[r] = (-mus if flip else mus, probs / probs.sum(), n_chi)
+		wide = min(len(row) for row in rows) >= 2 + 2 * n_chi
+		sds = np.abs(np.array([[float(row[2 + n_chi + ci]) if wide else 0.0
+			for ci in range(n_chi)] for row in rows], dtype=np.float64))
+		grid = [[0.0] * n_chi]
+		ring = bool(db.get('Fused'))
+		for ci in range(0 if ring else min(int(ex), n_chi)):
+			grid = [g[:ci] + [d] + g[ci + 1:] for g in grid
+				for d in (-1.0, 0.0, 1.0)]
+		mus = np.array([[mu[ci] + g[ci] * sd[ci] for ci in range(n_chi)]
+			for mu, sd in zip(mus, sds) for g in grid], dtype=np.float64)
+		probs = np.repeat(probs, len(grid)) / len(grid)
+		probs = probs / probs.sum()
+		candidates[r] = (-mus if flip else mus, np.cumsum(probs), n_chi)
 	if not candidates:
 		E0 = float(ff(pose))
 		return E0, {'energies': np.array([E0]),
@@ -1934,51 +2004,64 @@ def Pack(pose, ff=None, n_steps=2000, T_start=10.0, T_end=0.1,
 		pose.data['Amino Acids'][i][0].upper()].get('Fused')}
 	E_curr = float(ff(pose))
 	E_best = E_curr
-	best_state = {q: tuple(pose.GetDihedral(q, 'CHI', chi_type=ci+1)
+	start = {q: tuple(pose.GetDihedral(q, 'CHI', chi_type=ci+1)
 		for ci in range(candidates[q][2])) for q in res_ids}
+	held = {q: -1 for q in res_ids}
+	best_state = dict(held)
 	N = max(1, int(n_steps))
 	energies = np.empty(N, dtype=np.float64)
 	temperatures = np.empty(N, dtype=np.float64)
 	accepts = np.empty(N, dtype=bool)
-	last_accept = step = 0
+	last_accept = step = stall = 0
 	for step in range(N):
 		T = T_start * (T_end / T_start) ** (step / max(1, N - 1))
 		r = res_ids[int(rng.integers(0, len(res_ids)))]
-		mus, probs, n_chi = candidates[r]
-		k = int(rng.choice(len(probs), p=probs))
-		snap = tuple(pose.GetDihedral(r, 'CHI', chi_type=ci+1)
-			for ci in range(n_chi))
-		for ci in range(n_chi):
-			if r in fused: _ringpuck(pose, r, float(mus[k, ci]), ci+1)
-			else: pose.RotateDihedral(r, float(mus[k, ci]), 'CHI', ci+1)
+		mus, cum, n_chi = candidates[r]
+		k = int(np.searchsorted(cum, rng.random()))
+		k = min(k, len(cum) - 1)
+		energies[step] = E_curr
+		temperatures[step] = T
+		if k == held[r]:
+			accepts[step] = False
+			continue
+		was = held[r]
+		snap = start[r] if was < 0 else None
+		if not _apply(pose, r, mus[k], n_chi, fused):
+			accepts[step] = False
+			continue
 		E_trial = float(ff(pose))
 		dE = E_trial - E_curr
 		ok = dE <= 0.0 or rng.random() < math.exp(-dE / max(T, 1e-12))
 		accepts[step] = ok
-		for ci in range(n_chi if not ok else 0):
-			if r in fused: _ringpuck(pose, r, float(snap[ci]), ci+1)
-			else: pose.RotateDihedral(r, float(snap[ci]), 'CHI', ci+1)
-		if ok: E_curr, last_accept = E_trial, step
-		if ok and E_curr < E_best:
-			E_best = E_curr
-			best_state = {q: tuple(
-				pose.GetDihedral(q, 'CHI', chi_type=ci+1)
-				for ci in range(candidates[q][2])) for q in res_ids}
-		energies[step] = E_curr
-		temperatures[step] = T
-		if step - last_accept >= patience: break
+		if ok:
+			held[r] = k
+			E_curr, last_accept = E_trial, step
+			energies[step] = E_curr
+			if E_curr < E_best:
+				E_best, best_state = E_curr, dict(held)
+		else:
+			back = candidates[r][0][was] if was >= 0 else snap
+			if not _apply(pose, r, back, n_chi, fused):
+				held[r], E_curr = k, E_trial
+				accepts[step] = True
+				energies[step] = E_curr
+				if E_curr < E_best:
+					E_best, best_state = E_curr, dict(held)
+		stall = 0 if ok else stall + 1
+		if stall >= patience: break
 	steps_run = step + 1
-	for q, chis in best_state.items():
-		for ci in range(candidates[q][2]):
-			if q in fused: _ringpuck(pose, q, float(chis[ci]), ci+1)
-			else: pose.RotateDihedral(q, float(chis[ci]), 'CHI', ci+1)
-	return float(ff(pose)), {
+	for q, k in best_state.items():
+		_apply(pose, q, candidates[q][0][k] if k >= 0 else start[q],
+			candidates[q][2], fused)
+	E_final = float(ff(pose))
+	return E_final, {
 		'energies': energies[:steps_run],
 		'temperatures': temperatures[:steps_run],
 		'accepts': accepts[:steps_run],
 		'best_E': float(E_best),
 		'steps_run': int(steps_run),
-		'converged': bool(steps_run < N),
+		'stopped_early': bool(steps_run < N),
+		'restored': bool(abs(E_final - E_best) < 1e-6),
 		'n_residues': len(res_ids)}
 
 def Anneal(pose, ff=None, n_steps=10000, T_start=2000.0, T_end=10.0,
