@@ -1772,7 +1772,8 @@ class Score():
 			'inter_weighted': raw * weight, 'intra_weighted': 0.0,
 			'raw': raw}
 	def elecpairsum(self, pi, pj, r, w, C0, D, D0, S, d_max, d_min,
-			hi_end, hi_start, low_end, low_start, q):
+			hi_end, hi_start, low_end, low_start, q, per_pair=False,
+			qq=None):
 		'''
 		Per-pair Coulomb summation kernel for FaElec
 		Arguments:
@@ -1792,48 +1793,66 @@ class Score():
 			low_end: float - end of the lower fade window
 			low_start: float - start of the lower fade window
 			q: np.ndarray - per-atom partial charges
+			per_pair: bool - return the per-pair array w*e instead of
+				its sum, used by the packer rotamer-pair table
+			qq: np.ndarray - precomputed per-pair charge product, None
+				to read it out of q here
 		Returns:
 		--------
 			np.ndarray: per-pair electrostatic contribution
 		'''
-		if len(pi) == 0: return 0.0
-		qq = q[pi] * q[pj]
-		eps_r = self.dielectric(r, D, D0, S)
-		base = C0 * qq / (eps_r * np.maximum(r, 1e-9))
-		base_at_max = C0 * qq / (self.dielectric(d_max, D, D0, S) * d_max)
-		e = base - base_at_max
-		e = np.where(r >= d_max, 0.0, e)
-		e_min_clamp = (C0 * qq / (self.dielectric(d_min, D, D0, S) * d_min)
-			- base_at_max)
-		e = np.where(r < d_min, e_min_clamp, e)
-		in_low = (r >= low_start) & (r < low_end)
-		if np.any(in_low):
+		if len(r) == 0:
+			return np.zeros(0, dtype=np.float64) if per_pair else 0.0
+		if qq is None: qq = q[pi] * q[pj]
+		e = np.zeros(len(r), dtype=np.float64)
+		bam = self.dielectric(d_max, D, D0, S) * d_max
+		m_hi = (r >= hi_start) & (r < hi_end)
+		m_low = (r >= low_start) & (r < low_end) & (~m_hi)
+		rest = (~m_hi) & (~m_low)
+		k = np.flatnonzero(rest & (r >= d_min) & (r < d_max))
+		if len(k):
+			qk = qq[k]; rk = r[k]
+			eps_r = self.dielectric(rk, D, D0, S)
+			e[k] = (C0 * qk / (eps_r * np.maximum(rk, 1e-9))
+				- C0 * qk / bam)
+		k = np.flatnonzero(rest & (r < d_min))
+		if len(k):
+			qk = qq[k]
+			e[k] = (C0 * qk
+				/ (self.dielectric(d_min, D, D0, S) * d_min)
+				- C0 * qk / bam)
+		k = np.flatnonzero(m_low)
+		if len(k):
+			qk = qq[k]
+			bam_k = C0 * qk / bam
 			h_low = low_end - low_start
 			eps_le = self.dielectric(low_end, D, D0, S)
 			deps_le = self.dielectricderivative(low_end, D, D0, S)
-			v0_low = e_min_clamp
-			v1_low = C0 * qq / (eps_le * low_end) - base_at_max
-			d1_low = -C0 * qq * (eps_le + low_end * deps_le) \
+			v0_low = (C0 * qk
+				/ (self.dielectric(d_min, D, D0, S) * d_min) - bam_k)
+			v1_low = C0 * qk / (eps_le * low_end) - bam_k
+			d1_low = -C0 * qk * (eps_le + low_end * deps_le) \
 				/ (low_end * low_end * eps_le * eps_le)
-			t = (r - low_start) / h_low
+			t = (r[k] - low_start) / h_low
 			t2 = t * t; t3 = t2 * t
-			H = ((2*t3 - 3*t2 + 1) * v0_low
+			e[k] = ((2*t3 - 3*t2 + 1) * v0_low
 				+ (-2*t3 + 3*t2) * v1_low
 				+ (t3 - t2) * h_low * d1_low)
-			e = np.where(in_low, H, e)
-		in_hi = (r >= hi_start) & (r < hi_end)
-		if np.any(in_hi):
+		k = np.flatnonzero(m_hi)
+		if len(k):
+			qk = qq[k]
+			bam_k = C0 * qk / bam
 			h_hi = hi_end - hi_start
 			eps_hs = self.dielectric(hi_start, D, D0, S)
 			deps_hs = self.dielectricderivative(hi_start, D, D0, S)
-			v0_hi = C0 * qq / (eps_hs * hi_start) - base_at_max
-			d0_hi = -C0 * qq * (eps_hs + hi_start * deps_hs) \
+			v0_hi = C0 * qk / (eps_hs * hi_start) - bam_k
+			d0_hi = -C0 * qk * (eps_hs + hi_start * deps_hs) \
 				/ (hi_start * hi_start * eps_hs * eps_hs)
-			t = (r - hi_start) / h_hi
+			t = (r[k] - hi_start) / h_hi
 			t2 = t * t; t3 = t2 * t
-			H = ((2*t3 - 3*t2 + 1) * v0_hi
+			e[k] = ((2*t3 - 3*t2 + 1) * v0_hi
 				+ (t3 - 2*t2 + t) * h_hi * d0_hi)
-			e = np.where(in_hi, H, e)
+		if per_pair: return w * e
 		return float(np.sum(w * e))
 	def dielectricderivative(self, d, D, D0, S):
 		'''
