@@ -1935,8 +1935,681 @@ def _apply(pose, res, chis, n_chi, fused):
 		pose.RotateDihedral(res, float(chis[ci]), 'CHI', ci + 1)
 	return True
 
+def _packtable(pose, ff, res_ids, candidates, fused, start, verbose=False):
+	'''
+	Precompute the one-body and two-body rotamer interaction tables that
+	drive the packer, in the manner of Rosetta's rotamer-pair energy
+	table, so an annealing move costs a handful of table lookups instead
+	of a full rescore of the whole structure
+	Arguments:
+	----------
+		pose:       Protein pose whose side chains are being packed
+		ff:         Score() instance supplying the cache and the weights
+		res_ids:    list of packable residue indices
+		candidates: dict of residue index to (mus, cumulative, n_chi)
+		fused:      set of residue indices whose side chain is a ring
+		start:      dict of residue index to its incoming chi tuple
+		verbose:    True to print the table size and the build time
+	Returns:
+	--------
+		dict: 'E1' one-body tables keyed on residue, 'E2' two-body tables
+		keyed on the residue pair, 'nbrs' the per-residue neighbour list,
+		'xyz' the per-rotamer side-chain coordinates, 'ok' the per-rotamer
+		build flags, 'K' the start-state index of each residue, 'mov' the
+		moving atom indices, 'X0' the reference coordinates, 'terms' the
+		energy terms that made it into the tables and 'build' the seconds
+		the build took
+	'''
+	t0 = time.time()
+	cache = ff._cache
+	P = ff.Parameters
+	scale = float(ff.scale)
+	names = {t[0] for t in ff.terms}
+	def wof(key, term):
+		'''
+		Weight of one score term expressed in the score's native unit
+		Arguments:
+		----------
+			key:  str - the parameter block that holds the weight
+			term: str - the term method name, absent terms weigh nothing
+		Returns:
+		--------
+			float: the stored weight times the native-unit scale
+		'''
+		if term not in names: return 0.0
+		return float(P[key]['weight']) * scale
+	w_atr  = wof('FaAtr', 'FaAtrPotential')
+	w_rep  = wof('FaRep', 'FaRepPotential')
+	w_sol  = wof('FaSol', 'FaSolPotential')
+	w_elec = wof('FaElec', 'FaElecPotential')
+	w_irep = wof('FaIntraRep', 'FaIntraRepPotential')
+	w_isol = wof('FaIntraSolXover4', 'FaIntraSolXover4Potential')
+	w_lkb  = wof('LkBallWtd', 'LkBallWtdPotential')
+	w_dun  = wof('FaDun', 'FaDunPotential')
+	w_yhh  = wof('YhhPlanarity', 'YhhPlanarityPotential')
+	w_bbsc = wof('HBondBbSc', 'HBondBbScPotential')
+	w_hbsc = wof('HBondSc', 'HBondScPotential')
+	w_dslf = wof('DslfFa13', 'DslfFa13Potential')
+	w_pro  = wof('ProClose', 'ProClosePotential')
+	C = P['Constants']
+	CUT = float(C.get('list_max_dis') or C['fa_max_dis'])
+	CUT2 = CUT * CUT
+	PRUNE = 100.0
+	cp_half = float((P.get('CountPair') or {})['half'])
+	EC0 = float(C['coulomb_C0']); ED = float(C['sigmoidal_D'])
+	ED0 = float(C['sigmoidal_D0']); ES = float(C['sigmoidal_S'])
+	e_lo = float(C['fa_elec_min_dis']); e_hi = float(C['fa_elec_max_dis'])
+	atoms = pose.data['Atoms']
+	aas = pose.data['Amino Acids']
+	n = len(atoms)
+	X0 = np.asarray(pose.data['Coordinates'], dtype=np.float64).copy()
+	EFF = min(CUT, max(float((P.get('LkBall') or {}).get('max_dis', CUT)),
+		e_hi, float(cache['et_ljatr_cp_xhi'].max())))
+	EFF2 = EFF * EFF
+	adj = cache['adj']
+	at_e_idx = cache['at_e_idx']
+	atom_res = cache['atom_res']
+	has_score = cache['has_score']
+	rep_atom = cache['rep_atom_idx']
+	q = cache['charges']
+	isH = cache['is_H']
+	d2low = cache['lkb_d2_low']
+	ramp_w2 = float(cache['lkb_ramp_w2'])
+	wiso = cache['lkb_w_iso']; wball = cache['lkb_w_ball']
+	GW = cache['lkb_water_xyz']; GO = cache['lkb_water_off']
+	GC = cache['lkb_water_cnt']
+	maxw = int(max(GC.max() if len(GC) else 0, 1))
+	BGW = np.zeros((n, maxw, 3), dtype=np.float64)
+	for a in np.where(GC > 0)[0]:
+		BGW[a, :GC[a]] = GW[GO[a]:GO[a] + GC[a]]
+	nres = int(max(int(atom_res.max()), max(aas)) + 2)
+	BOND = np.zeros((nres + 1, nres + 1), dtype=bool)
+	POLY = np.zeros((nres + 1, nres + 1), dtype=bool)
+	for ai, nbs in adj.items():
+		ra = int(atom_res[ai]) if 0 <= ai < n else -1
+		if ra < 0: continue
+		for bi in nbs:
+			rb = int(atom_res[bi]) if 0 <= bi < n else -1
+			if rb < 0 or rb == ra: continue
+			BOND[ra + 1, rb + 1] = BOND[rb + 1, ra + 1] = True
+			if {atoms[ai][0], atoms[bi][0]} == {'C', 'N'}:
+				POLY[ra + 1, rb + 1] = POLY[rb + 1, ra + 1] = True
+	bfsmemo = {}
+	def bfs(a):
+		'''
+		Memoised bond-separation map from one atom, four bonds deep
+		Arguments:
+		----------
+			a: int - atom index to walk out from
+		Returns:
+		--------
+			dict: atom index to bond separation, as ScoreMatch builds it
+		'''
+		if a in bfsmemo: return bfsmemo[a]
+		out = {}; seen = {a}; front = {a}; dist = 0
+		while front and dist < 4:
+			dist += 1
+			nxt = set()
+			for x in front:
+				for y in adj.get(x, ()):
+					if y in seen: continue
+					seen.add(y); nxt.add(y); out[y] = dist
+			front = nxt
+		bfsmemo[a] = out
+		return out
+	def meta(A, B):
+		'''
+		Count-pair weights for a list of atom pairs, reproducing the
+		connectivity bookkeeping ScoreMatch does for its own pair list
+		Arguments:
+		----------
+			A: np.ndarray - first atom of each pair
+			B: np.ndarray - second atom of each pair
+		Returns:
+		--------
+			tuple: (w_inter, w_elec, w_cp3, w_cp4) count-pair weights for
+			the inter-residue, electrostatic and two intra-residue
+			conventions
+		'''
+		ra = atom_res[A]; rb = atom_res[B]
+		same = (ra == rb) & (ra >= 0)
+		poly = same | POLY[ra + 1, rb + 1]
+		spec = same | BOND[ra + 1, rb + 1]
+		bd = np.full(len(A), 5, dtype=np.int64)
+		cbd = np.full(len(A), 5, dtype=np.int64)
+		for k in np.where(spec)[0]:
+			ii = int(A[k]); jj = int(B[k])
+			bd[k] = bfs(ii).get(jj, 5)
+			pi_ = int(rep_atom[ii]); pj_ = int(rep_atom[jj])
+			if pi_ == pj_: cbd[k] = 0
+			elif pi_ == ii and pj_ == jj: cbd[k] = bd[k]
+			else: cbd[k] = bfs(pi_).get(pj_, 5)
+		xo = np.where(poly, 4, 3)
+		w_i = np.where(bd < xo, 0.0, np.where(bd == xo, cp_half, 1.0))
+		w_e = np.where(cbd < 4, 0.0, np.where(cbd == 4, cp_half, 1.0))
+		w_3 = np.where(bd < 3, 0.0, np.where(bd == 3, cp_half, 1.0))
+		w_4 = np.where(bd < 4, 0.0, np.where(bd == 4, cp_half, 1.0))
+		return w_i, w_e, w_3, w_4
+	def waterfrac(wx, wc, oxyz, other):
+		'''
+		Fraction of a polar atom's water shell that the partner occludes
+		Arguments:
+		----------
+			wx:    np.ndarray - (M, maxw, 3) padded water positions
+			wc:    np.ndarray - (M,) water count of each polar atom
+			oxyz:  np.ndarray - (M, 3) partner atom positions
+			other: np.ndarray - (M,) partner atom indices
+		Returns:
+		--------
+			np.ndarray: (M,) occupancy fraction in [0, 1]
+		'''
+		out = np.zeros(len(wc), dtype=np.float64)
+		low = d2low[other]
+		for nw in range(1, maxw + 1):
+			sel = np.flatnonzero(wc == nw)
+			if not len(sel): continue
+			diff = wx[sel, :int(nw), :] - oxyz[sel][:, None, :]
+			d2 = np.einsum('kij,kij->ki', diff, diff)
+			wgt = -np.log(np.sum(np.exp(-(d2 - low[sel][:, None])), axis=1))
+			frac = np.where(wgt <= 0.0, 1.0,
+				np.where(wgt >= ramp_w2, 0.0,
+					(1.0 - (wgt / ramp_w2) ** 2) ** 2))
+			out[sel] = frac
+		return out
+	def internat(pi, pj, r, w_i, w_e, gather, mk, pm):
+		'''
+		Native-unit inter-residue pair energy for the etable terms
+		Arguments:
+		----------
+			pi:  np.ndarray - first atom of each pair
+			pj:  np.ndarray - second atom of each pair
+			r:   np.ndarray - pair separations
+			w_i: np.ndarray - inter-residue count-pair weight
+			w_e: np.ndarray - electrostatic count-pair weight
+			gather: callable - returns the positions and water shells of
+				the pair subset it is handed, used only by lk_ball
+			mk:  np.ndarray - index of each entry into the pair list
+			pm:  dict - per-pair-list masks and etable indices, so the
+				per-atom lookups are done once per block, not per chunk
+		Returns:
+		--------
+			np.ndarray: per-pair energy in the score's native unit
+		'''
+		out = np.zeros(len(r), dtype=np.float64)
+		vd = pm['vd']; aiM = pm['ai']; ajM = pm['aj']; uni = pm['uni']
+		vk = None if vd is None else vd[mk]
+		if w_atr or w_rep:
+			atr, rep = cache['ljpair'](cache, None, None, r,
+				(vk, aiM[mk], ajM[mk]))
+			lj = w_atr * atr + w_rep * rep
+			out += lj if uni else w_i * lj
+		if w_sol:
+			hm = np.flatnonzero(pm['hv'][mk])
+			mh = mk[hm]
+			sol = cache['solpair'](cache, None, None, r[hm],
+				(None if vd is None else vd[mh], aiM[mh], ajM[mh]))
+			out[hm] += w_sol * sol if uni else w_i[hm] * w_sol * sol
+		if w_elec:
+			em = np.flatnonzero(r < e_hi)
+			out[em] += w_elec * ff.elecpairsum(None, None, r[em],
+				1.0 if uni else w_e[em],
+				EC0, ED, ED0, ES, e_hi, e_lo, e_hi,
+				e_hi - 1.0, e_lo + 0.25, e_lo - 0.25, q, per_pair=True,
+				qq=pm['qq'][mk[em]])
+		if not w_lkb: return out
+		lm = np.flatnonzero(pm['lk'][mk])
+		if not len(lm): return out
+		ml = mk[lm]
+		ci = pm['pa'][ml]; cj = pm['pb'][ml]
+		xi, xj, wxi, wci, wxj, wcj = gather(lm)
+		lki, lkj = cache['lkisopair'](cache, None, None, r[lm],
+			(None if vd is None else vd[ml], aiM[ml], ajM[ml]))
+		if not uni:
+			lki = lki * w_i[lm]; lkj = lkj * w_i[lm]
+		out[lm] += w_lkb * (
+			wiso[ci] * lki + wball[ci] * lki * waterfrac(wxi, wci, xj, cj)
+			+ wiso[cj] * lkj + wball[cj] * lkj
+				* waterfrac(wxj, wcj, xi, ci))
+		return out
+	def intranat(pi, pj, r, w_3, w_4, ids=None, hv=None):
+		'''
+		Native-unit intra-residue pair energy for the etable terms
+		Arguments:
+		----------
+			pi:  np.ndarray - first atom of each pair
+			pj:  np.ndarray - second atom of each pair
+			r:   np.ndarray - pair separations
+			w_3: np.ndarray - cp3 count-pair weight
+			w_4: np.ndarray - cp4 count-pair weight
+			ids: precomputed (valid, ai_safe, aj_safe) etable indices
+			hv:  precomputed heavy-heavy mask, None to derive it here
+		Returns:
+		--------
+			np.ndarray: per-pair energy in the score's native unit
+		'''
+		out = np.zeros(len(r), dtype=np.float64)
+		if w_irep:
+			_, rep = cache['ljpair'](cache, pi, pj, r, ids)
+			out += w_3 * w_irep * rep
+		if w_isol:
+			if hv is None: hv = (~isH[pi]) & (~isH[pj])
+			hm = np.flatnonzero(hv)
+			sub = None if ids is None else (
+				None if ids[0] is None else ids[0][hm],
+				ids[1][hm], ids[2][hm])
+			out[hm] += w_4[hm] * w_isol * cache['solpair'](
+				cache, pi[hm], pj[hm], r[hm], sub)
+		return out
+	def blocktable(XA, A, WA, CA, XB, B, WB, CB, kind):
+		'''
+		Sum the pair energy between two sets of moving atoms over every
+		combination of their conformations, in one vectorised sweep
+		Arguments:
+		----------
+			XA:   np.ndarray - (Ra, na, 3) positions of the first set
+			A:    np.ndarray - (na,) atom indices of the first set
+			WA:   np.ndarray - (Ra, na, maxw, 3) waters, None if fixed
+			CA:   np.ndarray - (na,) water counts, None if fixed
+			XB:   np.ndarray - (Rb, nb, 3) positions of the second set
+			B:    np.ndarray - (nb,) atom indices of the second set
+			WB:   np.ndarray - (Rb, nb, maxw, 3) waters, None if fixed
+			CB:   np.ndarray - (nb,) water counts, None if fixed
+			kind: str - 'inter' for cross-residue, 'intra' for same
+		Returns:
+		--------
+			np.ndarray: (Ra, Rb) table of summed pair energies, or None
+			when no atom pair ever comes within the cutoff
+		'''
+		Ra = XA.shape[0]; Rb = XB.shape[0]
+		ca = XA.mean(0); cb = XB.mean(0)
+		rada = np.sqrt(((XA - ca) ** 2).sum(-1)).max(0)
+		radb = np.sqrt(((XB - cb) ** 2).sum(-1)).max(0)
+		dcc = np.linalg.norm(ca[:, None, :] - cb[None, :, :], axis=2)
+		keep = dcc < (rada[:, None] + radb[None, :] + EFF)
+		if kind == 'intra':
+			keep &= (A[:, None] != B[None, :])
+			inA = np.zeros(n, dtype=bool); inA[A] = True
+			keep &= (~inA[B][None, :]) | (A[:, None] < B[None, :])
+		ia, ib = np.where(keep)
+		if len(ia) == 0: return None
+		pA = A[ia]; pB = B[ib]
+		w_i, w_e, w_3, w_4 = meta(pA, pB)
+		live = ((w_i > 0) | (w_e > 0)) if kind == 'inter' \
+			else ((w_3 > 0) | (w_4 > 0))
+		if not np.any(live): return None
+		ia = ia[live]; ib = ib[live]; pA = pA[live]; pB = pB[live]
+		w_i = w_i[live]; w_e = w_e[live]
+		w_3 = w_3[live]; w_4 = w_4[live]
+		M = len(ia)
+		aiM = at_e_idx[pA]; ajM = at_e_idx[pB]
+		vdM = (aiM >= 0) & (ajM >= 0)
+		hvM = (~isH[pA]) & (~isH[pB])
+		pm = {'vd': None if vdM.all() else vdM,
+			'ai': np.where(vdM, aiM, 0),
+			'aj': np.where(vdM, ajM, 0), 'hv': hvM,
+			'qq': q[pA] * q[pB], 'pa': pA, 'pb': pB,
+			'uni': bool((w_i == 1.0).all() and (w_e == 1.0).all()),
+			'lk': hvM & ((wiso[pA] != 0.0) | (wball[pA] != 0.0)
+				| (wiso[pB] != 0.0) | (wball[pB] != 0.0))}
+		XAs = np.ascontiguousarray(XA[:, ia, :])
+		XBs = np.ascontiguousarray(XB[:, ib, :])
+		XBd = XBs * 2.0
+		tab = np.zeros(Ra * Rb, dtype=np.float64)
+		step = max(1, int(2.0e5 // max(1, Rb * M)))
+		for s0 in range(0, Ra, step):
+			XAc = XAs[s0:s0 + step]; XBc = XBs
+			na2 = np.einsum('amk,amk->am', XAc, XAc)
+			nb2 = np.einsum('bmk,bmk->bm', XBc, XBc)
+			d2 = na2[:, None, :] + nb2[None, :, :]
+			d2 -= np.einsum('amk,bmk->abm', XAc, XBd, optimize=True)
+			d2 = d2.reshape(-1)
+			hit = np.flatnonzero(d2 < EFF2)
+			if not len(hit): continue
+			r = d2[hit]
+			np.maximum(r, 0.0, out=r)
+			np.sqrt(r, out=r)
+			ab_, mk = np.divmod(hit, M)
+			pi = pA[mk]; pj = pB[mk]
+			if kind == 'intra':
+				e = intranat(pi, pj, r, w_3[mk], w_4[mk],
+					(None if pm['vd'] is None else pm['vd'][mk],
+					pm['ai'][mk], pm['aj'][mk]), pm['hv'][mk])
+			else:
+				def gather(lm, ab_=ab_, mk=mk, s0=s0,
+						XAc=XAc, XBc=XBc):
+					'''
+					Positions and water shells of one pair subset
+					Arguments:
+					----------
+						lm: np.ndarray - offsets into the pair block
+					Returns:
+					--------
+						tuple: first and second positions, then the water
+						coordinates and counts of each side
+					'''
+					u, v = np.divmod(ab_[lm], Rb); g = mk[lm]
+					if WA is None:
+						wxi = BGW[pA[g]]; wci = GC[pA[g]]
+					else:
+						wxi = WA[s0 + u, ia[g]]; wci = CA[ia[g]]
+					if WB is None:
+						wxj = BGW[pB[g]]; wcj = GC[pB[g]]
+					else:
+						wxj = WB[v, ib[g]]; wcj = CB[ib[g]]
+					return (XAc[u, g], XBc[v, g], wxi, wci, wxj, wcj)
+				e = internat(pi, pj, r, w_i[mk], w_e[mk], gather,
+					mk, pm)
+			nloc = XAc.shape[0] * Rb
+			tab[s0 * Rb:s0 * Rb + nloc] += np.bincount(ab_,
+				weights=e, minlength=nloc)
+		return tab.reshape(Ra, Rb)
+	rl = DBLoad().get('Rotamer Library', {}) or {}
+	rdb = rl.get('residues', {}) if (w_dun or w_yhh) else {}
+	phi_s = float(rl.get('phi_start', -180.0))
+	phi_p = float(rl.get('phi_step', 10.0)); phi_n = int(rl.get('phi_n', 36))
+	psi_s = float(rl.get('psi_start', -180.0))
+	psi_p = float(rl.get('psi_step', 10.0)); psi_n = int(rl.get('psi_n', 36))
+	def torsion(i):
+		'''
+		Rotamer-probability and hydroxyl-planarity energy of one residue
+		in the conformation the pose currently holds
+		Arguments:
+		----------
+			i: int - residue index
+		Returns:
+		--------
+			float: fa_dun plus yhh_planarity in the score's native unit
+		'''
+		cache['_dihedral_memo'] = {}
+		out = 0.0
+		if w_pro and i in fused:
+			out += w_pro * float(ff.ProClosePotential(
+				pose, cache=cache)['raw'])
+		if w_dun and rdb:
+			out += w_dun * float(ff.residuerotamer(0.0, int(i), aas[i],
+				cache, pose, None, rdb, phi_n, phi_s, phi_p, psi_n,
+				psi_s, psi_p, 0.5))
+		tri = ff.D_TO_L.get(aas[i][5], aas[i][5])
+		if not w_yhh or tri != 'TYR': return out
+		nm = {atoms[int(a)][0]: int(a) for a in aas[i][2] + aas[i][3]}
+		if not all(k in nm for k in ('CE2', 'CZ', 'OH', 'HH')): return out
+		Xc = np.asarray(pose.data['Coordinates'], dtype=np.float64)
+		p1, p2, p3, p4 = (Xc[nm[k]] for k in ('CE2', 'CZ', 'OH', 'HH'))
+		b1 = p2 - p1; b2 = p3 - p2; b3 = p4 - p3
+		v1 = np.cross(b1, b2); v2 = np.cross(b2, b3)
+		v3 = np.cross(v1, b2 / np.linalg.norm(b2))
+		chi3 = math.atan2(float(np.dot(v3, v2)), float(np.dot(v1, v2)))
+		return out + w_yhh * 0.5 * (math.cos(math.pi - 2 * chi3) + 1.0)
+	K = {}; mov = {}; xyz = {}; eat = {}; emk = {}
+	wat = {}; wcn = {}; tor = {}; okf = {}
+	for i in res_ids:
+		mus, cum, n_chi = candidates[i]
+		Ki = len(mus); K[i] = Ki
+		mv = np.array(sorted(int(a) for a in aas[i][3]), dtype=np.int64)
+		mov[i] = mv
+		em = has_score[mv]
+		emk[i] = em; eat[i] = mv[em]
+		fr = np.empty((Ki + 1, len(mv), 3), dtype=np.float64)
+		tv = np.zeros(Ki + 1, dtype=np.float64)
+		ov = np.ones(Ki + 1, dtype=bool)
+		wa = np.zeros((Ki + 1, int(em.sum()), maxw, 3), dtype=np.float64)
+		wc = np.zeros(int(em.sum()), dtype=np.int64)
+		only = set(int(a) for a in eat[i])
+		for k in range(Ki + 1):
+			pose.data['Coordinates'] = X0.copy()
+			if k < Ki:
+				ov[k] = bool(_apply(pose, i, mus[k], n_chi, fused))
+			Xc = np.asarray(pose.data['Coordinates'], dtype=np.float64)
+			fr[k] = Xc[mv]
+			tv[k] = torsion(i)
+			if not w_lkb: continue
+			wx, wo, wq = cache['place_waters'](Xc, only=only)
+			for t, a in enumerate(eat[i]):
+				c = int(wq[a])
+				wc[t] = c
+				if c > 0: wa[k, t, :c] = wx[wo[a]:wo[a] + c]
+		xyz[i] = fr; tor[i] = tv; okf[i] = ov
+		wat[i] = wa if w_lkb else None
+		wcn[i] = wc if w_lkb else None
+	pose.data['Coordinates'] = X0.copy()
+	t_frames = time.time() - t0
+	fixed = np.ones(n, dtype=bool)
+	for i in res_ids: fixed[mov[i]] = False
+	E1 = {}
+	for i in res_ids:
+		Ki = K[i]
+		A = eat[i]
+		XA = xyz[i][:, emk[i], :]
+		e = tor[i].copy()
+		sel = has_score & fixed & (atom_res != i)
+		B = np.where(sel)[0]
+		ca = XA.mean(0)
+		rada = np.sqrt(((XA - ca) ** 2).sum(-1)).max(0)
+		gap = np.linalg.norm(X0[B][None, :, :] - ca[:, None, :], axis=2) \
+			- rada[:, None]
+		B = B[(gap < EFF).any(0)]
+		if len(B):
+			t = blocktable(XA, A, wat[i], wcn[i], X0[B][None, :, :], B,
+				None, None, 'inter')
+			if t is not None: e += t[:, 0]
+		res_at = np.where(has_score & (atom_res == i))[0]
+		loc = np.full(n, -1, dtype=np.int64)
+		loc[res_at] = np.arange(len(res_at))
+		Xres = np.repeat(X0[res_at][None, :, :], Ki + 1, axis=0)
+		src = np.where(loc[mov[i]] >= 0)[0]
+		Xres[:, loc[mov[i]][src], :] = xyz[i][:, src, :]
+		inA = np.zeros(n, dtype=bool); inA[A] = True
+		pa = np.repeat(A, len(res_at))
+		pb = np.tile(res_at, len(A))
+		keep = (pa != pb) & ((~inA[pb]) | (pa < pb))
+		pa = pa[keep]; pb = pb[keep]
+		_, _, w3, w4 = meta(pa, pb)
+		live = (w3 > 0) | (w4 > 0)
+		pa = pa[live]; pb = pb[live]; w3 = w3[live]; w4 = w4[live]
+		if len(pa):
+			D = Xres[:, loc[pa], :] - Xres[:, loc[pb], :]
+			d2 = np.einsum('rmk,rmk->rm', D, D)
+			m = d2 < EFF2
+			rr, mk = np.nonzero(m)
+			if len(rr):
+				ei = intranat(pa[mk], pb[mk], np.sqrt(d2[rr, mk]),
+					w3[mk], w4[mk])
+				e += np.bincount(rr, weights=ei, minlength=Ki + 1)
+		E1[i] = e
+	for i in res_ids:
+		if not okf[i].any(): continue
+		live = okf[i] & ((E1[i] - E1[i][okf[i]].min()) <= PRUNE)
+		live[K[i]] = okf[i][K[i]]
+		okf[i] = live if live.any() else okf[i]
+	t_one = time.time() - t0
+	cen = {}; rad = {}
+	for i in res_ids:
+		XA = xyz[i][:, emk[i], :].reshape(-1, 3)
+		cen[i] = XA.mean(0)
+		rad[i] = float(np.sqrt(((XA - cen[i]) ** 2).sum(-1)).max())
+	E2 = {}
+	pairs = [(res_ids[u], res_ids[v])
+		for u in range(len(res_ids)) for v in range(u + 1, len(res_ids))]
+	for i, j in pairs:
+		if np.linalg.norm(cen[i] - cen[j]) >= rad[i] + rad[j] + EFF:
+			continue
+		ki = np.where(okf[i])[0]; kj = np.where(okf[j])[0]
+		t = blocktable(xyz[i][ki][:, emk[i], :], eat[i],
+			None if wat[i] is None else wat[i][ki], wcn[i],
+			xyz[j][kj][:, emk[j], :], eat[j],
+			None if wat[j] is None else wat[j][kj], wcn[j], 'inter')
+		if t is None or not np.any(t): continue
+		full = np.zeros((K[i] + 1, K[j] + 1), dtype=np.float64)
+		full[np.ix_(ki, kj)] = t
+		E2[(i, j)] = full
+	t_two = time.time() - t0
+	terms = ['FaAtr', 'FaRep', 'FaSol', 'FaElec', 'FaIntraRep',
+		'FaIntraSolXover4', 'LkBallWtd', 'FaDun', 'YhhPlanarity',
+		'ProClose']
+	owner = np.full(n, -1, dtype=np.int64)
+	for i in res_ids: owner[mov[i]] = i
+	def bump(ri, si, rj, sj, val):
+		'''
+		Add one energy into the one-body or two-body table
+		Arguments:
+		----------
+			ri: int - residue holding the first state, -1 when fixed
+			si: int - state index of that residue
+			rj: int - residue holding the second state, -1 when fixed
+			sj: int - state index of that residue
+			val: float - energy in the score's native unit
+		Returns:
+		--------
+			Nothing, the tables are updated in place
+		'''
+		if ri < 0 and rj < 0: return
+		if rj < 0: E1[ri][si] += val
+		elif ri < 0: E1[rj][sj] += val
+		elif ri == rj: E1[ri][si] += val
+		else:
+			key = (ri, rj) if ri < rj else (rj, ri)
+			if key not in E2:
+				E2[key] = np.zeros((K[key[0]] + 1, K[key[1]] + 1))
+			if ri < rj: E2[key][si, sj] += val
+			else: E2[key][sj, si] += val
+	if w_bbsc or w_hbsc:
+		hbl = []
+		cache['_hbond_memo'] = None
+		cache['fullatomhbond'](pose, cache, per_hb=hbl)
+		(dmap, amap, bmap, ekey, polys, fades, dstr, astr, a2r, ratom,
+			donors, acceptors, H_idx, A_idx) = cache['_hb_topo']
+		bbg_d = {h[0] for h in hbl if h[5] in ('SR_BB', 'LR_BB')}
+		bbg_a = {h[2] for h in hbl if h[5] in ('SR_BB', 'LR_BB')}
+		HS = P.get('HBondSp2') or {}
+		WCAT = {'hbw_SR_BB_SC': w_bbsc, 'hbw_LR_BB_SC': w_bbsc,
+			'hbw_SC': w_hbsc}
+		def spheres(idxs):
+			'''
+			Centre and radius of each atom's reachable set of positions
+			Arguments:
+			----------
+				idxs: np.ndarray - atom indices to describe
+			Returns:
+			--------
+				tuple: (centres, radii, owning residue, local slot) with
+				one row per atom
+			'''
+			cc = np.empty((len(idxs), 3)); rr = np.zeros(len(idxs))
+			ow = owner[idxs]
+			sl = np.full(len(idxs), -1, dtype=np.int64)
+			for t, a in enumerate(idxs):
+				o = int(ow[t])
+				if o < 0:
+					cc[t] = X0[a]; continue
+				w = int(np.where(mov[o] == a)[0][0])
+				sl[t] = w
+				pts = xyz[o][:, w, :]
+				cc[t] = pts.mean(0)
+				rr[t] = float(np.sqrt(((pts - cc[t]) ** 2).sum(-1)).max())
+			return cc, rr, ow, sl
+		Hc, Hr, Ho, Hs = spheres(H_idx)
+		Ac, Ar, Ao, As = spheres(A_idx)
+		dHA0 = np.linalg.norm(Hc[:, None, :] - Ac[None, :, :], axis=2)
+		cand = np.where((dHA0 < Hr[:, None] + Ar[None, :] + 3.2)
+			& ((Ho[:, None] >= 0) | (Ao[None, :] >= 0)))
+		DM = np.zeros((len(donors), len(acceptors)), dtype=np.float64)
+		Xs = X0.copy()
+		for ix, iy in zip(*cand):
+			ri = int(Ho[ix]); rj = int(Ao[iy])
+			if ri >= 0 and rj >= 0 and ri == rj: continue
+			dn = donors[ix]; ac = acceptors[iy]
+			if dn['D'] == ac['A'] or dn['ri'] == ac['ri']: continue
+			dbb = atoms[dn['D']][0] == 'N'
+			abb = atoms[ac['A']][0] in ('O', 'OXT', 'OT1', 'OT2')
+			if dbb and not abb and dn['ri'] in bbg_d: continue
+			if abb and not dbb and ac['ri'] in bbg_a: continue
+			Hp = xyz[ri][:, Hs[ix], :] if ri >= 0 else X0[H_idx[ix]][None, :]
+			Ap = xyz[rj][:, As[iy], :] if rj >= 0 else X0[A_idx[iy]][None, :]
+			dd = np.linalg.norm(Hp[:, None, :] - Ap[None, :, :], axis=2)
+			good = dd < 3.2
+			if ri >= 0: good &= okf[ri][:, None]
+			if rj >= 0: good &= okf[rj][None, :]
+			hu, hv = np.where(good)
+			if not len(hu): continue
+			last = -1
+			for t in range(len(hu)):
+				u = int(hu[t]); v = int(hv[t])
+				if ri >= 0 and u != last:
+					Xs[mov[ri]] = xyz[ri][u]; last = u
+				if rj >= 0: Xs[mov[rj]] = xyz[rj][v]
+				DM[ix, iy] = dd[u, v]
+				tmp = []
+				cache['hbondpair'](ix, iy, HS, astr, acceptors, tmp,
+					atoms, Xs, DM, dstr, donors, ekey, fades, polys)
+				if not tmp: continue
+				wgt = WCAT.get(tmp[0]['w'], 0.0)
+				if wgt == 0.0: continue
+				bump(ri, u, rj, v, wgt * float(tmp[0]['e']))
+			if ri >= 0: Xs[mov[ri]] = X0[mov[ri]]
+			if rj >= 0: Xs[mov[rj]] = X0[mov[rj]]
+		terms += ['HBondBbSc', 'HBondSc']
+	if w_dslf:
+		cys = []
+		for ri, info in aas.items():
+			if ff.D_TO_L.get(info[5], info[5]) != 'CYS': continue
+			nm = {atoms[int(a)][0]: int(a) for a in info[2] + info[3]}
+			if not all(k in nm for k in ('SG', 'CB', 'CA')): continue
+			cys.append((int(ri), nm['SG']))
+		far = X0.max(0) + 500.0
+		Xs = X0.copy()
+		for u in range(len(cys)):
+			for v in range(u + 1, len(cys)):
+				ri, sg1 = cys[u]; rj, sg2 = cys[v]
+				oi = int(owner[sg1]); oj = int(owner[sg2])
+				if oi < 0 and oj < 0: continue
+				P1 = xyz[oi][:, np.where(mov[oi] == sg1)[0][0], :] \
+					if oi >= 0 else X0[sg1][None, :]
+				P2 = xyz[oj][:, np.where(mov[oj] == sg2)[0][0], :] \
+					if oj >= 0 else X0[sg2][None, :]
+				dd = np.linalg.norm(P1[:, None, :] - P2[None, :, :], axis=2)
+				good = dd < 3.0
+				if oi >= 0: good &= okf[oi][:, None]
+				if oj >= 0: good &= okf[oj][None, :]
+				hits = np.where(good)
+				if not len(hits[0]): continue
+				for a, b in zip(*hits):
+					for t, (cr, cs) in enumerate(cys):
+						Xs[cs] = far + 50.0 * t
+					if oi >= 0: Xs[mov[oi]] = xyz[oi][a]
+					else: Xs[sg1] = X0[sg1]
+					if oj >= 0: Xs[mov[oj]] = xyz[oj][b]
+					else: Xs[sg2] = X0[sg2]
+					pose.data['Coordinates'] = Xs
+					val = ff.DslfFa13Potential(pose, cache=cache)['raw']
+					for cr, cs in cys: Xs[cs] = X0[cs]
+					if oi >= 0: Xs[mov[oi]] = X0[mov[oi]]
+					if oj >= 0: Xs[mov[oj]] = X0[mov[oj]]
+					bump(oi, int(a), oj, int(b), w_dslf * float(val))
+		pose.data['Coordinates'] = X0.copy()
+		terms.append('DslfFa13')
+	t_hb = time.time() - t0
+	nbrs = {i: [] for i in res_ids}
+	for (i, j), t in E2.items():
+		nbrs[i].append((j, t))
+		nbrs[j].append((i, t.T))
+	out = {'E1': E1, 'E2': E2, 'nbrs': nbrs, 'xyz': xyz, 'mov': mov,
+		'ok': okf, 'K': K, 'X0': X0, 'terms': terms,
+		'build': time.time() - t0,
+		'rotamers': int(sum(int(okf[i].sum()) for i in res_ids)),
+		'phases': (t_frames, t_one - t_frames, t_two - t_one,
+			t_hb - t_two),
+		'entries': int(sum(t.size for t in E2.values()))}
+	if verbose:
+		print('Pack table: %d residues, %d/%d rotamers, %d pairs, '
+			'%d entries, %.2f s (frames %.2f one %.2f two %.2f hb %.2f)'
+			% (len(res_ids), out['rotamers'],
+			sum(K[i] + 1 for i in res_ids), len(E2),
+			out['entries'], out['build'], out['phases'][0],
+			out['phases'][1], out['phases'][2], out['phases'][3]))
+	return out
+
 def Pack(pose, ff=None, n_steps=2000, T_start=10.0, T_end=0.1,
-		patience=400, seed=None, ex=1):
+		patience=400, seed=None, ex=1, table=False):
 	'''
 	Repack side chains by simulated annealing over the rotamer ensemble
 	available to each residue at its current backbone phi and psi
@@ -2014,6 +2687,64 @@ def Pack(pose, ff=None, n_steps=2000, T_start=10.0, T_end=0.1,
 	temperatures = np.empty(N, dtype=np.float64)
 	accepts = np.empty(N, dtype=bool)
 	last_accept = step = stall = 0
+	tab = None
+	if table and hasattr(ff, 'elecpairsum') \
+			and 'at_e_idx' in (getattr(ff, '_cache', None) or {}):
+		tab = _packtable(pose, ff, res_ids, candidates, fused, start)
+	if tab is not None:
+		E1, E2 = tab['E1'], tab['E2']
+		nbrs, okf, Kst = tab['nbrs'], tab['ok'], tab['K']
+		state = {q: Kst[q] for q in res_ids}
+		E_run = E_curr
+		E_best = E_curr
+		best_state = dict(state)
+		for step in range(N):
+			T = T_start * (T_end / T_start) ** (step / max(1, N - 1))
+			r = res_ids[int(rng.integers(0, len(res_ids)))]
+			mus, cum, n_chi = candidates[r]
+			k = int(np.searchsorted(cum, rng.random()))
+			k = min(k, len(cum) - 1)
+			energies[step] = E_run
+			temperatures[step] = T
+			was = state[r]
+			if k == was or not okf[r][k]:
+				accepts[step] = False
+				continue
+			row = E1[r]
+			dE = float(row[k] - row[was])
+			for j, tbl in nbrs[r]:
+				sj = state[j]
+				dE += float(tbl[k, sj] - tbl[was, sj])
+			ok = dE <= 0.0 or rng.random() < math.exp(-dE / max(T, 1e-12))
+			accepts[step] = ok
+			if ok:
+				state[r] = k
+				E_run, last_accept = E_run + dE, step
+				energies[step] = E_run
+				if E_run < E_best:
+					E_best, best_state = E_run, dict(state)
+			stall = 0 if ok else stall + 1
+			if stall >= patience: break
+		steps_run = step + 1
+		X = tab['X0'].copy()
+		for q in res_ids: X[tab['mov'][q]] = tab['xyz'][q][best_state[q]]
+		pose.data['Coordinates'] = X
+		E_final = float(ff(pose))
+		return E_final, {
+			'energies': energies[:steps_run],
+			'temperatures': temperatures[:steps_run],
+			'accepts': accepts[:steps_run],
+			'best_E': float(E_final),
+			'steps_run': int(steps_run),
+			'stopped_early': bool(steps_run < N),
+			'restored': True,
+			'n_residues': len(res_ids),
+			'table': True,
+			'table_best_E': float(E_best),
+			'table_build': float(tab['build']),
+			'table_entries': int(tab['entries']),
+			'table_rotamers': int(tab['rotamers']),
+			'table_terms': tab['terms']}
 	for step in range(N):
 		T = T_start * (T_end / T_start) ** (step / max(1, N - 1))
 		r = res_ids[int(rng.integers(0, len(res_ids)))]
