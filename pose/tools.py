@@ -1954,7 +1954,7 @@ def Pack(pose, ff=None, n_steps=2000, T_start=10.0, T_end=0.1,
 		float: Score of the best configuration found, rescored after it
 		is restored into the pose
 		dict: Log holding 'energies', 'temperatures', 'accepts',
-		'best_E', 'steps_run', 'converged' and 'n_residues'
+		'best_E', 'steps_run', 'stopped_early', 'restored', and 'n_residues'
 	'''
 	if ff is None: ff = ForceField()
 	if pose.data.get('Amino Acids') is None:
@@ -1998,7 +1998,8 @@ def Pack(pose, ff=None, n_steps=2000, T_start=10.0, T_end=0.1,
 		return E0, {'energies': np.array([E0]),
 			'temperatures': np.array([T_start]),
 			'accepts': np.array([], dtype=bool), 'best_E': E0,
-			'steps_run': 0, 'converged': True, 'n_residues': 0}
+			'steps_run': 0, 'stopped_early': True,
+			'restored': True, 'n_residues': 0}
 	res_ids = list(candidates.keys())
 	fused = {i for i in res_ids if pose.aminoacids[
 		pose.data['Amino Acids'][i][0].upper()].get('Fused')}
@@ -3310,6 +3311,13 @@ def SMIRKSMatch(pose, params):
 					out['charges'][i] = float(qs[0])
 	return out
 
+_PCS_M_GLOBAL = {}
+_FADUN_GRID_GLOBAL = {}
+_FADUN_ENT_GLOBAL = {}
+_RAMA_SPLINE_GLOBAL = {}
+_FROZEN_ADJ_GLOBAL = {}
+_PCS_Y_GLOBAL = {}
+
 def ScoreMatch(pose, params, ligand=None, xs_override=None, nrot_override=None):
 	'''
 	Build the per-pose support cache used by every Score energy term
@@ -3327,10 +3335,11 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None, nrot_override=None):
 			plus per-term raw value keys (e.g. 'FaAtrPotential') and
 			callable nested helpers (e.g. 'evalpairs', 'fullatomhbond')
 	'''
-	_FADUN_GRID_CACHE = {}
-	_FADUN_ENT_CACHE = {}
-	_RAMA_SPLINE_CACHE = {}
-	_PCS_M = {}
+	_FADUN_GRID_CACHE = _FADUN_GRID_GLOBAL
+	_FADUN_ENT_CACHE = _FADUN_ENT_GLOBAL
+	_RAMA_SPLINE_CACHE = _RAMA_SPLINE_GLOBAL
+	_PCS_M = _PCS_M_GLOBAL
+	_PCS_Y = _PCS_Y_GLOBAL
 	_FROZEN_ADJ = {}
 	def patternsearch(pose, params, ligand=None,
 			xs_override=None, nrot_override=None):
@@ -3758,7 +3767,7 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None, nrot_override=None):
 		--------
 			np.ndarray: v / |v|, or v itself if |v| is zero
 		'''
-		nv = float(np.linalg.norm(v))
+		nv = math.sqrt(v.dot(v))
 		return v / nv if nv > 1e-9 else v
 	def patchtermini(aas, atom_types_db, atoms, coords, has_score, is_H,
 			is_accep, is_donor, is_polar_h, ljR, ljW, lkLam, lkVol, lkdG, n,
@@ -3969,7 +3978,11 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None, nrot_override=None):
 				v_OH = X[h] - i_xyz
 				y_dir = v_OH - np.dot(v_OH, x_hat) * x_hat
 				y_hat = unit(y_dir)
-				z_hat = np.cross(x_hat, y_hat)
+				zx = x_hat.tolist(); zy = y_hat.tolist()
+				z_hat = np.array([
+					zx[1]*zy[2] - zx[2]*zy[1],
+					zx[2]*zy[0] - zx[0]*zy[2],
+					zx[0]*zy[1] - zx[1]*zy[0]])
 				cos_a = math.cos(ang_sp3)
 				sin_a = math.sin(ang_sp3)
 				for d in dih_sp3:
@@ -3993,7 +4006,11 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None, nrot_override=None):
 				v_b2 = X[b2] - i_xyz
 				y_dir = v_b2 - np.dot(v_b2, x_hat) * x_hat
 				y_hat = unit(y_dir)
-				z_hat = np.cross(x_hat, y_hat)
+				zx = x_hat.tolist(); zy = y_hat.tolist()
+				z_hat = np.array([
+					zx[1]*zy[2] - zx[2]*zy[1],
+					zx[2]*zy[0] - zx[0]*zy[2],
+					zx[0]*zy[1] - zx[1]*zy[0]])
 				cos_a = math.cos(ang_sp2)
 				sin_a = math.sin(ang_sp2)
 				for d in dih_sp2:
@@ -4152,7 +4169,8 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None, nrot_override=None):
 				if ((nm_a == 'C' and nm_b == 'N')
 						or (nm_a == 'N' and nm_b == 'C')):
 					res_polymer_bonded.add(pair)
-		c0 = float(params['Constants']['fa_max_dis'])
+		c0 = float(params['Constants'].get('list_max_dis')
+			or params['Constants']['fa_max_dis'])
 		pairs_i = []; pairs_j = []; pair_d = []
 		pair_w = []; pair_same_res = []; pair_path = []
 		pair_cp_path = []; pair_is_poly = []
@@ -4327,7 +4345,8 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None, nrot_override=None):
 		ang_sp3 = math.radians(float(LKB['ang_sp3']))
 		dih_sp2 = tuple(math.radians(float(v)) for v in LKB['dih_sp2'])
 		dih_sp3 = tuple(math.radians(float(v)) for v in LKB['dih_sp3'])
-		def place_waters(X):
+		wat_idx = [i for i in range(n) if ros_types[i] in LKB_WTS]
+		def place_waters(X, only=None):
 			'''
 			Build LkBall virtual-water positions for coordinates X from the
 			cached per-atom topology (donor/acceptor types, bond graph),
@@ -4335,6 +4354,8 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None, nrot_override=None):
 			Arguments:
 			----------
 				X: ndarray (n, 3) - current coordinates
+				only: set or None - restrict placement to these atom
+					indices, used by the packer rotamer-pair table
 			Returns:
 			--------
 				tuple: (water_xyz_arr, water_off, water_cnt) - stacked water
@@ -4344,7 +4365,9 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None, nrot_override=None):
 			water_atom = []
 			water_off = np.full(n, -1, dtype=np.int64)
 			water_cnt = np.zeros(n, dtype=np.int64)
-			for i in range(n):
+			todo = wat_idx if only is None else [
+				i for i in wat_idx if i in only]
+			for i in todo:
 				atomwaters(i, X, water_atom, water_cnt, water_off, water_xyz,
 					LKB_WTS, adj, ang_sp2, ang_sp3, atom_res, atom_types_db,
 					dih_sp2, dih_sp3, is_H, is_polar_h, opt_dist, ros_types)
@@ -4833,6 +4856,9 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None, nrot_override=None):
 		--------
 			tuple: (pi, pj, r, w) NumPy arrays for the matching pair subset
 		'''
+		memo = cache.setdefault('_pairs_memo', {})
+		key = (bool(same_res), cp, bool(use_cp_rep))
+		if key in memo: return memo[key]
 		cp_half = float((params.get('CountPair') or {})['half'])
 		mask = cache['pair_same_res']
 		sel = mask if same_res else ~mask
@@ -4847,9 +4873,14 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None, nrot_override=None):
 				w = np.where(path < xover, 0.0,
 					np.where(path == xover, cp_half, 1.0))
 		sel = sel & (w > 0.0)
-		return (cache['pairs_i'][sel], cache['pairs_j'][sel],
+		if params['Constants'].get('list_max_dis'):
+			sel = sel & (cache['pair_d']
+				< float(params['Constants']['fa_max_dis']))
+		out = (cache['pairs_i'][sel], cache['pairs_j'][sel],
 			cache['pair_d'][sel], w[sel])
-	def ljpair(cache, pi, pj, r):
+		memo[key] = out
+		return out
+	def ljpair(cache, pi, pj, r, ids=None):
 		'''
 		Per-pair LJ (atr, rep) using the analytic etable-evaluation
 		formula and the per-atom-type-pair LJ params:
@@ -4874,59 +4905,76 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None, nrot_override=None):
 			cache: per-pose cache from _fullatomcache
 			pi, pj: atom-i and atom-j indices (np.int64)
 			r: pair distances (np.float64)
+			ids: precomputed (valid, ai_safe, aj_safe) triple, saving
+				the etable index lookup when a caller already has it
 		Returns:
 		--------
 			(atrE, repE) numpy arrays length len(pi)
 		'''
 		at_e_idx = cache.get('at_e_idx')
-		n_pairs = len(pi)
+		n_pairs = len(r)
 		if at_e_idx is None or n_pairs == 0:
 			z = np.zeros(n_pairs, dtype=np.float64)
 			return z, z.copy()
-		ai = at_e_idx[pi]; aj = at_e_idx[pj]
-		valid = (ai >= 0) & (aj >= 0)
-		a_lo = np.where(ai <= aj, ai, aj)
-		a_hi = np.where(ai <= aj, aj, ai)
-		a_lo_s = np.where(valid, a_lo, 0)
-		a_hi_s = np.where(valid, a_hi, 0)
-		ljrep_ramp_d2  = cache['et_ljrep_linear_ramp_d2'][a_lo_s, a_hi_s]
-		lj_switch_int  = cache['et_lj_switch_intercept'][a_lo_s, a_hi_s]
-		lj_switch_slo  = cache['et_lj_switch_slope'][a_lo_s, a_hi_s]
-		lj_r12         = cache['et_lj_r12_coeff'][a_lo_s, a_hi_s]
-		lj_r6          = cache['et_lj_r6_coeff'][a_lo_s, a_hi_s]
-		ljatr_xlo      = cache['et_ljatr_cp_xlo'][a_lo_s, a_hi_s]
-		ljatr_xhi      = cache['et_ljatr_cp_xhi'][a_lo_s, a_hi_s]
-		ljatr_cp       = cache['et_ljatr_cubic_poly'][a_lo_s, a_hi_s]
-		ljatr_fw       = cache['et_ljatr_final_weight'][a_lo_s, a_hi_s]
-		lj_min         = cache['et_lj_minimum'][a_lo_s, a_hi_s]
-		lj_val_at_min  = cache['et_lj_val_at_minimum'][a_lo_s, a_hi_s]
-		rep_neg        = cache['et_ljrep_from_negcrossing'][a_lo_s, a_hi_s]
-		xr_xlo   = cache['et_ljrep_xr_xlo'][a_lo_s, a_hi_s]
-		xr_xhi   = cache['et_ljrep_xr_xhi'][a_lo_s, a_hi_s]
-		xr_slope = cache['et_ljrep_xr_slope'][a_lo_s, a_hi_s]
-		xr_extrap= cache['et_ljrep_xr_extrap_slope'][a_lo_s, a_hi_s]
-		xr_ylo   = cache['et_ljrep_xr_ylo'][a_lo_s, a_hi_s]
+		if ids is None:
+			ai = at_e_idx[pi]; aj = at_e_idx[pj]
+			valid = (ai >= 0) & (aj >= 0)
+			ai = np.where(valid, ai, 0); aj = np.where(valid, aj, 0)
+		else:
+			valid, ai, aj = ids
+		a_lo_s = np.minimum(ai, aj)
+		a_hi_s = np.maximum(ai, aj)
+		fl = cache.get('_et_flat')
+		if fl is None:
+			fl = {k: v.reshape(-1) for k, v in cache.items()
+				if k.startswith('et_')
+				and isinstance(v, np.ndarray)}
+			cache['_et_flat'] = fl
+		fi = a_lo_s * cache['et_lj_r12_coeff'].shape[1] + a_hi_s
+		cn = cache.get('_et_lj_flat_cut')
+		if cn is None:
+			xl = cache['et_ljatr_cp_xlo']; xh = cache['et_ljatr_cp_xhi']
+			cn = (float(xl.flat[0]) if xl.min() == xl.max() else None,
+				float(xh.flat[0]) if xh.min() == xh.max() else None)
+			cache['_et_lj_flat_cut'] = cn
 		d = r
 		d2 = d * d
-		inv_d2 = 1.0 / np.maximum(d2, 1e-12)
-		inv_d6 = inv_d2 ** 3
-		inv_d12 = inv_d6 ** 2
-		lj_linramp  = lj_switch_slo * d + lj_switch_int
-		lj_generic  = lj_r12 * inv_d12 + lj_r6 * inv_d6
-		c0=ljatr_cp[:,0]; c1=ljatr_cp[:,1]; c2=ljatr_cp[:,2]; c3=ljatr_cp[:,3]
-		lj_atr_poly = ((c3 * d + c2) * d + c1) * d + c0
-		ljE = np.where(d2 < ljrep_ramp_d2, lj_linramp,
-			np.where(d < ljatr_xlo, lj_generic,
-				np.where(d < ljatr_xhi, lj_atr_poly, 0.0)))
+		m_ramp = d2 < fl['et_ljrep_linear_ramp_d2'][fi]
+		below = d < (cn[0] if cn[0] is not None
+			else fl['et_ljatr_cp_xlo'][fi])
+		m_gen = below & (~m_ramp)
+		ljE = np.zeros(n_pairs, dtype=np.float64)
+		k = np.flatnonzero(m_ramp)
+		if len(k):
+			ljE[k] = (fl['et_lj_switch_slope'][fi[k]] * d[k]
+				+ fl['et_lj_switch_intercept'][fi[k]])
+		k = np.flatnonzero(m_gen)
+		if len(k):
+			inv_d2 = 1.0 / np.maximum(d2[k], 1e-12)
+			inv_d6 = inv_d2 ** 3
+			inv_d12 = inv_d6 ** 2
+			ljE[k] = (fl['et_lj_r12_coeff'][fi[k]] * inv_d12
+				+ fl['et_lj_r6_coeff'][fi[k]] * inv_d6)
+		k = np.flatnonzero((~below) & (d < (cn[1] if cn[1] is not None
+			else fl['et_ljatr_cp_xhi'][fi])))
+		if len(k):
+			cpf = fl['et_ljatr_cubic_poly']; f4 = fi[k] * 4; dk = d[k]
+			ljE[k] = ((cpf[f4 + 3] * dk + cpf[f4 + 2]) * dk
+				+ cpf[f4 + 1]) * dk + cpf[f4]
+		lj_min = fl['et_lj_minimum'][fi]
+		lj_val_at_min = fl['et_lj_val_at_minimum'][fi]
+		rep_neg = fl['et_ljrep_from_negcrossing'][fi]
+		near = d < lj_min
 		atrE = np.where(rep_neg,
 			np.where(ljE < 0, ljE, 0.0),
-			np.where(d < lj_min, lj_val_at_min, ljE))
+			np.where(near, lj_val_at_min, ljE))
 		repE = np.where(rep_neg,
 			np.where(ljE >= 0, ljE, 0.0),
-			np.where(d < lj_min, ljE - lj_val_at_min, 0.0))
-		atrE = atrE * ljatr_fw
-		atrE = np.where(valid, atrE, 0.0)
-		repE = np.where(valid, repE, 0.0)
+			np.where(near, ljE - lj_val_at_min, 0.0))
+		atrE = atrE * fl['et_ljatr_final_weight'][fi]
+		if valid is not None and not valid.all():
+			atrE = np.where(valid, atrE, 0.0)
+			repE = np.where(valid, repE, 0.0)
 		return atrE, repE
 	def fullatomljraw(cache, same_res):
 		'''
@@ -4939,10 +4987,17 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None, nrot_override=None):
 		--------
 			tuple: (atr_sum, rep_sum) - raw scalar sums before weighting
 		'''
+		memo = cache.setdefault('_ljraw_memo', {})
+		key = bool(same_res)
+		if key in memo: return memo[key]
 		pi, pj, r, w = fullatompairs(cache, same_res=same_res)
-		if len(pi) == 0: return 0.0, 0.0
+		if len(pi) == 0:
+			memo[key] = (0.0, 0.0)
+			return 0.0, 0.0
 		atrE, repE = ljpair(cache, pi, pj, r)
-		return float(np.sum(w * atrE)), float(np.sum(w * repE))
+		out = (float(np.sum(w * atrE)), float(np.sum(w * repE)))
+		memo[key] = out
+		return out
 	_lkb = params.get('LkBall') or {}
 	lk_max = float(_lkb.get('max_dis', 0.0))
 	lk_far_lo = float(_lkb.get('far_lo', 0.0))
@@ -4959,30 +5014,41 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None, nrot_override=None):
 		--------
 			np.float64 array (npair,) of one-sided lk_iso values
 		'''
-		cs = cache['et_close_start'][io_first, io_second]
-		ce = cache['et_close_end'][io_first, io_second]
-		cf = cache['et_close_flat'][io_first, io_second]
-		cp = cache['et_close_poly'][io_first, io_second]
-		fp = cache['et_far_poly'][io_first, io_second]
-		lc = cache['et_lk_coeff'][io_first, io_second]
-		la = cache['et_lambda_self'][io_first, io_second]
-		Rs = cache['et_R_self'][io_first, io_second]
-		fw = cache['et_final_w'][io_first, io_second]
+		fl = cache.get('_et_flat')
+		if fl is None:
+			fl = {k: v.reshape(-1) for k, v in cache.items()
+				if k.startswith('et_')
+				and isinstance(v, np.ndarray)}
+			cache['_et_flat'] = fl
+		nc = cache['et_close_start'].shape[1]
+		fa = io_first * nc + io_second
+		cs = fl['et_close_start'][fa]
+		ce = fl['et_close_end'][fa]
 		d = r
-		d2 = d * d
-		exp_arg = (d - Rs) / la
-		gauss = np.exp(-exp_arg * exp_arg)
-		e_mid = lc * gauss / np.maximum(d2, 1e-12)
-		c0 = cp[:, 0]; c1 = cp[:, 1]; c2 = cp[:, 2]; c3 = cp[:, 3]
-		e_close = c0 + c1 * d + c2 * d * d + c3 * d * d * d
-		f0 = fp[:, 0]; f1 = fp[:, 1]; f2 = fp[:, 2]; f3 = fp[:, 3]
-		e_far = f0 + f1 * d + f2 * d * d + f3 * d * d * d
-		e = np.where(d < cs, cf, e_mid)
-		e = np.where((d >= cs) & (d < ce), e_close, e)
-		e = np.where((d >= lk_far_lo) & (d < lk_max), e_far, e)
-		e = np.where(d >= lk_max, 0.0, e)
-		return e * fw
-	def lkisopair(cache, pi, pj, r):
+		e = np.zeros(len(r), dtype=np.float64)
+		lo = d < lk_far_lo
+		m_flat = lo & (d < cs)
+		m_close = lo & (~m_flat) & (d < ce)
+		k = np.flatnonzero(m_flat)
+		if len(k): e[k] = fl['et_close_flat'][fa[k]]
+		k = np.flatnonzero(m_close)
+		if len(k):
+			cpf = fl['et_close_poly']; f4 = fa[k] * 4; dk = d[k]
+			e[k] = (cpf[f4] + cpf[f4 + 1] * dk + cpf[f4 + 2] * dk * dk
+				+ cpf[f4 + 3] * dk * dk * dk)
+		k = np.flatnonzero(lo & (~m_flat) & (~m_close))
+		if len(k):
+			fk = fa[k]; dk = d[k]
+			ex = (dk - fl['et_R_self'][fk]) / fl['et_lambda_self'][fk]
+			e[k] = fl['et_lk_coeff'][fk] * np.exp(-ex * ex) \
+				/ np.maximum(dk * dk, 1e-12)
+		k = np.flatnonzero((d >= lk_far_lo) & (d < lk_max))
+		if len(k):
+			fpf = fl['et_far_poly']; f4 = fa[k] * 4; dk = d[k]
+			e[k] = (fpf[f4] + fpf[f4 + 1] * dk + fpf[f4 + 2] * dk * dk
+				+ fpf[f4 + 3] * dk * dk * dk)
+		return e * fl['et_final_w'][fa]
+	def lkisopair(cache, pi, pj, r, ids=None):
 		'''
 		Return per-direction analytic fa_sol/lk_iso values (one-sided
 		desolvation energies) for atom pairs (pi[k], pj[k]) at distance
@@ -5001,25 +5067,31 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None, nrot_override=None):
 			pi: atom-i indices (np.int64)
 			pj: atom-j indices (np.int64)
 			r:  pair distances (np.float64)
+			ids: precomputed (valid, ai_safe, aj_safe) triple, saving
+				the etable index lookup when a caller already has it
 		Returns:
 		--------
 			(lki, lkj): tuple of np.float64 arrays length len(pi)
 		'''
 		at_e_idx = cache.get('at_e_idx')
-		n_pairs = len(pi)
+		n_pairs = len(r)
 		if at_e_idx is None or n_pairs == 0:
 			return (np.zeros(n_pairs, dtype=np.float64),
 				np.zeros(n_pairs, dtype=np.float64))
-		ai = at_e_idx[pi]; aj = at_e_idx[pj]
-		valid = (ai >= 0) & (aj >= 0)
-		ai_safe = np.where(valid, ai, 0)
-		aj_safe = np.where(valid, aj, 0)
+		if ids is None:
+			ai = at_e_idx[pi]; aj = at_e_idx[pj]
+			valid = (ai >= 0) & (aj >= 0)
+			ai_safe = np.where(valid, ai, 0)
+			aj_safe = np.where(valid, aj, 0)
+		else:
+			valid, ai_safe, aj_safe = ids
 		lki = _eval(ai_safe, aj_safe, cache, r)
 		lkj = _eval(aj_safe, ai_safe, cache, r)
-		lki = np.where(valid, lki, 0.0)
-		lkj = np.where(valid, lkj, 0.0)
+		if valid is not None and not valid.all():
+			lki = np.where(valid, lki, 0.0)
+			lkj = np.where(valid, lkj, 0.0)
 		return lki, lkj
-	def solpair(cache, pi, pj, r):
+	def solpair(cache, pi, pj, r, ids=None):
 		'''
 		Combined fa_sol per-pair value matching the
 		analytic LK-evaluation algorithm (used by FaSol /
@@ -5038,47 +5110,65 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None, nrot_override=None):
 			pi: atom-i indices (np.int64)
 			pj: atom-j indices (np.int64)
 			r:  pair distances (np.float64)
+			ids: precomputed (valid, ai_safe, aj_safe) triple, saving
+				the etable index lookup when a caller already has it
 		Returns:
 		--------
 			np.float64 array: combined fa_sol per pair
 		'''
 		at_e_idx = cache.get('at_e_idx')
-		n_pairs = len(pi)
+		n_pairs = len(r)
 		if at_e_idx is None or n_pairs == 0:
 			return np.zeros(n_pairs, dtype=np.float64)
-		ai = at_e_idx[pi]; aj = at_e_idx[pj]
-		valid = (ai >= 0) & (aj >= 0)
-		a_lo = np.where(ai <= aj, ai, aj)
-		a_hi = np.where(ai <= aj, aj, ai)
-		a_lo_safe = np.where(valid, a_lo, 0)
-		a_hi_safe = np.where(valid, a_hi, 0)
-		cs = cache['et_close_start'][a_lo_safe, a_hi_safe]
-		ce = cache['et_close_end'][a_lo_safe, a_hi_safe]
-		cf = cache['et_close_flat_comb'][a_lo_safe, a_hi_safe]
-		cp = cache['et_close_poly_comb'][a_lo_safe, a_hi_safe]
-		fp = cache['et_far_poly_comb'][a_lo_safe, a_hi_safe]
-		fw = cache['et_final_w'][a_lo_safe, a_hi_safe]
-		lc1 = cache['et_lk_coeff'][a_lo_safe, a_hi_safe]
-		lc2 = cache['et_lk_coeff'][a_hi_safe, a_lo_safe]
-		R1  = cache['et_R_self'][a_lo_safe, a_hi_safe]
-		R2  = cache['et_R_self'][a_hi_safe, a_lo_safe]
-		la1 = cache['et_lambda_self'][a_lo_safe, a_hi_safe]
-		la2 = cache['et_lambda_self'][a_hi_safe, a_lo_safe]
+		if ids is None:
+			ai = at_e_idx[pi]; aj = at_e_idx[pj]
+			valid = (ai >= 0) & (aj >= 0)
+			ai = np.where(valid, ai, 0); aj = np.where(valid, aj, 0)
+		else:
+			valid, ai, aj = ids
+		a_lo_safe = np.minimum(ai, aj)
+		a_hi_safe = np.maximum(ai, aj)
+		fl = cache.get('_et_flat')
+		if fl is None:
+			fl = {k: v.reshape(-1) for k, v in cache.items()
+				if k.startswith('et_')
+				and isinstance(v, np.ndarray)}
+			cache['_et_flat'] = fl
+		nc = cache['et_close_start'].shape[1]
+		fa = a_lo_safe * nc + a_hi_safe
+		fb = a_hi_safe * nc + a_lo_safe
+		cs = fl['et_close_start'][fa]
+		ce = fl['et_close_end'][fa]
 		d = r
-		d2 = d * d
-		x1 = ((d - R1) / la1) ** 2
-		x2 = ((d - R2) / la2) ** 2
-		e_mid = (lc1 * np.exp(-x1) + lc2 * np.exp(-x2)) / np.maximum( d2, 1e-12)
-		c0 = cp[:, 0]; c1 = cp[:, 1]; c2 = cp[:, 2]; c3 = cp[:, 3]
-		e_close = ((c3 * d + c2) * d + c1) * d + c0
-		f0 = fp[:, 0]; f1 = fp[:, 1]; f2 = fp[:, 2]; f3 = fp[:, 3]
-		e_far = ((f3 * d + f2) * d + f1) * d + f0
-		e = np.where(d < cs, cf, e_mid)
-		e = np.where((d >= cs) & (d < ce), e_close, e)
-		e = np.where((d >= lk_far_lo) & (d < lk_max), e_far, e)
-		e = np.where(d >= lk_max, 0.0, e)
-		e = e * fw
-		e = np.where(valid, e, 0.0)
+		e = np.zeros(n_pairs, dtype=np.float64)
+		lo = d < lk_far_lo
+		m_flat = lo & (d < cs)
+		m_close = lo & (~m_flat) & (d < ce)
+		k = np.flatnonzero(m_flat)
+		if len(k): e[k] = fl['et_close_flat_comb'][fa[k]]
+		k = np.flatnonzero(m_close)
+		if len(k):
+			cpf = fl['et_close_poly_comb']; f4 = fa[k] * 4; dk = d[k]
+			e[k] = ((cpf[f4 + 3] * dk + cpf[f4 + 2]) * dk
+				+ cpf[f4 + 1]) * dk + cpf[f4]
+		k = np.flatnonzero(lo & (~m_flat) & (~m_close))
+		if len(k):
+			fk = fa[k]; gk = fb[k]; dk = d[k]
+			x1 = ((dk - fl['et_R_self'][fk])
+				/ fl['et_lambda_self'][fk]) ** 2
+			x2 = ((dk - fl['et_R_self'][gk])
+				/ fl['et_lambda_self'][gk]) ** 2
+			e[k] = (fl['et_lk_coeff'][fk] * np.exp(-x1)
+				+ fl['et_lk_coeff'][gk] * np.exp(-x2)) \
+				/ np.maximum(dk * dk, 1e-12)
+		k = np.flatnonzero((d >= lk_far_lo) & (d < lk_max))
+		if len(k):
+			fpf = fl['et_far_poly_comb']; f4 = fa[k] * 4; dk = d[k]
+			e[k] = ((fpf[f4 + 3] * dk + fpf[f4 + 2]) * dk
+				+ fpf[f4 + 1]) * dk + fpf[f4]
+		e *= fl['et_final_w'][fa]
+		if valid is not None and not valid.all():
+			e = np.where(valid, e, 0.0)
 		return e
 	def fullatomsolraw(cache, same_res):
 		'''
@@ -5243,8 +5333,18 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None, nrot_override=None):
 		col_f = (a * grid_2d[:, i_psi] + b * grid_2d[:, j_psi]
 			+ ((a**3 - a) * ypp_psi_grid[:, i_psi]
 				+ (b**3 - b) * ypp_psi_grid[:, j_psi]) / 6.0)
-		ypp_phi = periodic_cubic_spline(col_f)
-		return spline_eval_1d(col_f, ypp_phi, fp, n)
+		M = _PCS_M.get(n)
+		if M is None:
+			ypp_phi = periodic_cubic_spline(col_f)
+		else:
+			ypp_phi = M @ col_f
+		ii = int(math.floor(fp)) % n
+		jj = (ii + 1) % n
+		fr = fp - math.floor(fp)
+		aa = 1.0 - fr
+		return (aa * col_f[ii] + fr * col_f[jj]
+			+ ((aa*aa*aa - aa) * ypp_phi[ii]
+				+ (fr*fr*fr - fr) * ypp_phi[jj]) / 6.0)
 	nrchi_cache = {}
 	def fadun_nrchi_data(tri):
 		'''
@@ -5393,11 +5493,32 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None, nrot_override=None):
 			chi_sigmas_v.append(max(sd_v, 0.5))
 		fc = (chi_last - chi_last_low) / chi_last_step
 		fc_mod = fc - chi_last_n * math.floor(fc / chi_last_n)
+		nsp = 36
+		i_psi = int(math.floor(fs)) % nsp
+		j_psi = (i_psi + 1) % nsp
+		frac_s = fs - math.floor(fs)
+		av = 1.0 - frac_s; bv = frac_s
+		ND = rdat['neglogD']; YD = rdat['ypp_dens']
+		COL = (av * ND[:, i_psi, :] + bv * ND[:, j_psi, :]
+			+ ((av**3 - av) * YD[:, i_psi, :]
+				+ (bv**3 - bv) * YD[:, j_psi, :]) / 6.0)
+		COLT = np.ascontiguousarray(COL.T)
+		Msp = _PCS_M.get(nsp)
+		ii = int(math.floor(fp)) % nsp
+		jj = (ii + 1) % nsp
+		fr = fp - math.floor(fp)
+		aa = 1.0 - fr
+		aa3 = aa * aa * aa - aa
+		fr3 = fr * fr * fr - fr
 		v_arr = np.empty(chi_last_n)
 		for c in range(chi_last_n):
-			v_arr[c] = fadun_spline_eval(
-				rdat['neglogD'][:, :, c],
-				rdat['ypp_dens'][:, :, c], fp, fs)
+			cf = COLT[c]
+			if Msp is None:
+				yp = periodic_cubic_spline(cf)
+			else:
+				yp = Msp @ cf
+			v_arr[c] = (aa * cf[ii] + fr * cf[jj]
+				+ (aa3 * yp[ii] + fr3 * yp[jj]) / 6.0)
 		ypp_c = periodic_cubic_spline(v_arr)
 		neg_log_dens = spline_eval_1d( v_arr, ypp_c, fc_mod, chi_last_n)
 		return (neg_log_rot, chi_means_v, chi_sigmas_v, neg_log_dens)
@@ -5414,6 +5535,9 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None, nrot_override=None):
 		'''
 		y = np.asarray(y, dtype=float)
 		n = len(y)
+		key = y.tobytes()
+		hit = _PCS_Y.get(key)
+		if hit is not None: return hit
 		M = _PCS_M.get(n)
 		if M is None:
 			F = np.fft.fft(np.eye(n), axis=0)
@@ -5426,7 +5550,9 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None, nrot_override=None):
 				B[i, (i - 1) % n] += 6.0
 			M = np.real(np.fft.ifft(np.diag(1.0 / A_diag) @ F @ B, axis=0))
 			_PCS_M[n] = M
-		return M @ y
+		out = M @ y
+		_PCS_Y[key] = out
+		return out
 	def spline_eval_1d(y, ypp, t, n):
 		'''
 		Evaluate a 1D cubic spline from precomputed 2nd derivs
@@ -5479,8 +5605,18 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None, nrot_override=None):
 		col_f = (a * arr[:, i_psi] + b * arr[:, j_psi]
 			+ ((a**3 - a) * ypp_psi[:, i_psi]
 				+ (b**3 - b) * ypp_psi[:, j_psi]) / 6.0)
-		ypp_phi = periodic_cubic_spline(col_f)
-		return spline_eval_1d(col_f, ypp_phi, fp, n)
+		M = _PCS_M.get(n)
+		if M is None:
+			ypp_phi = periodic_cubic_spline(col_f)
+		else:
+			ypp_phi = M @ col_f
+		ii = int(math.floor(fp)) % n
+		jj = (ii + 1) % n
+		fr = fp - math.floor(fp)
+		aa = 1.0 - fr
+		return (aa * col_f[ii] + fr * col_f[jj]
+			+ ((aa*aa*aa - aa) * ypp_phi[ii]
+				+ (fr*fr*fr - fr) * ypp_phi[jj]) / 6.0)
 	def hbond_chemtype_maps():
 		'''
 		Build forward and reverse chemtype maps for HBond
@@ -5647,6 +5783,7 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None, nrot_override=None):
 		'''
 		if poly is None: return xD
 		return AHD_rad if poly.get('xmin', -1) > 0.5 else xD
+	hbmemo = {}
 	def hbondpair(ix, iy, HS, acc_str_tab, acceptors, all_hbonds, atoms, coords,
 			dHA, don_str_tab, donors, eval_key, fades, polys):
 		'''
@@ -5690,66 +5827,84 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None, nrot_override=None):
 		elif diff == 3: sep = 'seq_sep_P3'
 		elif diff == 4: sep = 'seq_sep_P4'
 		else: sep = 'seq_sep_other'
-		entry = eval_key.get((d['chem'], a['chem'], sep))
-		if entry is None:
-			entry = eval_key.get((d['chem'], a['chem'], 'seq_sep_other'))
-		if entry is None: return
+		mkey = (d['chem'], a['chem'], sep)
+		got = hbmemo.get(mkey)
+		if got is None:
+			entry = eval_key.get(mkey)
+			if entry is None:
+				entry = eval_key.get(
+					(d['chem'], a['chem'], 'seq_sep_other'))
+			got = False if entry is None else (entry,
+				polys.get(entry['poly_AHdist']),
+				polys.get(entry['poly_cosBAH_short']),
+				polys.get(entry['poly_cosAHD_short']),
+				fades.get(entry['fade_AHdist']),
+				fades.get(entry['fade_cosBAH_long']),
+				fades.get(entry['fade_cosAHD_short']),
+				params.get('HBond_data', {})
+					.get('acc_hybridization', {}).get(a['chem']),
+				don_str_tab.get(d['chem'], 1.0)
+					* acc_str_tab.get(a['chem'], 1.0))
+			hbmemo[mkey] = got
+		if got is False: return
+		(entry, poly_d, poly_bah_short, poly_ahd_short, fade_d,
+			fbah_l, fahd_s, acc_hyb, s) = got
 		D_xyz = coords[d['D']]; H_xyz = coords[d['H']]
 		A_xyz = coords[a['A']]; B_xyz = coords[a['B']]
-		if (params.get('HBond_data', {}).get('acc_hybridization', {})
-				.get(a['chem']) == 'RING_HYBRID'
-				and a.get('B2') is not None):
-			B_xyz = 0.5 * (B_xyz + coords[a['B2']])
+		b2i = a.get('B2')
+		if acc_hyb == 'RING_HYBRID' and b2i is not None:
+			B_xyz = 0.5 * (B_xyz + coords[b2i])
 		AH = float(dHA[ix, iy])
 		vDH = D_xyz - H_xyz; vAH = A_xyz - H_xyz
+		nAH = math.sqrt(vAH.dot(vAH))
 		cosAHD = float(np.dot(vDH, vAH) /
-			max(np.linalg.norm(vDH) * np.linalg.norm(vAH), 1e-12))
-		vBA = B_xyz - A_xyz; vHA = -vAH
-		cosBAH = float(np.dot(vBA, vHA) /
-			max(np.linalg.norm(vBA) * np.linalg.norm(vHA), 1e-12))
-		poly_d = polys.get(entry['poly_AHdist'])
-		poly_bah_short = polys.get(entry['poly_cosBAH_short'])
-		poly_bah_long = polys.get(entry['poly_cosBAH_long'])
-		poly_ahd_short = polys.get(entry['poly_cosAHD_short'])
-		poly_ahd_long = polys.get(entry['poly_cosAHD_long'])
+			max(math.sqrt(vDH.dot(vDH)) * nAH, 1e-12))
+		vBA = B_xyz - A_xyz
+		cosBAH = -float(np.dot(vBA, vAH) /
+			max(math.sqrt(vBA.dot(vBA)) * nAH, 1e-12))
 		xH = -cosBAH
 		xD = -cosAHD
 		AHD_rad = math.acos(max(-1.0, min(1.0, cosAHD)))
 		Pr = hbond_poly_eval(poly_d, AH)
 		PSxH = hbond_poly_eval(poly_bah_short, xH)
-		PLxH = hbond_poly_eval(poly_bah_long, xH)
+		PLxH = 0.0
 		PSxD = hbond_poly_eval(
 			poly_ahd_short, ahd_arg(poly_ahd_short, AHD_rad, xD))
-		PLxD = hbond_poly_eval(
-			poly_ahd_long, ahd_arg(poly_ahd_long, AHD_rad, xD))
-		FSr = hbond_fade( fades.get(entry['fade_AHdist']), AH)
+		PLxD = 0.0
+		FSr = hbond_fade(fade_d, AH)
 		FLr = 0.0
-		fbah_s_name = entry['fade_cosBAH_short']
-		fbah_l_name = entry['fade_cosBAH_long']
-		fbah_s = fades.get(fbah_s_name)
-		fbah_l = fades.get(fbah_l_name)
 		FxH = hbond_fade(fbah_l, xH)
-		fahd_s = fades.get(entry['fade_cosAHD_short'])
 		FxD = hbond_fade(fahd_s, xD)
 		e = (Pr * FxD * FxH
 			+ FSr * (PSxD * FxH + FxD * PSxH)
 			+ FLr * (PLxD * FxH + FxD * PLxH))
-		acc_hyb = params.get('HBond_data', {}) \
-			.get('acc_hybridization', {}).get(a['chem'])
-		s = (don_str_tab.get(d['chem'], 1.0) * acc_str_tab.get(a['chem'], 1.0))
 		e *= s
-		if acc_hyb == 'SP2_HYBRID' and a.get('B2') is not None:
-			B2_xyz = coords[a['B2']]
+		if acc_hyb == 'SP2_HYBRID' and b2i is not None:
+			B2_xyz = coords[b2i]
 			b1 = B_xyz - B2_xyz
 			b2 = A_xyz - B_xyz
 			b3 = H_xyz - A_xyz
-			n1 = np.cross(b1, b2); n2 = np.cross(b2, b3)
-			n1n = np.linalg.norm(n1); n2n = np.linalg.norm(n2)
+			g1x, g1y, g1z = b1.tolist()
+			g2x, g2y, g2z = b2.tolist()
+			g3x, g3y, g3z = b3.tolist()
+			n1x = g1y*g2z - g1z*g2y
+			n1y = g1z*g2x - g1x*g2z
+			n1z = g1x*g2y - g1y*g2x
+			n2x = g2y*g3z - g2z*g3y
+			n2y = g2z*g3x - g2x*g3z
+			n2z = g2x*g3y - g2y*g3x
+			n1 = np.array([n1x, n1y, n1z])
+			n2 = np.array([n2x, n2y, n2z])
+			n1n = math.sqrt(n1.dot(n1)); n2n = math.sqrt(n2.dot(n2))
 			if n1n > 1e-9 and n2n > 1e-9:
 				m1 = n1 / n1n; m2 = n2 / n2n
 				cos_chi = float(np.dot(m1, m2))
-				sin_chi_sign = float(np.dot(np.cross(m1, m2),
-					b2 / max(np.linalg.norm(b2), 1e-12)))
+				u1 = m1.tolist(); u2 = m2.tolist()
+				mc = np.array([u1[1]*u2[2] - u1[2]*u2[1],
+					u1[2]*u2[0] - u1[0]*u2[2],
+					u1[0]*u2[1] - u1[1]*u2[0]])
+				sin_chi_sign = float(np.dot(mc,
+					b2 / max(math.sqrt(b2.dot(b2)), 1e-12)))
 				chi = math.atan2(sin_chi_sign, cos_chi)
 				d_p = float(HS['BAH180_rise'])
 				m_p = float(HS['fade_slope'])
@@ -5771,18 +5926,32 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None, nrot_override=None):
 					F_p = m_p - 0.5; G_p = m_p - 0.5
 				e += s * (H_chi * F_p + (1 - H_chi) * G_p)
 		elif acc_hyb == 'SP3_HYBRID' and a['chem'] in (
-				'hbacc_HXL', 'hbacc_AHX') and a.get('B2') is not None:
-			B2_xyz = coords[a['B2']]
+				'hbacc_HXL', 'hbacc_AHX') and b2i is not None:
+			B2_xyz = coords[b2i]
 			b1 = H_xyz - A_xyz
 			b2 = A_xyz - B_xyz
 			b3 = B_xyz - B2_xyz
-			n1 = np.cross(b1, b2); n2 = np.cross(b2, b3)
-			n1n = np.linalg.norm(n1); n2n = np.linalg.norm(n2)
+			g1x, g1y, g1z = b1.tolist()
+			g2x, g2y, g2z = b2.tolist()
+			g3x, g3y, g3z = b3.tolist()
+			n1x = g1y*g2z - g1z*g2y
+			n1y = g1z*g2x - g1x*g2z
+			n1z = g1x*g2y - g1y*g2x
+			n2x = g2y*g3z - g2z*g3y
+			n2y = g2z*g3x - g2x*g3z
+			n2z = g2x*g3y - g2y*g3x
+			n1 = np.array([n1x, n1y, n1z])
+			n2 = np.array([n2x, n2y, n2z])
+			n1n = math.sqrt(n1.dot(n1)); n2n = math.sqrt(n2.dot(n2))
 			if n1n > 1e-9 and n2n > 1e-9:
 				m1 = n1 / n1n; m2 = n2 / n2n
 				cos_chi = float(np.dot(m1, m2))
-				sin_chi_sign = float(np.dot(np.cross(m1, m2),
-					b2 / max(np.linalg.norm(b2), 1e-12)))
+				u1 = m1.tolist(); u2 = m2.tolist()
+				mc = np.array([u1[1]*u2[2] - u1[2]*u2[1],
+					u1[2]*u2[0] - u1[0]*u2[2],
+					u1[0]*u2[1] - u1[1]*u2[0]])
+				sin_chi_sign = float(np.dot(mc,
+					b2 / max(math.sqrt(b2.dot(b2)), 1e-12)))
 				chi = math.atan2(sin_chi_sign, cos_chi)
 				PI = math.pi
 				max_penalty = float(HS['max_penalty'])
@@ -5832,26 +6001,98 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None, nrot_override=None):
 		HS = params.get('HBondSp2') or {}
 		hb = params.get('HBond_data') or {}
 		if not hb: return {'SR_BB': 0.0, 'LR_BB': 0.0, 'BB_SC': 0.0, 'SC': 0.0}
-		donor_map, acceptor_map, base_map = hbond_chemtype_maps()
-		eval_key = hbond_eval_lookup(hb)
-		polys = hb['polynomials']; fades = hb['fade_intervals']
-		don_str_tab = hb['donor_strengths']
-		acc_str_tab = hb['acceptor_strengths']
 		atoms = pose.data['Atoms']
 		coords = np.asarray(pose.data['Coordinates'])
-		bonds = cache.get('adj') or pose.data['Bonds']
 		aas = pose.data.get('Amino Acids') or {}
-		atom_to_res = {}
-		res_atom = {}
-		for ri, info in aas.items():
-			tri = info[5] if len(info) >= 6 else None
-			if str(info[0]).islower():
-				tri = (pose.aminoacids.get(str(info[0]).upper(),
-					{}).get('Tricode') or [tri])[0]
-			for ai in info[2] + info[3]:
-				ai = int(ai)
-				atom_to_res[ai] = (int(ri), tri)
-				res_atom.setdefault((int(ri), atoms[ai][0]), ai)
+		topo = cache.get('_hb_topo')
+		if topo is None:
+			donor_map, acceptor_map, base_map = hbond_chemtype_maps()
+			eval_key = hbond_eval_lookup(hb)
+			polys = hb['polynomials']; fades = hb['fade_intervals']
+			don_str_tab = hb['donor_strengths']
+			acc_str_tab = hb['acceptor_strengths']
+			bonds = cache.get('adj') or pose.data['Bonds']
+			atom_to_res = {}
+			res_atom = {}
+			for ri, info in aas.items():
+				tri = info[5] if len(info) >= 6 else None
+				if str(info[0]).islower():
+					tri = (pose.aminoacids.get(str(info[0]).upper(),
+						{}).get('Tricode') or [tri])[0]
+				for ai in info[2] + info[3]:
+					ai = int(ai)
+					atom_to_res[ai] = (int(ri), tri)
+					res_atom.setdefault((int(ri), atoms[ai][0]), ai)
+			donors = []
+			for ai, info in atoms.items():
+				if info[1] not in ('N', 'O'): continue
+				tri_pair = atom_to_res.get(int(ai))
+				if tri_pair is None: continue
+				ri, tri = tri_pair
+				key = (tri, info[0])
+				if key not in donor_map: continue
+				for j in bonds.get(int(ai), []):
+					jinfo = atoms.get(int(j))
+					if jinfo is None: continue
+					if jinfo[1] != 'H': continue
+					donors.append({'D': int(ai), 'H': int(j),
+						'ri': ri, 'tri': tri, 'chem': donor_map[key]})
+			acceptors = []
+			for ai, info in atoms.items():
+				if info[1] not in ('N', 'O'): continue
+				tri_pair = atom_to_res.get(int(ai))
+				if tri_pair is None: continue
+				ri, tri = tri_pair
+				key = (tri, info[0])
+				if key not in acceptor_map: continue
+				b_name = base_map.get(key)
+				b_ai = res_atom.get((ri, b_name))
+				if b_ai is None: continue
+				chem = acceptor_map[key]
+				b2_ai = None
+				hybk = (params.get('HBond_data', {})
+					.get('acc_hybridization', {}).get(chem))
+				if hybk == 'RING_HYBRID':
+					for k in bonds.get(int(ai), []):
+						k = int(k)
+						if k == b_ai: continue
+						if atoms.get(k, [None, 'H'])[1] == 'H': continue
+						b2_ai = k; break
+				elif chem in ('hbacc_HXL', 'hbacc_AHX'):
+					for k in bonds.get(int(ai), []):
+						k = int(k)
+						if atoms.get(k, [None,'X'])[1] == 'H':
+							b2_ai = k; break
+				else:
+					same_res_nbrs = []
+					other_nbrs = []
+					for k in bonds.get(b_ai, []):
+						k = int(k)
+						if k == int(ai): continue
+						if atoms.get(k, [None,'H'])[1] == 'H': continue
+						tri_pair_k = atom_to_res.get(k)
+						if tri_pair_k is not None and tri_pair_k[0] == ri:
+							same_res_nbrs.append(k)
+						else:
+							other_nbrs.append(k)
+					if same_res_nbrs:
+						b2_ai = sorted(same_res_nbrs)[0]
+					elif other_nbrs:
+						b2_ai = sorted(other_nbrs)[0]
+				acceptors.append({'A': int(ai), 'B': b_ai, 'B2': b2_ai,
+					'ri': ri, 'tri': tri, 'chem': chem})
+			H_idx = np.array([d['H'] for d in donors],
+				dtype=np.int64)
+			A_idx = np.array([a['A'] for a in acceptors],
+				dtype=np.int64)
+			topo = (donor_map, acceptor_map, base_map, eval_key,
+				polys, fades, don_str_tab, acc_str_tab,
+				atom_to_res, res_atom, donors, acceptors,
+				H_idx, A_idx)
+			cache['_hb_topo'] = topo
+		(donor_map, acceptor_map, base_map, eval_key, polys, fades,
+			don_str_tab, acc_str_tab, atom_to_res, res_atom,
+			donors, acceptors, H_idx, A_idx) = topo
 		nb_count = {}
 		nb_xyz = {}
 		for ri, info in aas.items():
@@ -5869,69 +6110,9 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None, nrot_override=None):
 		counts = within.sum(axis=1)
 		for k, r in enumerate(ri_list):
 			nb_count[r] = int(counts[k])
-		donors = []
-		for ai, info in atoms.items():
-			if info[1] not in ('N', 'O'): continue
-			tri_pair = atom_to_res.get(int(ai))
-			if tri_pair is None: continue
-			ri, tri = tri_pair
-			key = (tri, info[0])
-			if key not in donor_map: continue
-			for j in bonds.get(int(ai), []):
-				jinfo = atoms.get(int(j))
-				if jinfo is None: continue
-				if jinfo[1] != 'H': continue
-				donors.append({'D': int(ai), 'H': int(j),
-					'ri': ri, 'tri': tri, 'chem': donor_map[key]})
-		acceptors = []
-		for ai, info in atoms.items():
-			if info[1] not in ('N', 'O'): continue
-			tri_pair = atom_to_res.get(int(ai))
-			if tri_pair is None: continue
-			ri, tri = tri_pair
-			key = (tri, info[0])
-			if key not in acceptor_map: continue
-			b_name = base_map.get(key)
-			b_ai = res_atom.get((ri, b_name))
-			if b_ai is None: continue
-			chem = acceptor_map[key]
-			b2_ai = None
-			hybk = (params.get('HBond_data', {})
-				.get('acc_hybridization', {}).get(chem))
-			if hybk == 'RING_HYBRID':
-				for k in bonds.get(int(ai), []):
-					k = int(k)
-					if k == b_ai: continue
-					if atoms.get(k, [None, 'H'])[1] == 'H': continue
-					b2_ai = k; break
-			elif chem in ('hbacc_HXL', 'hbacc_AHX'):
-				for k in bonds.get(int(ai), []):
-					k = int(k)
-					if atoms.get(k, [None,'X'])[1] == 'H':
-						b2_ai = k; break
-			else:
-				same_res_nbrs = []
-				other_nbrs = []
-				for k in bonds.get(b_ai, []):
-					k = int(k)
-					if k == int(ai): continue
-					if atoms.get(k, [None,'H'])[1] == 'H': continue
-					tri_pair_k = atom_to_res.get(k)
-					if tri_pair_k is not None and tri_pair_k[0] == ri:
-						same_res_nbrs.append(k)
-					else:
-						other_nbrs.append(k)
-				if same_res_nbrs:
-					b2_ai = sorted(same_res_nbrs)[0]
-				elif other_nbrs:
-					b2_ai = sorted(other_nbrs)[0]
-			acceptors.append({'A': int(ai), 'B': b_ai, 'B2': b2_ai,
-				'ri': ri, 'tri': tri, 'chem': chem})
 		cat_totals = {'SR_BB': 0.0, 'LR_BB': 0.0, 'BB_SC': 0.0, 'SC': 0.0}
 		if not donors or not acceptors: return cat_totals
 		all_hbonds = []
-		H_idx = np.array([d['H'] for d in donors], dtype=np.int64)
-		A_idx = np.array([a['A'] for a in acceptors], dtype=np.int64)
 		Hc = coords[H_idx]; Ac = coords[A_idx]
 		dHA = np.linalg.norm( Hc[:, None, :] - Ac[None, :, :], axis=2)
 		within = np.where(dHA < 3.2)
@@ -6004,6 +6185,7 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None, nrot_override=None):
 	cache['hbond_eval_lookup'] = hbond_eval_lookup
 	cache['hbond_poly_eval'] = hbond_poly_eval
 	cache['hbond_fade'] = hbond_fade
+	cache['hbondpair'] = hbondpair
 	def cached_dihedral(pose, ri, dtype, chi_type=None):
 		'''
 		Memoised pose.GetDihedral: backbone phi/psi are requested per
@@ -6025,11 +6207,85 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None, nrot_override=None):
 			v = memo[key]
 			if isinstance(v, BaseException): raise v
 			return v
+		at = str(dtype).upper()
+		fast = (pose.data['Type'] == 'Protein'
+			and at in ('PHI', 'PSI', 'OMEGA', 'CHI'))
 		try:
-			if chi_type is None:
-				r = pose.GetDihedral(int(ri), dtype)
+			if not fast:
+				if chi_type is None:
+					r = pose.GetDihedral(int(ri), dtype)
+				else:
+					r = pose.GetDihedral(int(ri), dtype,
+						chi_type=chi_type)
 			else:
-				r = pose.GetDihedral(int(ri), dtype, chi_type=chi_type)
+				res = int(ri)
+				tp = cache.setdefault('_res_topo', {})
+				ent = tp.get(res)
+				if ent is None:
+					src = pose.data['Amino Acids']
+					nmap = {}
+					pa = pose.data['Atoms']
+					px = pose.data['Coordinates']
+					for ia in src[res][2] + src[res][3]:
+						na = pa[ia][0]
+						if na not in nmap: nmap[na] = ia
+					ent = (pose._prevres(res),
+						pose._nextres(res), nmap)
+					tp[res] = ent
+				prv, nxt, nmap = ent
+				px = pose.data['Coordinates']
+				def gc(rr, an):
+					if rr == res:
+						ia = nmap.get(an)
+						if ia is None:
+							raise Exception(f'Atom {an} not '
+								f'found in residue {rr}')
+						return px[ia]
+					return pose.GetAtomCoord(rr, an)
+				if at == 'PHI' and prv is None: r = float('nan')
+				elif at in ('PSI', 'OMEGA') and nxt is None:
+					r = float('nan')
+				else:
+					if at == 'PHI':
+						r1 = gc(prv, 'C'); r2 = gc(res, 'N')
+						r3 = gc(res, 'CA'); r4 = gc(res, 'C')
+					elif at == 'PSI':
+						r1 = gc(res, 'N'); r2 = gc(res, 'CA')
+						r3 = gc(res, 'C'); r4 = gc(nxt, 'N')
+					elif at == 'OMEGA':
+						r1 = gc(res, 'CA'); r2 = gc(res, 'C')
+						r3 = gc(nxt, 'N'); r4 = gc(nxt, 'CA')
+					else:
+						assert chi_type is not None, \
+							'Protein CHI needs chi_type'
+						sym = pose.data['Amino Acids'][res][0] \
+							.upper()
+						ca = pose.aminoacids[sym][
+							'Chi Angle Atoms'][chi_type - 1]
+						r1 = gc(res, ca[0]); r2 = gc(res, ca[1])
+						r3 = gc(res, ca[2]); r4 = gc(res, ca[3])
+					u1 = r2 - r1
+					u2 = r3 - r2
+					u3 = r4 - r3
+					mag = math.sqrt(u2.dot(u2))
+					p1 = u1.tolist(); p2 = u2.tolist()
+					p3 = u3.tolist()
+					c12 = np.array([
+						p1[1]*p2[2] - p1[2]*p2[1],
+						p1[2]*p2[0] - p1[0]*p2[2],
+						p1[0]*p2[1] - p1[1]*p2[0]])
+					c23 = np.array([
+						p2[1]*p3[2] - p2[2]*p3[1],
+						p2[2]*p3[0] - p2[0]*p3[2],
+						p2[0]*p3[1] - p2[1]*p3[0]])
+					q1 = c12.tolist(); q2 = c23.tolist()
+					cc = np.array([
+						q1[1]*q2[2] - q1[2]*q2[1],
+						q1[2]*q2[0] - q1[0]*q2[2],
+						q1[0]*q2[1] - q1[1]*q2[0]])
+					a = np.dot(u2, cc)
+					b = mag * np.dot(c12, c23)
+					r = math.atan2(a, b) * 180 / math.pi
 		except BaseException as ex:
 			memo[key] = ex
 			raise
