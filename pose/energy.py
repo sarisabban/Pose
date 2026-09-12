@@ -956,7 +956,7 @@ class ForceField():
 		np.divide(cache['_gs'], a, out=b)
 		np.multiply(b, b, out=d)
 		np.multiply(d, b, out=b)
-		np.multiply(b, b, out=d
+		np.multiply(b, b, out=d)
 		e_lj = float(np.einsum('ij,ij->', cache['_ge'], d)
 			- np.einsum('ij,ij->', cache['_ge'], b))
 		np.multiply(d, 2.0, out=d)
