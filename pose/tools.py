@@ -1887,15 +1887,18 @@ def Rotamers(index, pose):
 	--------
 		Rotates the side chain in place and returns no value. Does
 		nothing when the residue has no chi angles, sits at a chain end
-		where phi or psi is undefined, or has no library entry.
-		D-amino acids are looked up with negated phi and psi and the
-		resulting chi values are negated before they are applied
+		where phi or psi is undefined, has no library entry, or has a
+		side chain bonded outside its own residue, as a bridged cysteine
+		does, because rotating it would move only one half of that bond.
 	'''
 	info = pose.data.get('Amino Acids', {}).get(index)
 	if info is None: return
 	c = info[0]
 	db = pose.aminoacids.get(c.upper(), {})
 	if not (db.get('Chi Angle Atoms') or []): return
+	own = set(info[2]) | set(info[3])
+	if any(b not in own for a in info[3]
+		for b in pose.data['Bonds'].get(a, [])): return
 	tri = (db.get('Tricode') or [None])[0]
 	if not tri: return
 	phi, psi = pose.GetDihedral(index, 'PHI'), pose.GetDihedral(index, 'PSI')
@@ -1908,12 +1911,11 @@ def Rotamers(index, pose):
 	best = max(rows, key=lambda r: r[1])
 	for ci in range(n_chi):
 		mu = best[2 + ci]
-#		pose.RotateDihedral(index, float(-mu if flip else mu),
-#			'CHI', ci + 1)
 		if db.get('Fused'):
 			_ringpuck(pose, index, float(-mu if flip else mu), ci + 1)
 		else:
 			pose.RotateDihedral(index, float(-mu if flip else mu), 'CHI', ci+1)
+
 def _apply(pose, res, chis, n_chi, fused):
 	"""
 	Set the side chain of one residue, routing fused rings through the ring
@@ -2802,7 +2804,11 @@ def Anneal(pose, ff=None, n_steps=10000, T_start=2000.0, T_end=10.0,
 	'''
 	Simulated annealing over backbone torsions, mixing single-torsion and
 	shear moves, with the small-move step size adapted to hold a target
-	acceptance ratio
+	acceptance ratio. The phi of a ring fused residue such as proline is
+	never proposed, because rotating it about the N-CA axis swings the
+	ring's own CD out of the amide plane; a step that draws one leaves the
+	chain where it is, as a step drawing an undefined terminal torsion
+	already does
 	Arguments:
 	----------
 		pose:         Protein pose carrying an Amino Acids table
@@ -2823,7 +2829,10 @@ def Anneal(pose, ff=None, n_steps=10000, T_start=2000.0, T_end=10.0,
 		float: Lowest energy seen, whose coordinates are left in the pose
 		dict: Log holding 'energies', 'temperatures', 'accepted',
 		'move_types' (0 single, 1 shear, 2 no move applied),
-		'sigma_history' and 'best_step'
+		'sigma_history', 'best_step' (-1 when no step improved on the
+		start), 'n_evals' (energy evaluations made, the start included)
+		and 'coordinates_last' (the state the chain finished in, as
+		opposed to the best state that is left in the pose)
 	'''
 	if ff is None: ff = ForceField()
 	if pose.data.get('Amino Acids') is None:
@@ -2832,6 +2841,8 @@ def Anneal(pose, ff=None, n_steps=10000, T_start=2000.0, T_end=10.0,
 	NAN, kB = float('nan'), 8.31446262e-3
 	rng = np.random.default_rng(seed)
 	res_ids = np.array(sorted(pose.data['Amino Acids']), dtype=np.int64)
+	fused = {int(r) for r, info in pose.data['Amino Acids'].items()
+		if pose.aminoacids[info[0].upper()].get('Fused')}         # Rotating a ring fused phi tears the ring open
 	T_arr = T_start * (T_end / T_start) ** (
 		np.arange(n_steps) / max(n_steps - 1, 1))
 	res_arr = res_ids[rng.integers(0, len(res_ids), size=n_steps)]
@@ -2852,7 +2863,8 @@ def Anneal(pose, ff=None, n_steps=10000, T_start=2000.0, T_end=10.0,
 	accepted = np.zeros(n_steps, dtype=bool)
 	move_types = np.full(n_steps, 2, dtype=np.int8)
 	sigma_history = [float(sigma_small)]
-	small_count, small_acc, best_step = 0, 0, 0
+	small_count, small_acc, best_step = 0, 0, -1                  # -1 until a step improves on the start
+	n_evals = 1                                                   # The start has been evaluated once
 	for s in range(int(n_steps)):
 		delta = float(noise_arr[s] * (sigma_large if large_arr[s]
 			else sigma_small))
@@ -2860,12 +2872,14 @@ def Anneal(pose, ff=None, n_steps=10000, T_start=2000.0, T_end=10.0,
 		coords_old = pose.data['Coordinates'].copy()
 		psi0 = pose.GetDihedral(res, 'PSI') if shear_arr[s] else NAN
 		phi1 = (pose.GetDihedral(res + 1, 'PHI') if shear_arr[s]
-			and (res + 1) in pose.data['Amino Acids'] else NAN)
+			and (res + 1) in pose.data['Amino Acids']
+			and (res + 1) not in fused else NAN)
 		shear = not (math.isnan(psi0) or math.isnan(phi1))
 		if shear:
 			pose.RotateDihedral(res, psi0 + delta, 'PSI')
 			pose.RotateDihedral(res + 1, phi1 - delta, 'PHI')
-		th = NAN if shear else pose.GetDihedral(res, kind)
+		th = (NAN if shear or (kind == 'PHI' and res in fused)
+			else pose.GetDihedral(res, kind))
 		if not math.isnan(th):
 			pose.RotateDihedral(res, th + delta, kind)
 		if not shear and math.isnan(th):
@@ -2873,10 +2887,13 @@ def Anneal(pose, ff=None, n_steps=10000, T_start=2000.0, T_end=10.0,
 			continue
 		move_types[s] = 1 if shear else 0
 		E_new = float(ff(pose, **kw))
+		n_evals += 1
 		dE = E_new - E_curr
 		RT = kB * float(T_arr[s])
-		boltz = math.exp(-dE / RT) if (dE > 0.0 and RT > 0.0) else 1.0
-		accept = (dE <= 0.0) or (uni_arr[s] < boltz)
+		if not math.isfinite(E_new): accept = False           # A non-finite energy is not a state
+		elif dE <= 0.0: accept = True
+		elif RT <= 0.0: accept = False                        # Nothing uphill is accepted at zero temperature
+		else: accept = bool(uni_arr[s] < math.exp(-dE / RT))
 		accepted[s] = accept
 		if not accept: pose.data['Coordinates'] = coords_old
 		if accept: E_curr = E_new
@@ -2892,6 +2909,7 @@ def Anneal(pose, ff=None, n_steps=10000, T_start=2000.0, T_end=10.0,
 		sigma_small = max(SIGMA_MIN, min(sigma_small, SIGMA_MAX))
 		sigma_history.append(float(sigma_small))
 		small_count, small_acc = 0, 0
+	coords_last = pose.data['Coordinates'].copy()                 # Where the chain finished, not where it was best
 	pose.data['Coordinates'] = coords_best
 	return float(E_best), {
 		'energies': energies,
@@ -2899,7 +2917,9 @@ def Anneal(pose, ff=None, n_steps=10000, T_start=2000.0, T_end=10.0,
 		'accepted': accepted,
 		'move_types': move_types,
 		'sigma_history': np.asarray(sigma_history, dtype=np.float64),
-		'best_step': int(best_step)}
+		'best_step': int(best_step),
+		'n_evals': int(n_evals),
+		'coordinates_last': coords_last}
 
 def SMIRKSMatch(pose, params):
 	'''
@@ -7048,104 +7068,183 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None, nrot_override=None):
 	return cache
 
 def Minimise(pose, ff=None, max_steps=500, ftol=1.0, dt_fs=0.5,
-		dt_max_fs=1.0, step_max=0.2, etol=1e-6, stall_k=10, box=None):
+		dt_max_fs=1.0, step_max=0.2, etol=1e-6, stall_k=10,
+		reject_k=20, rise_k=2.0, sd_steps=500, sd_max=1e3, box=None):
 	'''
-	Relax pose coordinates with the FIRE2 damped dynamics minimiser
-	(Guénolé et al. 2020, Comput Mater Sci 175:109584), guarded so that
-	a force field singularity can neither fling atoms apart nor corrupt the
-	returned structure
+	Relax pose coordinates by staged descent: steepest descent with an
+	adaptive step while the structure is strained, then the fast inertial
+	relaxation engine (Bitzek et al. 2006, Phys Rev Lett 97:170201) with the
+	uphill backtracking of its second formulation (Guenole et al. 2020,
+	Comput Mater Sci 175:109584). Guarded so that a force field singularity
+	can neither fling atoms apart nor corrupt the returned structure. Atoms
+	are moved with unit mass, so the step follows the force rather than the
+	acceleration and light atoms do not monopolise it
 	Arguments:
 	----------
 		pose:      Protein, DNA, RNA, or Molecule pose to relax in place
 		ff:        ForceField to evaluate, created when None
-		max_steps: Maximum number of FIRE2 iterations
+		max_steps: Maximum number of damped dynamics iterations
 		ftol:      Convergence threshold on max|force| in kJ/mol/A
-		dt_fs:     Initial integrator step in femtoseconds
-		dt_max_fs: Upper bound on the adaptive step in femtoseconds
-		step_max:  Trust-region cap on per-atom displacement in angstroms
+		dt_fs:     Initial integrator step, in femtoseconds for a unit mass
+		dt_max_fs: Upper bound on the adaptive step, same units
+		step_max:  Trust region in angstroms on the largest per-atom
+		           displacement of a step, applied to the whole step so
+		           that its direction is preserved
 		etol:      Energy-stall tolerance in kJ/mol
 		stall_k:   Consecutive stalled steps that stop the run early
+		reject_k:  Consecutive rejected steps that stop the run early
+		rise_k:    Divergence guard. A step is rejected when it raises the
+		           energy by more than this multiple of the change its own
+		           linear model predicts, which is a local test rather than
+		           one scaled by the arbitrary offset of the total energy.
+		           It bounds a bad step, it is not a descent condition,
+		           because damped dynamics must be free to travel uphill
+		sd_steps:  Maximum steepest descent steps taken before the damped
+		           dynamics begin, the staged descent that AMBER, GROMACS
+		           and CHARMM all apply to a strained starting structure
+		sd_max:    Steepest descent runs only while max|force| is above
+		           this value in kJ/mol/A, so a relaxed input skips it
 		box:       None for no PBC, (3,) orthorhombic, (3, 3) triclinic
 	Returns:
 	--------
-		float: Energy in kJ/mol of the lowest-force frame, which is the
-		frame left in the pose
-		dict: Log holding 'energies', 'fmax', 'max_step', 'converged'
-		and 'n_steps'
+		float: Energy in kJ/mol of the lowest energy frame visited, which
+		is the frame left in the pose
+		dict: Log holding 'energies', 'fmax', 'frms' aligned with one
+		another, 'max_step' over attempted moves, 'converged', 'reason' in
+		('ftol', 'stall', 'reject', 'diverged', 'budget'), 'n_steps',
+		'n_sd', 'n_rejected', 'n_evals', and the returned frame's
+		'fmax_final' and 'frms_final'. Forces are in kJ/mol/A; multiply by
+		ten for kJ/mol/nm, and by the square root of three to compare a
+		root mean square against a per-atom force magnitude
 	'''
 	if ff is None: ff = ForceField()
 	N_MIN, F_INC, F_DEC = 5, 1.1, 0.5
-	A_START, F_ALPHA, AKMA_FS = 0.1, 0.99, 23.91888086
-	atoms = pose.data['Atoms']
-	m = np.array([pose.masses[atoms[i][1]] for i in sorted(atoms)],
-		dtype=np.float64)[:, None]
-	v = np.zeros_like(pose.data['Coordinates'], dtype=np.float64)
-	dt = float(dt_fs) / AKMA_FS
-	dt_max = float(dt_max_fs) / AKMA_FS
+	A_START, F_ALPHA = 0.1, 0.99
+	TAU_FS = 100.0                                  # sqrt(amu A^2 / (kJ/mol)) is exactly 1e-13 s
+	pose.data['Coordinates'] = np.asarray(
+		pose.data['Coordinates'], dtype=np.float64)
+	n = len(pose.data['Coordinates'])
+	if sorted(pose.data['Atoms']) != list(range(n)):
+		raise ValueError('Minimise needs contiguous atom indices that '
+			'match the coordinate rows')
+	v = np.zeros((n, 3), dtype=np.float64)
+	dt = float(dt_fs) / TAU_FS
+	dt_max = float(dt_max_fs) / TAU_FS
 	dt_min = dt * 1e-3
 	alpha, n_pos = float(A_START), 0
-	energies, fmaxes, max_steps_log = [], [], []
+	energies, fmaxes, frmses, max_steps_log = [], [], [], []
+	FMAX = lambda A: float(np.max(np.abs(A)))
+	FRMS = lambda A: float(np.sqrt(np.mean(A ** 2)))
+	FAR = lambda A: float(np.max(np.linalg.norm(A, axis=1)))
 	E, F = ff(pose, grad=True, box=box)
-	E = float(E)
-	best_fmax = float(np.max(np.abs(F)))
+	E, n_evals = float(E), 1
+	best_E = E
 	best_coords = pose.data['Coordinates'].copy()
-	converged, steps_done, stall = False, 0, 0
-	for step in range(int(max_steps)):
-		fmax = float(np.max(np.abs(F)))
-		energies.append(E); fmaxes.append(fmax)
-		steps_done = step + 1
-		if np.isfinite(fmax) and fmax < best_fmax:
-			best_fmax = fmax
+	converged, steps_done, stall, rejects, n_rej = False, 0, 0, 0, 0
+	reason, n_sd = 'budget', 0
+	h = float(step_max)                             # Steepest descent trial step
+	try:
+		for _ in range(int(sd_steps)):              # Robust phase first
+			fm = FMAX(F)
+			if (not np.isfinite(fm)) or fm < ftol or fm <= sd_max: break
+			x_old = pose.data['Coordinates']
+			pose.data['Coordinates'] = x_old + (h / max(FAR(F), 1e-12)) * F
+			try:
+				E_new, F_new = ff(pose, grad=True, box=box)
+				E_new, n_evals = float(E_new), n_evals + 1
+			except (FloatingPointError, ValueError, KeyError):
+				E_new, F_new, n_evals = float('nan'), None, n_evals + 1
+			if (F_new is not None and np.isfinite(E_new)
+					and np.isfinite(F_new).all() and E_new < E):
+				E, F, n_sd = E_new, F_new, n_sd + 1
+				h = min(h * 1.2, step_max)          # Grow while it keeps working
+				energies.append(E); fmaxes.append(FMAX(F)); frmses.append(FRMS(F))
+				if E < best_E:
+					best_E = E
+					best_coords = pose.data['Coordinates'].copy()
+			else:
+				pose.data['Coordinates'] = x_old    # Reject and shorten
+				h *= 0.2
+				n_rej += 1
+				if h < 1e-10: break
+		for step in range(int(max_steps)):
+			fmax = FMAX(F)
+			energies.append(E); fmaxes.append(fmax); frmses.append(FRMS(F))
+			if np.isfinite(E) and E < best_E:
+				best_E = E
+				best_coords = pose.data['Coordinates'].copy()
+			if not np.isfinite(fmax): reason = 'diverged'; break
+			if fmax < ftol: converged, reason = True, 'ftol'; break
+			if stall >= stall_k: reason = 'stall'; break
+			if rejects >= reject_k: reason = 'reject'; break
+			steps_done = step + 1
+			P = float(np.sum(F * v))
+			if P <= 0.0:
+				if step > 0:                        # Guenole backtrack, undo the uphill half step
+					pose.data['Coordinates'] = (
+						pose.data['Coordinates'] - 0.5 * dt * v)
+					dt = max(dt * F_DEC, dt_min)
+					alpha, n_pos = A_START, 0
+					E, F = ff(pose, grad=True, box=box)
+					E, n_evals = float(E), n_evals + 1
+				v = np.zeros_like(v)
+			else:
+				fn = float(np.linalg.norm(F))
+				mix = (alpha * float(np.linalg.norm(v)) / fn
+					if fn > 1e-12 else 0.0)
+				v = (1.0 - alpha) * v + mix * F
+				n_pos += 1
+				if n_pos > N_MIN:
+					dt = min(dt * F_INC, dt_max)
+					alpha *= F_ALPHA
+			v = v + dt * F                          # Unit mass, semi implicit Euler
+			dr = dt * v
+			scale = min(1.0, step_max / max(FAR(dr), 1e-12))
+			dr, v = dr * scale, v * scale           # Scale the whole step, keeping its direction
+			max_steps_log.append(FMAX(dr))
+			x_old = pose.data['Coordinates']
+			pose.data['Coordinates'] = x_old + dr
+			try:
+				E_new, F_new = ff(pose, grad=True, box=box)
+				E_new, n_evals = float(E_new), n_evals + 1
+			except (FloatingPointError, ValueError, KeyError):
+				E_new, F_new = float('nan'), np.full_like(dr, np.nan)
+				n_evals += 1
+			pred = float(np.sum(F * dr))            # Linear model of the change
+			bad = (not np.isfinite(E_new)
+				or not np.isfinite(F_new).all()
+				or E_new > E + max(etol, rise_k * abs(pred)))
+			if bad:
+				pose.data['Coordinates'] = x_old
+				v = np.zeros_like(v)
+				dt = max(dt * F_DEC, dt_min)
+				alpha, n_pos = A_START, 0
+				rejects, n_rej = rejects + 1, n_rej + 1
+				continue
+			rejects = 0
+			stall = stall + 1 if abs(E_new - E) < etol else 0
+			E, F = E_new, F_new
+		if np.isfinite(E) and E < best_E:           # The last accepted frame
+			best_E = E
 			best_coords = pose.data['Coordinates'].copy()
-		if fmax < ftol or stall >= stall_k:
-			converged = True
-			break
-		if (not np.isfinite(fmax)) or (fmax > 1e4
-				and fmax > 1e3 * best_fmax): break
-		P = float(np.sum(F * v))
-		if P <= 0.0:
-			v = np.zeros_like(v)
-			dt = max(dt * F_DEC, dt_min)
-			alpha, n_pos = A_START, 0
-		if P > 0.0:
-			fn = float(np.linalg.norm(F))
-			mix = (alpha * float(np.linalg.norm(v)) / fn
-				if fn > 1e-12 else 0.0)
-			v = (1.0 - alpha) * v + mix * F
-			n_pos += 1
-		if P > 0.0 and n_pos > N_MIN:
-			dt = min(dt * F_INC, dt_max)
-			alpha *= F_ALPHA
-		v = v + dt * F / m
-		dr = dt * v
-		nrm = np.linalg.norm(dr, axis=1, keepdims=True)
-		dr = dr * np.minimum(1.0, step_max / np.maximum(nrm, 1e-12))
-		max_steps_log.append(float(np.max(np.abs(dr))))
-		x_old = pose.data['Coordinates']
-		pose.data['Coordinates'] = x_old + dr
-		E_new, F_new = ff(pose, grad=True, box=box)
-		E_new = float(E_new)
-		fmax_new = float(np.max(np.abs(F_new)))
-		bad = (not np.isfinite(E_new)
-			or not np.isfinite(F_new).all()
-			or E_new > E + 1.0 + 0.05 * abs(E)
-			or (fmax_new > 1e3 and fmax_new > 100.0 * max(fmax, 1.0)))
-		if bad:
-			pose.data['Coordinates'] = x_old
-			v = np.zeros_like(v)
-			dt = max(dt * F_DEC, dt_min)
-			alpha, n_pos = A_START, 0
-			continue
-		stall = stall + 1 if abs(E_new - E) < etol else 0
-		E, F = E_new, F_new
-	pose.data['Coordinates'] = best_coords
+	finally:
+		pose.data['Coordinates'] = best_coords      # Never return a corrupted structure
 	E, F = ff(pose, grad=True, box=box)
-	return float(E), {
+	E, n_evals = float(E), n_evals + 1
+	energies.append(E); fmaxes.append(FMAX(F)); frmses.append(FRMS(F))
+	return E, {
 		'energies': np.asarray(energies, dtype=np.float64),
 		'fmax': np.asarray(fmaxes, dtype=np.float64),
+		'frms': np.asarray(frmses, dtype=np.float64),
 		'max_step': np.asarray(max_steps_log, dtype=np.float64),
 		'converged': bool(converged),
-		'n_steps': int(steps_done)}
+		'reason': str(reason),
+		'n_steps': int(steps_done),
+		'n_sd': int(n_sd),
+		'n_rejected': int(n_rej),
+		'n_evals': int(n_evals),
+		'fmax_final': FMAX(F),
+		'frms_final': FRMS(F)}
 
 def MolecularDynamics(pose, ff=None, n_steps=1000, dt_fs=2.0, T=300.0,
 		thermostat='nve', friction_ps=1.0, constraints='hbonds',
