@@ -867,6 +867,49 @@ class ForceField():
 		'''
 		raw = base64.b64decode(d['data'])
 		return np.frombuffer(raw, dtype=np.float32).reshape(d['shape'])
+	def _pairenergy(self, pose, cache):
+		'''
+		Calculates the Lennard-Jones and Electrostatic non-bonded potentials
+		in one pass
+		Arguments:
+		----------
+			pose:  Pose - molecule source protein, DNA, RNA, or Molecule pose
+			cache: dict - precomputed topology + parameter from _compile()
+		Returns:
+		--------
+			(float, float): Lennard-Jones and Electrostatic energies in kJ/mol
+		'''
+		X = np.asarray(pose.data['Coordinates'], dtype=np.float64)
+		key = X.tobytes()
+		if cache.get('_pk') == key: return cache['_pv']
+		C = self.Parameters['Constants']
+		if '_pa' not in cache:
+			n = cache['n']
+			cache['_pe'] = 4.0 * cache['lj_eps_ij'] * (
+				cache['mask_far'] + C['f_lj'] * cache['mask_14'])
+			cache['_pq'] = ((cache['mask_far'] + C['f_elec'] * cache['mask_14'])
+				* (1389.3545756874 / C['epsilon_r']) * cache['qq'])
+			cache['_ps'] = cache['lj_sigma'] ** 2
+			cache['_pa'] = np.empty((n, n))
+			cache['_pb'] = np.empty((n, n))
+			cache['_pd'] = np.empty((n, n))
+		a, b, d = cache['_pa'], cache['_pb'], cache['_pd']
+		sq = np.einsum('ij,ij->i', X, X)
+		np.dot(X, X.T, out=a)
+		np.multiply(a, -2.0, out=a)
+		np.add(a, sq[:, None], out=a)
+		np.add(a, sq[None, :], out=a)
+		np.maximum(a, self._EPS ** 2, out=a)
+		np.divide(cache['_ps'], a, out=b)
+		np.multiply(b, b, out=d)
+		np.multiply(d, b, out=d)
+		np.multiply(d, d, out=b)
+		np.subtract(b, d, out=b)
+		e_lj = float(np.einsum('ij,ij->', b, cache['_pe']))
+		np.sqrt(a, out=a)
+		np.divide(cache['_pq'], a, out=b)
+		cache['_pk'], cache['_pv'] = key, (e_lj, float(b.sum()))
+		return cache['_pv']
 	def BondPotential(self, pose, cache, alg='harmonic', grad=True, box=None):
 		'''
 		Calculates the Bond stretching potential for all bonded atom pairs
@@ -973,6 +1016,8 @@ class ForceField():
 			float: potential energy in kJ/mol  (when grad=False)
 			(float, ndarray): energy and (N, 3) forces  (when grad=True)
 		'''
+		if not grad and box is None and alg == '12-6':
+			return self._pairenergy(pose, cache)[0]
 		n = cache['n']
 		coords = np.asarray(pose.data['Coordinates'], dtype=np.float64)
 		sigma    = cache['lj_sigma']
@@ -1021,6 +1066,8 @@ class ForceField():
 			float: potential energy in kJ/mol  (when grad=False)
 			(float, ndarray): energy and (N, 3) forces  (when grad=True)
 		'''
+		if not grad and box is None and alg == 'constant':
+			return self._pairenergy(pose, cache)[1]
 		n        = cache['n']
 		qq       = cache['qq']
 		mask_far = cache['mask_far']
