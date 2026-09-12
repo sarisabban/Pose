@@ -910,6 +910,68 @@ class ForceField():
 		np.divide(cache['_pq'], a, out=b)
 		cache['_pk'], cache['_pv'] = key, (e_lj, float(b.sum()))
 		return cache['_pv']
+	def _pairgrad(self, pose, cache, box):
+		'''
+		Calculates the Lennard-Jones and Electrostatic non-bonded potentials and
+		their forces in one pass. The force on atom i is the sum over j of
+		c_ij (x_i - x_j), which is x_i times the row sum of c minus the matrix
+		product c X, so the (N, N, 3) displacement array that the two separate
+		routines build three times over between them is never formed
+		Arguments:
+		----------
+			pose:  Pose - molecule source protein, DNA, RNA, or Molecule pose
+			cache: dict - precomputed topology + parameter from _compile()
+			box:   None for no PBC, the caller checks this before delegating
+		Returns:
+		--------
+			(float, ndarray, float, ndarray): Lennard-Jones energy and forces
+			then Electrostatic energy and forces, energies in kJ/mol and forces
+			in kJ/mol/A
+		'''
+		X = np.asarray(pose.data['Coordinates'], dtype=np.float64)
+		key = X.tobytes()
+		if cache.get('_gk') == key: return cache['_gv']
+		C = self.Parameters['Constants']
+		if '_ga' not in cache:
+			n = cache['n']
+			K = 1389.3545756874 / C['epsilon_r']
+			cache['_ge'] = 4.0 * cache['lj_eps_ij'] * (
+				cache['mask_far'] + C['f_lj'] * cache['mask_14'])
+			cache['_gq'] = K * cache['qq'] * (
+				cache['mask_far'] + C['f_elec'] * cache['mask_14'])
+			cache['_gs'] = cache['lj_sigma'] ** 2
+			cache['_gl'] = 24.0 * cache['lj_eps_ij'] * cache['weight_lj']
+			cache['_gc'] = K * cache['qq'] * cache['weight_elec']
+			cache['_ga'] = np.empty((n, n))
+			cache['_gb'] = np.empty((n, n))
+			cache['_gd'] = np.empty((n, n))
+		a, b, d = cache['_ga'], cache['_gb'], cache['_gd']
+		sq = np.einsum('ij,ij->i', X, X)
+		np.dot(X, X.T, out=a)
+		np.multiply(a, -2.0, out=a)
+		np.add(a, sq[:, None], out=a)
+		np.add(a, sq[None, :], out=a)
+		np.fill_diagonal(a, 1.0)
+		np.maximum(a, self._EPS ** 2, out=a)
+		np.divide(cache['_gs'], a, out=b)
+		np.multiply(b, b, out=d)
+		np.multiply(d, b, out=b)
+		np.multiply(b, b, out=d
+		e_lj = float(np.einsum('ij,ij->', cache['_ge'], d)
+			- np.einsum('ij,ij->', cache['_ge'], b))
+		np.multiply(d, 2.0, out=d)
+		np.subtract(d, b, out=d)
+		np.divide(d, a, out=d)
+		np.multiply(d, cache['_gl'], out=d)
+		F_lj = X * d.sum(1)[:, None] - d.dot(X)
+		np.sqrt(a, out=b)
+		np.divide(1.0, b, out=b)
+		e_el = float(np.einsum('ij,ij->', cache['_gq'], b))
+		np.multiply(b, cache['_gc'], out=b)
+		np.divide(b, a, out=b)
+		F_el = X * b.sum(1)[:, None] - b.dot(X)
+		cache['_gk'], cache['_gv'] = key, (e_lj, F_lj, e_el, F_el)
+		return cache['_gv']
 	def BondPotential(self, pose, cache, alg='harmonic', grad=True, box=None):
 		'''
 		Calculates the Bond stretching potential for all bonded atom pairs
@@ -1018,6 +1080,9 @@ class ForceField():
 		'''
 		if not grad and box is None and alg == '12-6':
 			return self._pairenergy(pose, cache)[0]
+		if grad and box is None and alg == '12-6':
+			e, f, _, _ = self._pairgrad(pose, cache, box)
+			return e, f
 		n = cache['n']
 		coords = np.asarray(pose.data['Coordinates'], dtype=np.float64)
 		sigma    = cache['lj_sigma']
@@ -1068,6 +1133,9 @@ class ForceField():
 		'''
 		if not grad and box is None and alg == 'constant':
 			return self._pairenergy(pose, cache)[1]
+		if grad and box is None and alg == 'constant':
+			_, _, e, f = self._pairgrad(pose, cache, box)
+			return e, f
 		n        = cache['n']
 		qq       = cache['qq']
 		mask_far = cache['mask_far']
