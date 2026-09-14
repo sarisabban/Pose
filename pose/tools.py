@@ -7074,7 +7074,7 @@ def Minimise(pose, ff=None, max_steps=500, ftol=1.0, dt_fs=0.5,
 	Relax pose coordinates by staged descent: steepest descent with an
 	adaptive step while the structure is strained, then the fast inertial
 	relaxation engine (Bitzek et al. 2006, Phys Rev Lett 97:170201) with the
-	uphill backtracking of its second formulation (Guenole et al. 2020,
+	uphill backtracking introduced by Guenole et al. (2020,
 	Comput Mater Sci 175:109584). Guarded so that a force field singularity
 	can neither fling atoms apart nor corrupt the returned structure. Atoms
 	are moved with unit mass, so the step follows the force rather than the
@@ -7180,7 +7180,8 @@ def Minimise(pose, ff=None, max_steps=500, ftol=1.0, dt_fs=0.5,
 			steps_done = step + 1
 			P = float(np.sum(F * v))
 			if P <= 0.0:
-				if step > 0:                        # Guenole backtrack, undo the uphill half step
+				if step > 0 and v.any():    # Guenole backtrack, undo the uphill half step
+				                            # A zeroed v means the previous step was rejected
 					pose.data['Coordinates'] = (
 						pose.data['Coordinates'] - 0.5 * dt * v)
 					dt = max(dt * F_DEC, dt_min)
@@ -7237,7 +7238,7 @@ def Minimise(pose, ff=None, max_steps=500, ftol=1.0, dt_fs=0.5,
 		'fmax': np.asarray(fmaxes, dtype=np.float64),
 		'frms': np.asarray(frmses, dtype=np.float64),
 		'max_step': np.asarray(max_steps_log, dtype=np.float64),
-		'converged': bool(converged),
+		'converged': bool(converged and FMAX(F) < ftol),
 		'reason': str(reason),
 		'n_steps': int(steps_done),
 		'n_sd': int(n_sd),
