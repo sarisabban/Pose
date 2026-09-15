@@ -13,6 +13,7 @@ import shutil
 import base64
 import pickle
 import zipfile
+import itertools
 import numpy as np
 import urllib.request
 import xml.etree.ElementTree as ET
@@ -2842,7 +2843,7 @@ def Anneal(pose, ff=None, n_steps=10000, T_start=2000.0, T_end=10.0,
 	rng = np.random.default_rng(seed)
 	res_ids = np.array(sorted(pose.data['Amino Acids']), dtype=np.int64)
 	fused = {int(r) for r, info in pose.data['Amino Acids'].items()
-		if pose.aminoacids[info[0].upper()].get('Fused')}         # Rotating a ring fused phi tears the ring open
+		if pose.aminoacids[info[0].upper()].get('Fused')}
 	T_arr = T_start * (T_end / T_start) ** (
 		np.arange(n_steps) / max(n_steps - 1, 1))
 	res_arr = res_ids[rng.integers(0, len(res_ids), size=n_steps)]
@@ -2863,8 +2864,8 @@ def Anneal(pose, ff=None, n_steps=10000, T_start=2000.0, T_end=10.0,
 	accepted = np.zeros(n_steps, dtype=bool)
 	move_types = np.full(n_steps, 2, dtype=np.int8)
 	sigma_history = [float(sigma_small)]
-	small_count, small_acc, best_step = 0, 0, -1                  # -1 until a step improves on the start
-	n_evals = 1                                                   # The start has been evaluated once
+	small_count, small_acc, best_step = 0, 0, -1
+	n_evals = 1
 	for s in range(int(n_steps)):
 		delta = float(noise_arr[s] * (sigma_large if large_arr[s]
 			else sigma_small))
@@ -2890,9 +2891,9 @@ def Anneal(pose, ff=None, n_steps=10000, T_start=2000.0, T_end=10.0,
 		n_evals += 1
 		dE = E_new - E_curr
 		RT = kB * float(T_arr[s])
-		if not math.isfinite(E_new): accept = False           # A non-finite energy is not a state
+		if not math.isfinite(E_new): accept = False
 		elif dE <= 0.0: accept = True
-		elif RT <= 0.0: accept = False                        # Nothing uphill is accepted at zero temperature
+		elif RT <= 0.0: accept = False
 		else: accept = bool(uni_arr[s] < math.exp(-dE / RT))
 		accepted[s] = accept
 		if not accept: pose.data['Coordinates'] = coords_old
@@ -2909,7 +2910,7 @@ def Anneal(pose, ff=None, n_steps=10000, T_start=2000.0, T_end=10.0,
 		sigma_small = max(SIGMA_MIN, min(sigma_small, SIGMA_MAX))
 		sigma_history.append(float(sigma_small))
 		small_count, small_acc = 0, 0
-	coords_last = pose.data['Coordinates'].copy()                 # Where the chain finished, not where it was best
+	coords_last = pose.data['Coordinates'].copy()
 	pose.data['Coordinates'] = coords_best
 	return float(E_best), {
 		'energies': energies,
@@ -2920,6 +2921,87 @@ def Anneal(pose, ff=None, n_steps=10000, T_start=2000.0, T_end=10.0,
 		'best_step': int(best_step),
 		'n_evals': int(n_evals),
 		'coordinates_last': coords_last}
+
+def _amberimproperorder(pose, ctx, tp, cls, nbr, impbest):
+	'''
+	Order the peripheral atoms of every AMBER improper the way OpenMM does.
+	OpenMM stores an improper as the centre followed by its three neighbours
+	sorted by topology index, permutes those three to match the definition's
+	classes, then applies a chain of swaps keyed on residue index and template
+	atom index. It then caches the resulting POSITIONAL order under the type
+	signature and reuses it for every later improper with the same signature,
+	without re-running the swaps, so the cache is part of the behaviour and not
+	an optimisation. Pose picks the same centre, the same three peripherals and
+	the same force constant already; only their order differed, and the two
+	orders agree exactly at a planar centre and diverge as it pyramidalises
+	Only protein poses are reordered. The emulation needs each atom's residue
+	index and its index within the force field's residue template, and both are
+	taken from the protein tables; on a nucleic pose they would fall back to
+	defaults that do not reproduce OpenMM's tie-breaks, so such poses are left
+	exactly as the matcher produced them
+	Arguments:
+	----------
+		pose:    Pose - the molecule being typed
+		ctx:     dict - molecule tables, read for the residue templates
+		tp:      dict - typing tables, read for template name and residue key
+		cls:     dict - atom index to force field class
+		nbr:     dict - adjacency
+		impbest: dict - centre to (score, entries, trip, ospec, specs)
+	Returns:
+	--------
+		dict: the same mapping with every entry reordered and trimmed back to
+		(score, entries)
+	'''
+	tpls = ctx.get('templates') or {}
+	pos = {k: {a[0]: n for n, a in enumerate(t['atoms'])}
+		for k, t in tpls.items()}
+	src = pose.data.get('Amino Acids')
+	if not src:                                        # Verified on protein only
+		return {c: (v[0], v[1]) for c, v in impbest.items()}
+	resof, trank, k = {}, {}, 0
+	for r, v in src.items():                           # The order Pose exports
+		for a in list(v[2]) + list(v[3]):          # Heavy then hydrogen
+			resof[a] = r; trank[a] = k; k += 1
+	big = 1 << 30
+	def rank(a):                                       # OpenMM's topology index
+		return trank.get(a, big + a)
+	def swaprank(a):                                   # OpenMM's tie break
+		return (resof.get(a, big),
+			pos.get(tp['reskey'].get(a), {}).get(tp['tname'].get(a), big))
+	elem, cache, out = tp['elem'], {}, {}
+	for c in sorted(impbest, key=rank):                # OpenMM's visit order
+		item = impbest[c]
+		if len(item) < 5: out[c] = item; continue
+		score, ent, trip, ospec, specs = item
+		stored = tuple(sorted(trip, key=rank))
+		sig = tuple([cls.get(c)] + [cls.get(x) for x in stored])
+		if sig in cache:
+			i2, i3, i4 = cache[sig]
+			a2, a3, a4 = stored[i2], stored[i3], stored[i4]
+		else:
+			sel = None
+			for pm in itertools.permutations(
+					[(cls.get(stored[q]), q) for q in range(3)]):
+				if all(ospec[q] in ('*', pm[q][0]) for q in range(3)):
+					sel = pm; break
+			if sel is None: out[c] = (score, ent); continue
+			a2, a3, a4 = (stored[sel[0][1]], stored[sel[1][1]],
+				stored[sel[2][1]])
+			t2, t3, t4 = sel[0][0], sel[1][0], sel[2][0]
+			if not any(x == '*' for x in specs):
+				if t2 == t4 and swaprank(a2) > swaprank(a4): a2, a4 = a4, a2
+				if t3 == t4 and swaprank(a3) > swaprank(a4): a3, a4 = a4, a3
+				if t2 == t3 and swaprank(a2) > swaprank(a3): a2, a3 = a3, a2
+			else:
+				if (elem.get(a2) == elem.get(a4)
+					and swaprank(a2) > swaprank(a4)): a2, a4 = a4, a2
+				if (elem.get(a3) == elem.get(a4)
+					and swaprank(a3) > swaprank(a4)): a3, a4 = a4, a3
+				if swaprank(a2) > swaprank(a3): a2, a3 = a3, a2
+			cache[sig] = (stored.index(a2), stored.index(a3),
+				stored.index(a4))
+		out[c] = (score, [(a2, a3, c, a4) + tuple(e[4:]) for e in ent])
+	return out
 
 def SMIRKSMatch(pose, params):
 	'''
@@ -4023,7 +4105,9 @@ def SMIRKSMatch(pose, params):
 				else:
 					ent.append((c, trip[0], trip[1], trip[2], cc['n'],
 						cc['phi_0'], cc['K_phi']))
-			impbest[c] = (score, ent)
+			impbest[c] = (score, ent, trip, ospec, tg[1])
+	if style == 'amber':
+		impbest = _amberimproperorder(pose, ctx, tp, cls, nbr, impbest)
 	for c in impbest:
 		out['impropers'].extend(impbest[c][1])
 	for sm, par in params.get('vdW', {}).items():
@@ -7120,7 +7204,7 @@ def Minimise(pose, ff=None, max_steps=500, ftol=1.0, dt_fs=0.5,
 	if ff is None: ff = ForceField()
 	N_MIN, F_INC, F_DEC = 5, 1.1, 0.5
 	A_START, F_ALPHA = 0.1, 0.99
-	TAU_FS = 100.0                                  # sqrt(amu A^2 / (kJ/mol)) is exactly 1e-13 s
+	TAU_FS = 100.0
 	pose.data['Coordinates'] = np.asarray(
 		pose.data['Coordinates'], dtype=np.float64)
 	n = len(pose.data['Coordinates'])
@@ -7142,9 +7226,9 @@ def Minimise(pose, ff=None, max_steps=500, ftol=1.0, dt_fs=0.5,
 	best_coords = pose.data['Coordinates'].copy()
 	converged, steps_done, stall, rejects, n_rej = False, 0, 0, 0, 0
 	reason, n_sd = 'budget', 0
-	h = float(step_max)                             # Steepest descent trial step
+	h = float(step_max)
 	try:
-		for _ in range(int(sd_steps)):              # Robust phase first
+		for _ in range(int(sd_steps)):
 			fm = FMAX(F)
 			if (not np.isfinite(fm)) or fm < ftol or fm <= sd_max: break
 			x_old = pose.data['Coordinates']
@@ -7157,13 +7241,13 @@ def Minimise(pose, ff=None, max_steps=500, ftol=1.0, dt_fs=0.5,
 			if (F_new is not None and np.isfinite(E_new)
 					and np.isfinite(F_new).all() and E_new < E):
 				E, F, n_sd = E_new, F_new, n_sd + 1
-				h = min(h * 1.2, step_max)          # Grow while it keeps working
+				h = min(h * 1.2, step_max)
 				energies.append(E); fmaxes.append(FMAX(F)); frmses.append(FRMS(F))
 				if E < best_E:
 					best_E = E
 					best_coords = pose.data['Coordinates'].copy()
 			else:
-				pose.data['Coordinates'] = x_old    # Reject and shorten
+				pose.data['Coordinates'] = x_old
 				h *= 0.2
 				n_rej += 1
 				if h < 1e-10: break
@@ -7180,8 +7264,7 @@ def Minimise(pose, ff=None, max_steps=500, ftol=1.0, dt_fs=0.5,
 			steps_done = step + 1
 			P = float(np.sum(F * v))
 			if P <= 0.0:
-				if step > 0 and v.any():    # Guenole backtrack, undo the uphill half step
-				                            # A zeroed v means the previous step was rejected
+				if step > 0 and v.any():
 					pose.data['Coordinates'] = (
 						pose.data['Coordinates'] - 0.5 * dt * v)
 					dt = max(dt * F_DEC, dt_min)
@@ -7198,10 +7281,10 @@ def Minimise(pose, ff=None, max_steps=500, ftol=1.0, dt_fs=0.5,
 				if n_pos > N_MIN:
 					dt = min(dt * F_INC, dt_max)
 					alpha *= F_ALPHA
-			v = v + dt * F                          # Unit mass, semi implicit Euler
+			v = v + dt * F
 			dr = dt * v
 			scale = min(1.0, step_max / max(FAR(dr), 1e-12))
-			dr, v = dr * scale, v * scale           # Scale the whole step, keeping its direction
+			dr, v = dr * scale, v * scale
 			max_steps_log.append(FMAX(dr))
 			x_old = pose.data['Coordinates']
 			pose.data['Coordinates'] = x_old + dr
@@ -7211,7 +7294,7 @@ def Minimise(pose, ff=None, max_steps=500, ftol=1.0, dt_fs=0.5,
 			except (FloatingPointError, ValueError, KeyError):
 				E_new, F_new = float('nan'), np.full_like(dr, np.nan)
 				n_evals += 1
-			pred = float(np.sum(F * dr))            # Linear model of the change
+			pred = float(np.sum(F * dr))
 			bad = (not np.isfinite(E_new)
 				or not np.isfinite(F_new).all()
 				or E_new > E + max(etol, rise_k * abs(pred)))
@@ -7225,11 +7308,11 @@ def Minimise(pose, ff=None, max_steps=500, ftol=1.0, dt_fs=0.5,
 			rejects = 0
 			stall = stall + 1 if abs(E_new - E) < etol else 0
 			E, F = E_new, F_new
-		if np.isfinite(E) and E < best_E:           # The last accepted frame
+		if np.isfinite(E) and E < best_E:
 			best_E = E
 			best_coords = pose.data['Coordinates'].copy()
 	finally:
-		pose.data['Coordinates'] = best_coords      # Never return a corrupted structure
+		pose.data['Coordinates'] = best_coords
 	E, F = ff(pose, grad=True, box=box)
 	E, n_evals = float(E), n_evals + 1
 	energies.append(E); fmaxes.append(FMAX(F)); frmses.append(FRMS(F))
@@ -9764,3 +9847,4 @@ def Port(name='openff', accept_rosetta_license=False):
 	except Exception: pass
 	print('[+] Done')
 	return True
+
