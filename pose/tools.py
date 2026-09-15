@@ -2924,21 +2924,7 @@ def Anneal(pose, ff=None, n_steps=10000, T_start=2000.0, T_end=10.0,
 
 def _amberimproperorder(pose, ctx, tp, cls, nbr, impbest):
 	'''
-	Order the peripheral atoms of every AMBER improper the way OpenMM does.
-	OpenMM stores an improper as the centre followed by its three neighbours
-	sorted by topology index, permutes those three to match the definition's
-	classes, then applies a chain of swaps keyed on residue index and template
-	atom index. It then caches the resulting POSITIONAL order under the type
-	signature and reuses it for every later improper with the same signature,
-	without re-running the swaps, so the cache is part of the behaviour and not
-	an optimisation. Pose picks the same centre, the same three peripherals and
-	the same force constant already; only their order differed, and the two
-	orders agree exactly at a planar centre and diverge as it pyramidalises
-	Only protein poses are reordered. The emulation needs each atom's residue
-	index and its index within the force field's residue template, and both are
-	taken from the protein tables; on a nucleic pose they would fall back to
-	defaults that do not reproduce OpenMM's tie-breaks, so such poses are left
-	exactly as the matcher produced them
+	Order the peripheral atoms of every AMBER improper the way OpenMM does
 	Arguments:
 	----------
 		pose:    Pose - the molecule being typed
@@ -2956,20 +2942,20 @@ def _amberimproperorder(pose, ctx, tp, cls, nbr, impbest):
 	pos = {k: {a[0]: n for n, a in enumerate(t['atoms'])}
 		for k, t in tpls.items()}
 	src = pose.data.get('Amino Acids')
-	if not src:                                        # Verified on protein only
+	if not src:
 		return {c: (v[0], v[1]) for c, v in impbest.items()}
 	resof, trank, k = {}, {}, 0
-	for r, v in src.items():                           # The order Pose exports
-		for a in list(v[2]) + list(v[3]):          # Heavy then hydrogen
+	for r, v in src.items():
+		for a in list(v[2]) + list(v[3]):
 			resof[a] = r; trank[a] = k; k += 1
 	big = 1 << 30
-	def rank(a):                                       # OpenMM's topology index
+	def rank(a):
 		return trank.get(a, big + a)
-	def swaprank(a):                                   # OpenMM's tie break
+	def swaprank(a):
 		return (resof.get(a, big),
 			pos.get(tp['reskey'].get(a), {}).get(tp['tname'].get(a), big))
 	elem, cache, out = tp['elem'], {}, {}
-	for c in sorted(impbest, key=rank):                # OpenMM's visit order
+	for c in sorted(impbest, key=rank):
 		item = impbest[c]
 		if len(item) < 5: out[c] = item; continue
 		score, ent, trip, ospec, specs = item
@@ -7151,24 +7137,21 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None, nrot_override=None):
 	cache['fullatomhbond'] = fullatomhbond_memo
 	return cache
 
-def Minimise(pose, ff=None, max_steps=500, ftol=1.0, dt_fs=0.5,
+def Minimise(pose, ff=None, max_steps=500, ftol=1.0, alg='lbfgs', dt_fs=0.5,
 		dt_max_fs=1.0, step_max=0.2, etol=1e-6, stall_k=10,
-		reject_k=20, rise_k=2.0, sd_steps=500, sd_max=1e3, box=None):
+		reject_k=20, rise_k=2.0, sd_steps=500, sd_max=1e3, mem=10,
+		c1=1e-4, box=None):
 	'''
-	Relax pose coordinates by staged descent: steepest descent with an
-	adaptive step while the structure is strained, then the fast inertial
-	relaxation engine (Bitzek et al. 2006, Phys Rev Lett 97:170201) with the
-	uphill backtracking introduced by Guenole et al. (2020,
-	Comput Mater Sci 175:109584). Guarded so that a force field singularity
-	can neither fling atoms apart nor corrupt the returned structure. Atoms
-	are moved with unit mass, so the step follows the force rather than the
-	acceleration and light atoms do not monopolise it
+	Relax pose coordinates by staged descent
 	Arguments:
 	----------
 		pose:      Protein, DNA, RNA, or Molecule pose to relax in place
 		ff:        ForceField to evaluate, created when None
 		max_steps: Maximum number of damped dynamics iterations
 		ftol:      Convergence threshold on max|force| in kJ/mol/A
+		alg:       'fire' for damped dynamics, 'lbfgs' for limited memory
+		           BFGS. The remaining dt arguments apply to 'fire' only,
+		           and mem and c1 to 'lbfgs' only
 		dt_fs:     Initial integrator step, in femtoseconds for a unit mass
 		dt_max_fs: Upper bound on the adaptive step, same units
 		step_max:  Trust region in angstroms on the largest per-atom
@@ -7188,20 +7171,30 @@ def Minimise(pose, ff=None, max_steps=500, ftol=1.0, dt_fs=0.5,
 		           and CHARMM all apply to a strained starting structure
 		sd_max:    Steepest descent runs only while max|force| is above
 		           this value in kJ/mol/A, so a relaxed input skips it
+		mem:       Curvature pairs retained by 'lbfgs'. Cost is mem times
+		           3N floats and mem inner products per step
+		c1:        Armijo sufficient decrease constant for the 'lbfgs' line
+		           search. A step is taken only when it lowers the energy by
+		           at least this fraction of what its own slope predicts
 		box:       None for no PBC, (3,) orthorhombic, (3, 3) triclinic
 	Returns:
 	--------
 		float: Energy in kJ/mol of the lowest energy frame visited, which
 		is the frame left in the pose
 		dict: Log holding 'energies', 'fmax', 'frms' aligned with one
-		another, 'max_step' over attempted moves, 'converged', 'reason' in
-		('ftol', 'stall', 'reject', 'diverged', 'budget'), 'n_steps',
+		another, 'max_step', the largest per-atom
+		displacement of each attempted move, which is the quantity step_max
+		bounds, 'converged', 'reason' in
+		('ftol', 'stall', 'reject', 'diverged', 'budget'), 'alg', 'n_steps',
 		'n_sd', 'n_rejected', 'n_evals', and the returned frame's
 		'fmax_final' and 'frms_final'. Forces are in kJ/mol/A; multiply by
 		ten for kJ/mol/nm, and by the square root of three to compare a
 		root mean square against a per-atom force magnitude
 	'''
 	if ff is None: ff = ForceField()
+	if alg not in ('fire', 'lbfgs'):
+		raise ValueError("Minimise: unknown alg=%r "
+			"(allowed: 'fire', 'lbfgs')" % (alg,))
 	N_MIN, F_INC, F_DEC = 5, 1.1, 0.5
 	A_START, F_ALPHA = 0.1, 0.99
 	TAU_FS = 100.0
@@ -7251,63 +7244,134 @@ def Minimise(pose, ff=None, max_steps=500, ftol=1.0, dt_fs=0.5,
 				h *= 0.2
 				n_rej += 1
 				if h < 1e-10: break
-		for step in range(int(max_steps)):
-			fmax = FMAX(F)
-			energies.append(E); fmaxes.append(fmax); frmses.append(FRMS(F))
-			if np.isfinite(E) and E < best_E:
-				best_E = E
-				best_coords = pose.data['Coordinates'].copy()
-			if not np.isfinite(fmax): reason = 'diverged'; break
-			if fmax < ftol: converged, reason = True, 'ftol'; break
-			if stall >= stall_k: reason = 'stall'; break
-			if rejects >= reject_k: reason = 'reject'; break
-			steps_done = step + 1
-			P = float(np.sum(F * v))
-			if P <= 0.0:
-				if step > 0 and v.any():
-					pose.data['Coordinates'] = (
-						pose.data['Coordinates'] - 0.5 * dt * v)
+		if alg == 'fire':
+			for step in range(int(max_steps)):
+				fmax = FMAX(F)
+				energies.append(E); fmaxes.append(fmax); frmses.append(FRMS(F))
+				if np.isfinite(E) and E < best_E:
+					best_E = E
+					best_coords = pose.data['Coordinates'].copy()
+				if not np.isfinite(fmax): reason = 'diverged'; break
+				if fmax < ftol: converged, reason = True, 'ftol'; break
+				if stall >= stall_k: reason = 'stall'; break
+				if rejects >= reject_k: reason = 'reject'; break
+				steps_done = step + 1
+				P = float(np.sum(F * v))
+				if P <= 0.0:
+					if step > 0 and v.any():
+						pose.data['Coordinates'] = (
+							pose.data['Coordinates'] - 0.5 * dt * v)
+						dt = max(dt * F_DEC, dt_min)
+						alpha, n_pos = A_START, 0
+						E, F = ff(pose, grad=True, box=box)
+						E, n_evals = float(E), n_evals + 1
+					v = np.zeros_like(v)
+				else:
+					fn = float(np.linalg.norm(F))
+					mix = (alpha * float(np.linalg.norm(v)) / fn
+						if fn > 1e-12 else 0.0)
+					v = (1.0 - alpha) * v + mix * F
+					n_pos += 1
+					if n_pos > N_MIN:
+						dt = min(dt * F_INC, dt_max)
+						alpha *= F_ALPHA
+				v = v + dt * F
+				dr = dt * v
+				scale = min(1.0, step_max / max(FAR(dr), 1e-12))
+				dr, v = dr * scale, v * scale
+				max_steps_log.append(FAR(dr))
+				x_old = pose.data['Coordinates']
+				pose.data['Coordinates'] = x_old + dr
+				try:
+					E_new, F_new = ff(pose, grad=True, box=box)
+					E_new, n_evals = float(E_new), n_evals + 1
+				except (FloatingPointError, ValueError, KeyError):
+					E_new, F_new = float('nan'), np.full_like(dr, np.nan)
+					n_evals += 1
+				pred = float(np.sum(F * dr))
+				bad = (not np.isfinite(E_new)
+					or not np.isfinite(F_new).all()
+					or E_new > E + max(etol, 1e-12 * abs(E), rise_k * max(pred, 0.0)))
+				if bad:
+					pose.data['Coordinates'] = x_old
+					v = np.zeros_like(v)
 					dt = max(dt * F_DEC, dt_min)
 					alpha, n_pos = A_START, 0
-					E, F = ff(pose, grad=True, box=box)
-					E, n_evals = float(E), n_evals + 1
-				v = np.zeros_like(v)
-			else:
-				fn = float(np.linalg.norm(F))
-				mix = (alpha * float(np.linalg.norm(v)) / fn
-					if fn > 1e-12 else 0.0)
-				v = (1.0 - alpha) * v + mix * F
-				n_pos += 1
-				if n_pos > N_MIN:
-					dt = min(dt * F_INC, dt_max)
-					alpha *= F_ALPHA
-			v = v + dt * F
-			dr = dt * v
-			scale = min(1.0, step_max / max(FAR(dr), 1e-12))
-			dr, v = dr * scale, v * scale
-			max_steps_log.append(FMAX(dr))
-			x_old = pose.data['Coordinates']
-			pose.data['Coordinates'] = x_old + dr
-			try:
-				E_new, F_new = ff(pose, grad=True, box=box)
-				E_new, n_evals = float(E_new), n_evals + 1
-			except (FloatingPointError, ValueError, KeyError):
-				E_new, F_new = float('nan'), np.full_like(dr, np.nan)
-				n_evals += 1
-			pred = float(np.sum(F * dr))
-			bad = (not np.isfinite(E_new)
-				or not np.isfinite(F_new).all()
-				or E_new > E + max(etol, rise_k * abs(pred)))
-			if bad:
-				pose.data['Coordinates'] = x_old
-				v = np.zeros_like(v)
-				dt = max(dt * F_DEC, dt_min)
-				alpha, n_pos = A_START, 0
-				rejects, n_rej = rejects + 1, n_rej + 1
-				continue
-			rejects = 0
-			stall = stall + 1 if abs(E_new - E) < etol else 0
-			E, F = E_new, F_new
+					rejects, n_rej = rejects + 1, n_rej + 1
+					continue
+				rejects = 0
+				stall = stall + 1 if abs(E_new - E) < etol else 0
+				E, F = E_new, F_new
+		else:
+			S_h, Y_h, R_h = [], [], []
+			g = -F
+			for step in range(int(max_steps)):
+				fmax = FMAX(F)
+				energies.append(E); fmaxes.append(fmax); frmses.append(FRMS(F))
+				if np.isfinite(E) and E < best_E:
+					best_E = E
+					best_coords = pose.data['Coordinates'].copy()
+				if not np.isfinite(fmax): reason = 'diverged'; break
+				if fmax < ftol: converged, reason = True, 'ftol'; break
+				if stall >= stall_k: reason = 'stall'; break
+				if rejects >= reject_k: reason = 'reject'; break
+				steps_done = step + 1
+				q = g.copy()
+				a_h = []
+				for s_k, y_k, r_k in zip(reversed(S_h), reversed(Y_h),
+						reversed(R_h)):
+					a = r_k * float(np.sum(s_k * q))
+					a_h.append(a)
+					q -= a * y_k
+				if S_h:
+					yy = float(np.sum(Y_h[-1] * Y_h[-1]))
+					if yy > 1e-30:
+						q *= float(np.sum(S_h[-1] * Y_h[-1])) / yy
+				for (s_k, y_k, r_k), a in zip(zip(S_h, Y_h, R_h),
+						reversed(a_h)):
+					b = r_k * float(np.sum(y_k * q))
+					q += (a - b) * s_k
+				d = -q
+				dg = float(np.sum(d * g))
+				if (not np.isfinite(dg)) or dg >= 0.0:
+					d, dg = F.copy(), -float(np.sum(F * F))
+					S_h, Y_h, R_h = [], [], []
+				sc = min(1.0, step_max / max(FAR(d), 1e-12))
+				d, dg = d * sc, dg * sc
+				x_old = pose.data['Coordinates']
+				t, ok, E_new, F_new = 1.0, False, E, F
+				for _ in range(20):
+					pose.data['Coordinates'] = x_old + t * d
+					try:
+						E_new, F_new = ff(pose, grad=True, box=box)
+						E_new, n_evals = float(E_new), n_evals + 1
+					except (FloatingPointError, ValueError, KeyError):
+						E_new, F_new = float('nan'), None
+						n_evals += 1
+					if (F_new is not None and np.isfinite(E_new)
+							and np.isfinite(F_new).all()
+							and E_new <= E + c1 * t * dg
+							+ max(etol, 1e-12 * abs(E))):
+						ok = True; break
+					t *= 0.5
+				max_steps_log.append(FAR(t * d))
+				if not ok:
+					pose.data['Coordinates'] = x_old
+					S_h, Y_h, R_h = [], [], []
+					rejects, n_rej = rejects + 1, n_rej + 1
+					continue
+				rejects = 0
+				s_k, y_k = t * d, (-F_new) - g
+				sy = float(np.sum(s_k * y_k))
+				if np.isfinite(sy) and sy > 1e-12:
+					S_h.append(s_k); Y_h.append(y_k); R_h.append(1.0 / sy)
+					if len(S_h) > int(mem):
+						S_h.pop(0); Y_h.pop(0); R_h.pop(0)
+				stall = (stall + 1
+					if abs(E_new - E) < etol and FAR(s_k) < 1e-6
+					else 0)
+				E, F = E_new, F_new
+				g = -F
 		if np.isfinite(E) and E < best_E:
 			best_E = E
 			best_coords = pose.data['Coordinates'].copy()
@@ -7323,6 +7387,7 @@ def Minimise(pose, ff=None, max_steps=500, ftol=1.0, dt_fs=0.5,
 		'max_step': np.asarray(max_steps_log, dtype=np.float64),
 		'converged': bool(converged and FMAX(F) < ftol),
 		'reason': str(reason),
+		'alg': str(alg),
 		'n_steps': int(steps_done),
 		'n_sd': int(n_sd),
 		'n_rejected': int(n_rej),
@@ -9847,4 +9912,3 @@ def Port(name='openff', accept_rosetta_license=False):
 	except Exception: pass
 	print('[+] Done')
 	return True
-
