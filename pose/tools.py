@@ -4943,6 +4943,7 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None, nrot_override=None):
 			heavy_mask = np.array([atoms[k][1] != 'H' for k in range(n)])
 			for i in range(n):
 				if atoms[i][1] != 'H': continue
+				if any(atoms[k][1] != 'H' for k in adj[i]): continue
 				dij = np.linalg.norm(X_arr - X_arr[i], axis=1)
 				dij[i] = np.inf
 				dij = np.where(heavy_mask, dij, np.inf)
@@ -6408,10 +6409,10 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None, nrot_override=None):
 		--------
 			float: spline-interpolated value
 		'''
-		key = id(table)
+		arr = np.asarray(table, dtype=float)
+		key = arr.tobytes()
 		cached = _RAMA_SPLINE_CACHE.get(key)
 		if cached is None:
-			arr = np.asarray(table, dtype=float)
 			ypp_psi = np.zeros_like(arr)
 			for i in range(arr.shape[0]):
 				ypp_psi[i] = periodic_cubic_spline(arr[i])
