@@ -48,7 +48,7 @@ class Pose():
 		self.probbatoms  = {
 			'N', 'H', '1H', '2H', '3H', 'H1', 'H2', 'H3',
 			'HT1', 'HT2', 'HT3', 'HN',
-			'CA', 'HA', 'HA1', 'HA2', 'HA3',
+			'CA', 'HA', 'HA1', 'HA2',
 			'C', 'O', 'OXT', 'OT1', 'OT2'}
 		self.nucbbatoms = {
 			'P'  , 'OP1', 'OP2', "O5'", "C5'", "H5'", "H5''", "C4'",
@@ -498,6 +498,9 @@ class Pose():
 			sc_atoms = aa_db[aa_u]['Sidechain Atoms']
 			tail = aa_db[bb]['Backbone Atoms'][bb_idx:]
 			full = bb_atoms + sc_atoms + tail
+			if aa_u == 'G':
+				full = [['HA2'] + list(v[1:]) if v[0] == 'HA'
+					else v for v in full]
 			BBi, SCi = [], []
 			for v in full:
 				self.data['Atoms'][I] = [v[0],v[1],v[2],v[3],v[4],v[5]]
@@ -738,7 +741,7 @@ class Pose():
 		n_ai = next((a for a in bb_idx if atoms_dict[a][0] == 'N'), None)
 		ca_ai = next((a for a in bb_idx if atoms_dict[a][0] == 'CA'), None)
 		c_ai = next((a for a in bb_idx if atoms_dict[a][0] == 'C'), None)
-		h1_ai = next((a for a in bb_idx if atoms_dict[a][0] == '1H'), None)
+		h1_ai = next((a for a in bb_idx if atoms_dict[a][0] in ('H','H1')),None)
 		if n_ai is None or ca_ai is None or c_ai is None:
 			raise Exception(f'Residue {index} missing N/CA/C atom')
 		n_xyz = coords[n_ai].copy().astype(np.float64)
@@ -773,7 +776,7 @@ class Pose():
 		if need_add_1h:
 			bb_mid = aa_db['Backbone middle']
 			bb_atom_names = [a[0] for a in bb_mid['Backbone Atoms']]
-			h1_local = bb_atom_names.index('1H')
+			h1_local = bb_atom_names.index('H')
 			h1_vec = np.array(bb_mid['Vectors'][h1_local], dtype=np.float64)
 			h1_world = n_xyz + h1_vec @ F_target
 			h1_record = list(bb_mid['Backbone Atoms'][h1_local])
@@ -847,6 +850,10 @@ class Pose():
 		info[3] = list(new_sc_global_idx)
 		codes = new_entry['Tricode']
 		info[5] = codes[1] if is_dform else codes[0]
+		for a in info[2]:
+			if self.data['Atoms'][a][0] in ('HA', 'HA2'):
+				self.data['Atoms'][a][0] = ('HA2'
+					if residue.upper() == 'G' else 'HA')
 		if need_add_1h:
 			n_pos = info[2].index(new_n_ai)
 			info[2] = info[2][:n_pos+1] + [h1_gi] + info[2][n_pos+1:]

@@ -9689,6 +9689,8 @@ def Port(name='openff', accept_rosetta_license=False):
 				'chemical/residue_type_sets/fa_standard/residue_types/'
 				'l-caa/%s.params' % aa)
 			residues[aa] = _parseparams(txt)
+		residues['ASN']['aliases'].update({'HD21': '1HD2', 'HD22': '2HD2'})
+		residues['GLN']['aliases'].update({'HE21': '1HE2', 'HE22': '2HE2'})
 		try:
 			txt = _r15fetch(
 				'chemical/residue_type_sets/fa_standard/residue_types/'
