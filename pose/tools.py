@@ -4946,7 +4946,7 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None, nrot_override=None):
 				if any(atoms[k][1] != 'H' for k in adj[i]): continue
 				dij = np.linalg.norm(X_arr - X_arr[i], axis=1)
 				dij[i] = np.inf
-				dij = np.where(heavy_mask, dij, np.inf)
+				dij = np.where(heavy_mask & (atom_res==atom_res[i]),dij,np.inf)
 				j = int(np.argmin(dij))
 				if dij[j] < 1.3:
 					adj[i].add(j); adj[j].add(i)

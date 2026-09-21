@@ -2331,11 +2331,14 @@ class Pose():
 							Bd[n_idx].append(pc)
 							BO[n_idx].append(1.5)
 				prev_res_c[ch] = name_to_idx.get('C')
+			res_of = {gi: i for i in range(len(Am)) for gi in Am[i][2] + Am[i][3]}
 			for gi in At:
 				if At[gi][1] != 'H' or Bd.get(gi): continue
-				d = np.linalg.norm(Co - Co[gi], axis=1); d[gi] = 1e18
-				gj = int(np.argmin(d))
-				if d[gj] <= 1.3:
+				own = [gj for gj in Am[res_of[gi]][2] + Am[res_of[gi]][3]
+					if At[gj][1] != 'H']
+				d = np.linalg.norm(Co[own] - Co[gi], axis=1)
+				gj = own[int(np.argmin(d))]
+				if d.min() <= 1.3:
 					Bd.setdefault(gi, []).append(gj)
 					Bd.setdefault(gj, []).append(gi)
 					BO.setdefault(gi, []).append(1.0)
