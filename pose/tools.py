@@ -81,10 +81,10 @@ def _rotliblookup(rotlib, tri, phi, psi):
 	entry = (rotlib.get('residues', {}) if rotlib else {}).get(tri)
 	if entry is None: return 0, []
 	pn, sn = int(rotlib.get('phi_n', 36)), int(rotlib.get('psi_n', 36))
-	i = int(math.floor((phi - float(rotlib.get('phi_start', -180.0)))
-		/ float(rotlib.get('phi_step', 10.0)))) % pn
-	j = int(math.floor((psi - float(rotlib.get('psi_start', -180.0)))
-		/ float(rotlib.get('psi_step', 10.0)))) % sn
+	i = int(math.floor((round(phi, 6) - float(rotlib.get('phi_start', -180.0)))
+		/ float(rotlib.get('phi_step', 10.0)) + 0.5)) % pn
+	j = int(math.floor((round(psi, 6) - float(rotlib.get('psi_start', -180.0)))
+		/ float(rotlib.get('psi_step', 10.0)) + 0.5)) % sn
 	rot = entry['rotamers']
 	off = rot['bin_offsets']
 	b = i * sn + j
