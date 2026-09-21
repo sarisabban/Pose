@@ -1829,9 +1829,22 @@ def Cyclise(pose, mode='head-to-tail', res1=None, atom1=None,
 		bonds, bo = pose.data['Bonds'], pose.data['BondOrders']
 		if i2 in bonds.get(i1, []): return
 		drop = set()
+		el = {i1: atoms[i1][1], i2: atoms[i2][1]}
+		amide = sorted(el.values()) == ['C', 'N']
 		for s in (i1, i2):
-			h = next((j for j in bonds.get(s, []) if atoms[j][1] == 'H'), None)
-			if h is not None: drop.add(h)
+			hs = [j for j in bonds.get(s, []) if atoms[j][1] == 'H']
+			if amide and el[s] == 'N': drop.update(hs[1:])
+			elif hs: drop.add(hs[0])
+			if amide and el[s] == 'C':
+				ox = [j for j in bonds.get(s, []) if atoms[j][1] == 'O'
+					and sum(atoms[k][1] != 'H' for k in bonds.get(j, [])) == 1]
+				if len(ox) == 2:
+					lv = next((j for j in ox if atoms[j][0] in
+						('OXT', 'OT1', 'OT2', "O''")), ox[-1])
+					drop.add(lv)
+					drop.update(k for k in bonds.get(lv, [])
+						if atoms[k][1] == 'H')
+		if amide: bov = 1.5
 		keep = [i for i in sorted(atoms) if i not in drop]
 		nx = {old: k for k, old in enumerate(keep)}
 		pose.data['Coordinates'] = np.asarray(
