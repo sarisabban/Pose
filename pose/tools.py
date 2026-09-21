@@ -1788,7 +1788,8 @@ def Cyclise(pose, mode='head-to-tail', res1=None, atom1=None,
 							pose.RotateDihedral(ri, val, ang)
 					except Exception: pass
 		nC, n0 = atomof(rr[-1], 'C'), atomof(rr[0], 'N')
-		hd = atomof(rr[0], '2H') or atomof(rr[0], '3H')
+		hd = next((h for h in (atomof(rr[0], nm) for nm in \
+			('H2', 'H3', '2H', '3H')) if h is not None), None)
 		co = np.asarray(pose.data['Coordinates'], dtype=float)
 		d = co[hd] - co[n0] if None not in (nC, n0, hd) else None
 		nd = float(np.linalg.norm(d)) if d is not None else 0.0
