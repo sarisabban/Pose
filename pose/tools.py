@@ -652,6 +652,110 @@ def Parameterise(cif_file, rotamer_json_file, unicode, tricode,
 	print(f'Added {tricode} as "{unicode}" to database.json '
 		f'(Amino Acids + Rotamer Library)')
 
+def Clash(pose, other=None, overlap=0.4, hydrogens=False, separation=4,
+		hbonds=True, radii=None, verbose=False):
+	'''
+	Find the atom pairs whose van der Waals spheres overlap, within one
+	pose or between two poses. A pair clashes when the sum of its Bondi
+	radii exceeds the distance by more than the overlap threshold. Pairs
+	joined by fewer bonds than the separation are never counted, so bonded
+	atoms and bond angles are ignored whatever their geometry, in proteins,
+	nucleic acids, cyclic peptides, disulfides and small molecules alike
+	Arguments:
+	----------
+		pose:       Pose or Molecule to examine
+		other:      A second Pose or Molecule. When given, only pairs with
+		            one atom in each are examined, giving the clashes
+		            between the two, as between a receptor and a ligand or
+		            between two chains split from a complex
+		overlap:    Threshold in angstroms on the overlap of the two radii
+		            that makes a pair a clash. 0.4 is the customary value
+		            for a serious clash, 0.0 counts every overlap
+		hydrogens:  True examines hydrogens too, False heavy atoms only.
+		            Structures from crystallography have no hydrogens and
+		            modelled ones are placed by rule, so the default is
+		            the heavy atoms
+		separation: Pairs joined by fewer than this many bonds are exempt.
+		            4 exempts bonded atoms, angle partners and dihedral
+		            partners (1-2, 1-3 and 1-4), whose distances are set
+		            by covalent geometry and not by packing; 3 keeps the
+		            1-4 pairs, which flags every eclipsed torsion
+		hbonds:     True exempts a nitrogen or oxygen pair at 2.6 A or more,
+		            the geometry of a hydrogen bond, which overlaps the
+		            Bondi radii by design and is not a clash
+		radii:      Dictionary of element to radius in angstroms that
+		            overrides the built-in Bondi radii for those elements
+		verbose:    True prints each clash, worst first
+	Returns:
+	--------
+		list: One entry per clashing pair, worst overlap first, each
+		(A, B, distance, overlap) where distance and overlap are in
+		angstroms and A and B describe the two atoms as
+		[residue name, residue index, atom name, atom index] in a protein
+		or nucleic acid and [atom name, atom index] in a Molecule. When
+		other is given A is always from pose and B from other. The number
+		of clashes is the length of the list
+	'''
+	BONDI = {'H': 1.20, 'C': 1.70, 'N': 1.55, 'O': 1.52, 'F': 1.47,
+		'P': 1.80, 'S': 1.80, 'CL': 1.75, 'BR': 1.85, 'I': 1.98,
+		'SE': 1.90, 'B': 1.92, 'SI': 2.10, 'NA': 2.27, 'K': 2.75,
+		'MG': 1.73, 'CA': 2.31, 'ZN': 1.39, 'FE': 2.00, 'MN': 2.00,
+		'CU': 1.40, 'NI': 1.63, 'CO': 2.00}
+	if radii: BONDI.update({k.upper(): float(v) for k, v in radii.items()})
+	def Table(p):
+		''' Atom ids, elements, coordinates and labels of one pose '''
+		atoms, X = p.data['Atoms'], np.asarray(p.data['Coordinates'], float)
+		who = {}
+		for src in (p.data.get('Amino Acids'), p.data.get('Nucleotides')):
+			for r, v in (src or {}).items():
+				for a in v[2] + v[3]: who[a] = (v[0], r)
+		ids = [a for a in sorted(atoms) if hydrogens
+			or atoms[a][1].upper() not in ('H', 'D')]
+		label = lambda a: ([who[a][0], who[a][1], atoms[a][0], a]
+			if a in who else [atoms[a][0], a])
+		el = [atoms[a][1].upper() for a in ids]
+		return ids, el, X[ids], [label(a) for a in ids]
+	def Near(p):
+		''' Pairs within the exempt bond separation, from the bond graph '''
+		out, bonds = set(), p.data.get('Bonds', {})
+		for a in bonds:
+			seen, queue = {a: 0}, deque([a])
+			while queue:
+				i = queue.popleft()
+				if seen[i] + 1 >= separation: continue
+				for j in bonds.get(i, []):
+					if j not in seen:
+						seen[j] = seen[i] + 1
+						queue.append(j)
+			out.update((a, j) for j in seen if j != a)
+		return out
+	ids1, el1, X1, lab1 = Table(pose)
+	if other is None:
+		ids2, el2, X2, lab2, near = ids1, el1, X1, lab1, Near(pose)
+	else:
+		ids2, el2, X2, lab2, near = *Table(other), set()
+	r1 = np.array([BONDI.get(e, 1.70) for e in el1])
+	r2 = np.array([BONDI.get(e, 1.70) for e in el2])
+	D = np.linalg.norm(X1[:, None, :] - X2[None, :, :], axis=-1)
+	ov = (r1[:, None] + r2[None, :]) - D
+	mask = ov > overlap
+	if other is None: mask &= np.triu(np.ones_like(mask), 1)
+	if hbonds:
+		pol1 = np.array([e in ('N', 'O') for e in el1])
+		pol2 = np.array([e in ('N', 'O') for e in el2])
+		mask &= ~(pol1[:, None] & pol2[None, :] & (D >= 2.6))
+	out = []
+	for i, j in zip(*np.nonzero(mask)):
+		if (ids1[i], ids2[j]) in near: continue
+		out.append((lab1[i], lab2[j], float(D[i, j]), float(ov[i, j])))
+	out.sort(key=lambda c: -c[3])
+	if verbose:
+		for A, B, d, o in out:
+			print(f'{" ".join(map(str, A)):<24} {" ".join(map(str, B)):<24} '
+				f'distance {d:6.3f} A  overlap {o:5.3f} A')
+		print(f'{len(out)} clashes')
+	return out
+
 def Isoelectric(sequence):
 	'''
 	Isoelectric point (pI) of a protein via Lehninger pKa values
