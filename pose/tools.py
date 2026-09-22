@@ -2813,9 +2813,10 @@ def Pack(pose, ff=None, n_steps=2000, T_start=10.0, T_end=0.1,
 		'restored': bool(abs(E_final - E_best) < 1e-6),
 		'n_residues': len(res_ids)}
 
-def Anneal(pose, ff=None, n_steps=10000, T_start=2000.0, T_end=10.0,
+def Anneal(pose, ff=None, n_steps=10000, T_start=600.0, T_end=250.0,
 		sigma_small=5.0, sigma_large=30.0, p_large=0.2, p_shear=0.5,
-		target_acc=0.30, adapt_window=100, seed=None, box=None):
+		target_acc=0.30, adapt_window=100, seed=None, box=None,
+		alg='md', dt_fs=2.0, friction_ps=1.0):
 	'''
 	Simulated annealing over backbone torsions, mixing single-torsion and
 	shear moves, with the small-move step size adapted to hold a target
@@ -2839,6 +2840,12 @@ def Anneal(pose, ff=None, n_steps=10000, T_start=2000.0, T_end=10.0,
 		adapt_window: Small moves between updates of sigma_small
 		seed:         Seed for the random generator, None for unseeded
 		box:          None for no PBC, (3,) orthorhombic, (3, 3) triclinic
+		alg:          'md' cools Langevin dynamics of every atom from T_start
+			to T_end through MolecularDynamics() and needs a ForceField(),
+			'mc' is the torsion Metropolis search described above, the
+			only one a Score() can drive
+		dt_fs:        Integration step in femtoseconds, 'md' only
+		friction_ps:  Langevin friction in inverse picoseconds, 'md' only
 	Returns:
 	--------
 		float: Lowest energy seen, whose coordinates are left in the pose
@@ -2847,9 +2854,34 @@ def Anneal(pose, ff=None, n_steps=10000, T_start=2000.0, T_end=10.0,
 		'sigma_history', 'best_step' (-1 when no step improved on the
 		start), 'n_evals' (energy evaluations made, the start included)
 		and 'coordinates_last' (the state the chain finished in, as
-		opposed to the best state that is left in the pose)
+		opposed to the best state that is left in the pose). With 'md'
+		the log holds 'energies', 'temperatures', 'kinetic', 'best_step',
+		'n_evals' and 'coordinates_last', the best state being the lowest
+		of the snapshots kept along the run
 	'''
 	if ff is None: ff = ForceField()
+	if alg not in ('md', 'mc'):
+		raise ValueError("alg must be 'md' or 'mc'")
+	if alg == 'md':
+		if not hasattr(ff, '_prepare'):
+			raise ValueError("alg='md' needs a ForceField() for its forces, "
+				"pass alg='mc' to anneal with a Score()")
+		every = max(int(n_steps) // 1000, 1)
+		E_last, md = MolecularDynamics(pose, ff, n_steps=n_steps, dt_fs=dt_fs,
+			T=T_start, T_end=T_end, thermostat='langevin',
+			friction_ps=friction_ps, constraints='hbonds', seed=seed,
+			trajectory_every=every, box=box)
+		coords_last = pose.data['Coordinates'].copy()
+		kept = np.arange(len(md['frames'])) * every + every - 1
+		best = int(np.argmin(md['energies'][kept]))
+		pose.data['Coordinates'] = md['frames'][best]
+		return float(md['energies'][kept[best]]), {
+			'energies': md['energies'],
+			'temperatures': md['temperatures'],
+			'kinetic': md['kinetic'],
+			'best_step': int(kept[best]),
+			'n_evals': int(n_steps) + 1,
+			'coordinates_last': coords_last}
 	if pose.data.get('Amino Acids') is None:
 		raise ValueError('Anneal requires a protein pose with Amino Acids')
 	GAIN, SIGMA_MIN, SIGMA_MAX = 0.5, 0.5, 60.0
@@ -7413,7 +7445,7 @@ def Minimise(pose, ff=None, max_steps=500, ftol=1.0, alg='lbfgs', dt_fs=0.5,
 def MolecularDynamics(pose, ff=None, n_steps=1000, dt_fs=2.0, T=300.0,
 		thermostat='nve', friction_ps=1.0, constraints='hbonds',
 		shake_tol=1e-8, shake_max=100, seed=None,
-		trajectory_every=0, box=None):
+		trajectory_every=0, box=None, T_end=None):
 	'''
 	Molecular dynamics by velocity Verlet in the NVE ensemble or BAOAB
 	Langevin in NVT, with bond lengths to hydrogen held by SHAKE and RATTLE
@@ -7434,6 +7466,8 @@ def MolecularDynamics(pose, ff=None, n_steps=1000, dt_fs=2.0, T=300.0,
 		seed:             Seed for the random generator, None for unseeded
 		trajectory_every: Snapshot stride, 0 stores no snapshots
 		box:              None for no PBC, (3,) ortho, (3, 3) triclinic
+		T_end:            Final bath temperature in Kelvin, cooled or heated
+			geometrically from T over the run, None holds T. Langevin only
 	Returns:
 	--------
 		float: Final potential energy in kJ/mol
@@ -7445,6 +7479,8 @@ def MolecularDynamics(pose, ff=None, n_steps=1000, dt_fs=2.0, T=300.0,
 		raise ValueError("thermostat must be 'nve' or 'langevin'")
 	if constraints not in ('hbonds', 'none'):
 		raise ValueError("constraints must be 'hbonds' or 'none'")
+	if T_end is not None and thermostat != 'langevin':
+		raise ValueError("T_end needs thermostat='langevin'")
 	atoms = pose.data['Atoms']
 	sorted_ids = sorted(atoms)
 	is_h = np.array([atoms[i][1] == 'H' for i in sorted_ids], dtype=bool)
@@ -7464,11 +7500,13 @@ def MolecularDynamics(pose, ff=None, n_steps=1000, dt_fs=2.0, T=300.0,
 	m_col = m[:, None]
 	inv_m = 1.0 / m
 	inv_m_col = inv_m[:, None]
-	AKMA_FS, kB = 23.91888086, 8.31446262e-3
+	AKMA_FS, kB = 100.0, 8.31446262e-3
 	dt = float(dt_fs) / AKMA_FS
 	gamma = float(friction_ps) * AKMA_FS / 1000.0
 	c1 = math.exp(-gamma * dt)
 	c2 = np.sqrt((1.0 - c1 * c1) * kB * float(T) / m)[:, None]
+	T_arr = (None if T_end is None else float(T) * (float(T_end) / float(T))
+		** (np.arange(int(n_steps)) / max(int(n_steps) - 1, 1)))
 	if ff._cache is None or ff._cache_hash != ff._topologyhash(pose):
 		ff._prepare(pose)
 	cache = ff._cache
@@ -7542,6 +7580,8 @@ def MolecularDynamics(pose, ff=None, n_steps=1000, dt_fs=2.0, T=300.0,
 			x_old = pose.data['Coordinates'].copy()
 			pose.data['Coordinates'] = x_old + 0.5 * dt * v
 			shake(pose.data['Coordinates'], x_old, v, 0.5 * dt)
+			if T_arr is not None:
+				c2 = np.sqrt((1.0 - c1 * c1) * kB * T_arr[step] / m)[:, None]
 			v = c1 * v + c2 * rng.standard_normal(size=(n, 3))
 			rattle(pose.data['Coordinates'], v)
 			x_old = pose.data['Coordinates'].copy()
