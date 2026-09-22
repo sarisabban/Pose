@@ -7649,6 +7649,7 @@ def MolecularDynamics(pose, ff=None, n_steps=1000, dt_fs=2.0, T=300.0,
 			np.add.at(x_new, j_c, delta * inv_m_col[j_c])
 			np.add.at(vel, i_c, -(delta / dt_eff) * inv_m_col[i_c])
 			np.add.at(vel, j_c, (delta / dt_eff) * inv_m_col[j_c])
+		if K: raise RuntimeError('SHAKE did not converge in shake_max iterations')
 	def rattle(x, vel):
 		'''
 		Project velocities so that no constrained bond changes length
@@ -7668,12 +7669,13 @@ def MolecularDynamics(pose, ff=None, n_steps=1000, dt_fs=2.0, T=300.0,
 			delta_v = (rv / (d2 * inv_red))[:, None] * r
 			np.add.at(vel, i_c, -delta_v * inv_m_col[i_c])
 			np.add.at(vel, j_c, delta_v * inv_m_col[j_c])
+		if K: raise RuntimeError('RATTLE did not converge in shake_max iterations')
 	v = rng.standard_normal(size=(n, 3)) * np.sqrt(
 		kB * float(T) / m)[:, None]
 	v -= ((m_col * v).sum(axis=0) / m.sum())[None, :]
 	rattle(pose.data['Coordinates'], v)
 	E, F = ff(pose, grad=True, box=box)
-	dof = max(3 * n - K - 3, 1)
+	dof = max(3 * n - K - (3 if thermostat == 'nve' else 0), 1)
 	energies = np.empty(int(n_steps), dtype=np.float64)
 	kinetics = np.empty(int(n_steps), dtype=np.float64)
 	temps = np.empty(int(n_steps), dtype=np.float64)
@@ -7688,6 +7690,7 @@ def MolecularDynamics(pose, ff=None, n_steps=1000, dt_fs=2.0, T=300.0,
 				c2 = np.sqrt((1.0 - c1 * c1) * kB * T_arr[step] / m)[:, None]
 			v = c1 * v + c2 * rng.standard_normal(size=(n, 3))
 			rattle(pose.data['Coordinates'], v)
+			v_ke = v.copy()
 			x_old = pose.data['Coordinates'].copy()
 			pose.data['Coordinates'] = x_old + 0.5 * dt * v
 			shake(pose.data['Coordinates'], x_old, v, 0.5 * dt)
@@ -7696,10 +7699,11 @@ def MolecularDynamics(pose, ff=None, n_steps=1000, dt_fs=2.0, T=300.0,
 			x_old = pose.data['Coordinates'].copy()
 			pose.data['Coordinates'] = x_old + dt * v
 			shake(pose.data['Coordinates'], x_old, v, dt)
+			v_ke = v
 		E, F = ff(pose, grad=True, box=box)
 		v += 0.5 * dt * F / m_col
 		rattle(pose.data['Coordinates'], v)
-		KE = 0.5 * float(np.sum(m_col * v * v))
+		KE = 0.5 * float(np.sum(m_col * v_ke * v_ke))
 		energies[step] = float(E)
 		kinetics[step] = KE
 		temps[step] = 2.0 * KE / (dof * kB)
