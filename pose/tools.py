@@ -7717,6 +7717,1324 @@ def MolecularDynamics(pose, ff=None, n_steps=1000, dt_fs=2.0, T=300.0,
 		'n_constraints': int(K),
 		'dof': int(dof)}
 
+def _dockworker(task):
+	'''
+	Engine behind Dock(): one unit of work, run in-process when cpu=1 and
+	in a multiprocessing worker otherwise, so the serial and parallel paths
+	execute the same code with the same seeds. Task kinds: 'maps' scores a
+	one-atom probe of one atom type at a block of grid points, 'search' runs
+	one basin-hopping search on the maps, 'refine' polishes one ligand pose
+	against the exact score, 'protein' runs one rigid-body search of a
+	chain against its partner
+	Arguments:
+	----------
+		task: (kind, payload) with payload a dict of plain data, arrays and
+			picklable Pose or Molecule objects
+	Returns:
+	--------
+		dict: Kind-specific result, always carrying 'index' so the caller
+		can reassemble results in task order
+	'''
+	kind, P = task
+	def rotmat(v):
+		'''
+		Rotation matrix of a rotation vector by the Rodrigues formula
+		Arguments:
+		----------
+			v: (3,) rotation vector, axis times angle in radians
+		Returns:
+		--------
+			(3, 3) array: rotation matrix acting on column vectors
+		'''
+		th = float(np.sqrt(np.dot(v, v)))
+		if th < 1e-12: return np.eye(3)
+		u = v / th
+		K = np.array([[0.0, -u[2], u[1]], [u[2], 0.0, -u[0]],
+			[-u[1], u[0], 0.0]])
+		return np.eye(3) + np.sin(th) * K + (1.0 - np.cos(th)) * (K @ K)
+	def rotvec(R):
+		'''
+		Rotation vector of a rotation matrix through its quaternion, which
+		stays accurate at angles near pi where the trace formula fails
+		Arguments:
+		----------
+			R: (3, 3) rotation matrix
+		Returns:
+		--------
+			(3,) array: axis times angle in radians, angle in [0, pi]
+		'''
+		t = np.trace(R)
+		if t > 0.0:
+			s = np.sqrt(t + 1.0) * 2.0
+			q = np.array([(R[2, 1] - R[1, 2]) / s, (R[0, 2] - R[2, 0]) / s,
+				(R[1, 0] - R[0, 1]) / s, 0.25 * s])
+		else:
+			i = int(np.argmax(np.diag(R))); j = (i + 1) % 3; k = (i + 2) % 3
+			s = np.sqrt(1.0 + R[i, i] - R[j, j] - R[k, k]) * 2.0
+			q = np.zeros(4)
+			q[i] = 0.25 * s
+			q[j] = (R[j, i] + R[i, j]) / s
+			q[k] = (R[k, i] + R[i, k]) / s
+			q[3] = (R[k, j] - R[j, k]) / s
+		if q[3] < 0.0: q = -q
+		w = min(1.0, max(-1.0, float(q[3])))
+		th = 2.0 * np.arccos(w)
+		sn = np.sqrt(max(0.0, 1.0 - w * w))
+		if sn < 1e-12: return np.zeros(3)
+		return q[:3] / sn * th
+	def randrot(rng):
+		'''
+		Uniformly distributed random rotation (Shoemake 1992, Graphics
+		Gems III, p 124)
+		Arguments:
+		----------
+			rng: numpy Generator
+		Returns:
+		--------
+			(3, 3) array: rotation matrix
+		'''
+		u1, u2, u3 = rng.random(3)
+		a, b = np.sqrt(1.0 - u1), np.sqrt(u1)
+		x, y = a * np.sin(2 * np.pi * u2), a * np.cos(2 * np.pi * u2)
+		z, w = b * np.sin(2 * np.pi * u3), b * np.cos(2 * np.pi * u3)
+		return np.array([
+			[1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+			[2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+			[2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)]])
+	def makebuild(L):
+		'''
+		Closure that rebuilds ligand coordinates from a state vector and
+		the reference conformer: torsions first, in tree order about their
+		current axes, then the rigid rotation about the reference centroid
+		and the translation from the box centre
+		Arguments:
+		----------
+			L: dict with 'X0' reference coordinates, 'c0' reference heavy
+				centroid, 'tors' list of (anchor, pivot, moving index array),
+				'centre' box centre
+		Returns:
+		--------
+			callable: state (6 + n_torsions,) -> (N, 3) coordinates
+		'''
+		X0, c0, tors, centre = L['X0'], L['c0'], L['tors'], L['centre']
+		def build(x):
+			X = X0.copy()
+			for k, (i, j, mov) in enumerate(tors):
+				ax = X[j] - X[i]
+				R = rotmat(ax / np.linalg.norm(ax) * x[6 + k])
+				X[mov] = (X[mov] - X[j]) @ R.T + X[j]
+			return (X - c0) @ rotmat(x[3:6]).T + centre + x[:3]
+		return build
+	def lbfgs(fun, x, scale, h, max_iter, central=False, mem=10,
+			c1=1e-4, etol=1e-4, stall_k=3):
+		'''
+		Limited-memory BFGS on a state vector with a finite-difference
+		gradient and Armijo backtracking, in coordinates scaled so that
+		one unit of translation, rotation and torsion move comparable
+		distances. Restarts on a non-descent direction; the best point
+		visited is returned
+		Arguments:
+		----------
+			fun:      Objective, state -> float
+			x:        Starting state
+			scale:    Per-component scale, the natural step of each
+			h:        Finite-difference step per component, in the
+				component's own unit
+			max_iter: Iteration budget
+			central:  True for central differences, False for forward
+			mem:      Curvature pairs retained
+			c1:       Armijo sufficient-decrease constant
+			etol:     Energy change below which an iteration is stalled
+			stall_k:  Consecutive stalled iterations that end the run
+		Returns:
+		--------
+			tuple: (best state, best objective, evaluations used)
+		'''
+		n = len(x); s_ = np.asarray(scale, dtype=np.float64)
+		h_ = np.asarray(h, dtype=np.float64) / s_
+		z = np.asarray(x, dtype=np.float64) / s_
+		def f(z): return fun(z * s_)
+		E = f(z); nev = 1
+		def grad(z, E):
+			g = np.zeros(n); k = 0
+			for d in range(n):
+				zp = z.copy(); zp[d] += h_[d]; Ep = f(zp); k += 1
+				if central:
+					zm = z.copy(); zm[d] -= h_[d]; Em = f(zm); k += 1
+					g[d] = (Ep - Em) / (2.0 * h_[d])
+				else:
+					g[d] = (Ep - E) / h_[d]
+			return g, k
+		g, k = grad(z, E); nev += k
+		S, Y, R = [], [], []
+		best_z, best_E = z.copy(), E
+		stall = 0
+		for it in range(int(max_iter)):
+			if not np.isfinite(E): break
+			q = g.copy(); al = []
+			for s_k, y_k, r_k in zip(reversed(S), reversed(Y), reversed(R)):
+				a = r_k * float(np.dot(s_k, q)); al.append(a); q -= a * y_k
+			if S:
+				yy = float(np.dot(Y[-1], Y[-1]))
+				if yy > 1e-30: q *= float(np.dot(S[-1], Y[-1])) / yy
+			for (s_k, y_k, r_k), a in zip(zip(S, Y, R), reversed(al)):
+				b = r_k * float(np.dot(y_k, q)); q += (a - b) * s_k
+			d = -q; dg = float(np.dot(d, g))
+			if (not np.isfinite(dg)) or dg >= 0.0:
+				d = -g; dg = -float(np.dot(g, g)); S, Y, R = [], [], []
+			if dg >= 0.0 or not np.isfinite(dg): break
+			dmax = float(np.abs(d).max())
+			if dmax > 1.0: d, dg = d / dmax, dg / dmax
+			t, ok, E_new = 1.0, False, E
+			for _ in range(12):
+				z_new = z + t * d; E_new = f(z_new); nev += 1
+				if np.isfinite(E_new) and E_new <= E + c1 * t * dg:
+					ok = True; break
+				t *= 0.5
+			if not ok:
+				if S: S, Y, R = [], [], []; continue
+				break
+			g_new, k = grad(z_new, E_new); nev += k
+			s_k, y_k = z_new - z, g_new - g
+			sy = float(np.dot(s_k, y_k))
+			if np.isfinite(sy) and sy > 1e-12:
+				S.append(s_k); Y.append(y_k); R.append(1.0 / sy)
+				if len(S) > mem: S.pop(0); Y.pop(0); R.pop(0)
+			stall = stall + 1 if abs(E_new - E) < etol else 0
+			z, E, g = z_new, E_new, g_new
+			if E < best_E: best_z, best_E = z.copy(), E
+			if stall >= stall_k: break
+		return best_z * s_, float(best_E), nev
+	def heavyrmsd(A, B):
+		'''
+		Root mean square deviation between two matched coordinate sets
+		Arguments:
+		----------
+			A, B: (N, 3) arrays in the same frame
+		Returns:
+		--------
+			float: RMSD in angstroms
+		'''
+		return float(np.sqrt(((A - B) ** 2).sum(1).mean()))
+	if kind == 'coords':
+		return {'index': 0, 'coordinates': makebuild(P['ligand'])(
+			np.asarray(P['x'], dtype=np.float64))}
+	if kind == 'maps':
+		sf = Score(P['sf_name'])
+		rec, xso, pts = P['receptor'], dict(P['xs_receptor']), P['points']
+		n_r = len(rec.data['Atoms'])
+		mb = ('probe\n  Pose\n\n  1  0  0  0  0  0  0  0  0  0999 V2000\n'
+			'    0.0000    0.0000    0.0000 C   0  0  0  0  0  0  0  0  0  0  0  0\n'
+			'M  END\n')
+		out, err = sys.stdout, sys.stderr
+		sys.stdout = sys.stderr = io.StringIO()
+		try:
+			probe = Molecule(); probe.Import(mb)
+		finally:
+			sys.stdout, sys.stderr = out, err
+		xso[n_r] = P['type']
+		vals = np.empty(len(pts), dtype=np.float64)
+		for k in range(len(pts)):
+			probe.data['Coordinates'][0] = pts[k]
+			vals[k] = sf(rec, ligand=probe, xs_override=xso, nrot_override=0)
+		return {'index': P['index'], 'values': vals}
+	if kind == 'search':
+		L = P['ligand']; build = makebuild(L)
+		M, lo, npts, spacing = P['maps'], P['lo'], P['npts'], P['spacing']
+		half = P['half']; T = P['T']; n_steps = P['n_steps']
+		min_rmsd, n_keep = P['min_rmsd'], P['n_keep']
+		hv, atype, tors = L['heavy'], L['atype'], L['tors']
+		pi_, pj_ = L['intra_i'], L['intra_j']
+		ntor = len(tors); dim = 6 + ntor
+		nmax = np.asarray(npts, dtype=np.float64) - 1.0
+		def gridE(X):
+			'''
+			Trilinear interpolation of each heavy atom's type map plus a
+			quadratic wall outside the mapped region
+			Arguments:
+			----------
+				X: (N, 3) ligand coordinates
+			Returns:
+			--------
+				float: grid energy in the score's native unit
+			'''
+			Pg = (X[hv] - lo) / spacing
+			over = np.clip(-Pg, 0.0, None) + np.clip(Pg - nmax, 0.0, None)
+			wall = 100.0 * float((over * over).sum())
+			Pg = np.clip(Pg, 0.0, nmax - 1e-6)
+			i0 = Pg.astype(np.int64); f = Pg - i0; g = 1.0 - f
+			E = 0.0
+			for dx, wx in ((0, g[:, 0]), (1, f[:, 0])):
+				for dy, wy in ((0, g[:, 1]), (1, f[:, 1])):
+					for dz, wz in ((0, g[:, 2]), (1, f[:, 2])):
+						E += float((wx * wy * wz * M[atype, i0[:, 0] + dx,
+							i0[:, 1] + dy, i0[:, 2] + dz]).sum())
+			return E + wall
+		def intra(X):
+			'''
+			Soft self-clash guard over heavy-atom pairs more than three
+			bonds apart, quadratic below 3 A; a search guide only
+			Arguments:
+			----------
+				X: (N, 3) ligand coordinates
+			Returns:
+			--------
+				float: penalty
+			'''
+			if len(pi_) == 0: return 0.0
+			d = np.sqrt(((X[pi_] - X[pj_]) ** 2).sum(1))
+			v = np.clip(3.0 - d, 0.0, None)
+			return float((v * v).sum())
+		def fobj(x):
+			X = build(x)
+			return gridE(X) + intra(X)
+		scale = np.array([1.0] * 3 + [0.3] * 3 + [0.5] * ntor)
+		hstep = np.array([0.02] * 3 + [np.radians(0.5)] * 3
+			+ [np.radians(0.5)] * ntor)
+		# Vina's own budget is (25 + movable atoms) / 3 iterations, which it
+		# spends on an analytic gradient. A finite-difference descent needs
+		# more of them to reach the same minimum, and a basin-hopping walk
+		# whose descent falls short accepts almost every move, which makes
+		# it a random walk rather than a search
+		local_steps = max(40, int((25 + len(hv)) / 3))
+		rg = float(np.sqrt(((L['X0'][hv] - L['c0']) ** 2).sum(1).mean()))
+		rng = np.random.default_rng(P['seed'])
+		def compose(x, R):
+			y = x.copy(); y[3:6] = rotvec(R @ rotmat(x[3:6])); return y
+		def wrap(x):
+			y = x.copy()
+			if ntor: y[6:] = (y[6:] + np.pi) % (2 * np.pi) - np.pi
+			return y
+		# The box is divided into sites, the most favourable regions of the
+		# maps taken in order and kept at least 3 A apart, and each run is
+		# given one of them and confined to it. A pocket enclosed by the
+		# protein cannot be reached downhill from outside, so a run that
+		# starts at random never enters one; and a run that starts at a
+		# pocket but is then free to wander the whole box walks out of it
+		# and does not come back, which leaves the box covered by nobody
+		centre_v = np.asarray(L['centre'], dtype=np.float64)
+		w = np.bincount(atype, minlength=len(M)).astype(np.float64)
+		w /= max(w.sum(), 1.0)
+		favour = np.tensordot(w, M, axes=1)
+		flat = favour.ravel()
+		k_seed = int(min(max(512, flat.size // 200), flat.size))
+		cells = np.argpartition(flat, k_seed - 1)[:k_seed]
+		cells = cells[np.argsort(flat[cells])]
+		pts = lo + spacing * np.stack(
+			np.unravel_index(cells, favour.shape), axis=1)
+		keep = np.all(np.abs(pts - centre_v) <= half, axis=1)
+		if keep.any(): pts = pts[keep]
+		sites = []
+		for p_ in pts:
+			if all(np.sqrt(((p_ - q_) ** 2).sum()) >= 3.0 for q_ in sites):
+				sites.append(p_)
+			if len(sites) >= 32: break
+		site = sites[P['index'] % len(sites)] - centre_v if sites else None
+		r_site = float(P.get('site_radius', 6.0))
+		def clampbox(x):
+			y = x.copy()
+			y[:3] = np.clip(y[:3], -np.asarray(half), np.asarray(half))
+			if site is not None:
+				d = y[:3] - site
+				n = float(np.sqrt((d * d).sum()))
+				if n > r_site: y[:3] = site + d * (r_site / n)
+			return y
+		def localopt(x, budget):
+			xo, Eo, k = lbfgs(fobj, x, scale, hstep, budget)
+			return wrap(clampbox(xo)), k
+		n_grid = 0
+		best = None
+		for k_try in range(40):
+			if site is not None:
+				t_try = site + rng.normal(0.0, 0.35 * r_site, 3)
+			else:
+				t_try = rng.uniform(-half, half, 3)
+			x = clampbox(np.concatenate([t_try, np.zeros(3 + ntor)]))
+			x = np.concatenate([x[:3],
+				rotvec(randrot(rng)), rng.uniform(-np.pi, np.pi, ntor)])
+			e = fobj(x); n_grid += 1
+			if best is None or e < best[0]: best = (e, x)
+		x_cur, k = localopt(best[1], local_steps); n_grid += k
+		e_cur = fobj(x_cur); n_grid += 1
+		e_best, x_best = e_cur, x_cur.copy()
+		reservoir = [(e_cur, x_cur.copy(), build(x_cur)[hv])]
+		energies = np.empty(n_steps, dtype=np.float64)
+		accepted = np.zeros(n_steps, dtype=bool)
+		best_step = 0
+		for s in range(n_steps):
+			which = int(rng.integers(0, 2 + ntor))
+			x_new = x_cur.copy()
+			if which == 0:
+				v = rng.normal(size=3); v /= np.linalg.norm(v)
+				x_new[:3] += 2.0 * v * rng.random() ** (1.0 / 3.0)
+				x_new = clampbox(x_new)
+			elif which == 1:
+				v = rng.normal(size=3); v /= np.linalg.norm(v)
+				amp = 2.0 / rg if rg > 1e-6 else 0.0
+				x_new = compose(x_new, rotmat(
+					v * amp * rng.random() ** (1.0 / 3.0)))
+			else:
+				x_new[6 + which - 2] = rng.uniform(-np.pi, np.pi)
+			x_new, k = localopt(x_new, local_steps); n_grid += k
+			e_new = fobj(x_new); n_grid += 1
+			if e_new <= e_cur: acc = True
+			elif T <= 0.0: acc = False
+			else: acc = bool(rng.random() < np.exp(-(e_new - e_cur) / T))
+			energies[s] = e_new; accepted[s] = acc
+			if not acc: continue
+			x_cur, e_cur = x_new, e_new
+			if e_cur < e_best or len(reservoir) < n_keep:
+				Xh = build(x_cur)[hv]
+				near = [i for i, (e_r, _, Xr) in enumerate(reservoir)
+					if heavyrmsd(Xr, Xh) < min_rmsd]
+				if near:
+					i = near[0]
+					if e_cur < reservoir[i][0]:
+						reservoir[i] = (e_cur, x_cur.copy(), Xh)
+				else:
+					reservoir.append((e_cur, x_cur.copy(), Xh))
+				reservoir.sort(key=lambda t: t[0])
+				if len(reservoir) > n_keep: reservoir.pop()
+				if e_cur < e_best:
+					e_best, x_best, best_step = e_cur, x_cur.copy(), s
+		return {'index': P['index'], 'reservoir': [(e, x) for e, x, _
+			in reservoir], 'energies': energies, 'accepted': accepted,
+			'best_step': int(best_step), 'n_grid': int(n_grid)}
+	if kind == 'refine':
+		sf = Score(P['sf_name'])
+		rec, lig = P['receptor'], P['ligand_obj']
+		L = P['ligand']; build = makebuild(L)
+		XS, nrot, scl = P['xs'], P['nrot'], P['scale']
+		half = P['half']
+		ntor = len(L['tors'])
+		def exact(x):
+			'''
+			Exact objective, the score's intermolecular plus intramolecular
+			sums in its native unit, which is what Vina optimises
+			Arguments:
+			----------
+				x: state vector
+			Returns:
+			--------
+				tuple: (objective, inter, intra, denom) in native units
+			'''
+			lig.data['Coordinates'] = build(x)
+			E, per = sf(rec, ligand=lig, decompose=True, xs_override=XS,
+				nrot_override=nrot)
+			s = per['_summary']
+			inter = s['inter_total_kJ'] * scl; intra = s['intra_total_kJ'] * scl
+			return inter + intra, inter, intra, s['denom']
+		def fobj(x):
+			pen = 100.0 * float((np.clip(np.abs(x[:3]) - half, 0.0,
+				None) ** 2).sum())
+			return exact(x)[0] + pen
+		scale = np.array([1.0] * 3 + [0.3] * 3 + [0.5] * ntor)
+		hstep = np.array([0.02] * 3 + [np.radians(0.5)] * 3
+			+ [np.radians(0.5)] * ntor)
+		x0 = np.asarray(P['x'], dtype=np.float64)
+		E0 = exact(x0)
+		x1, E1, nev = lbfgs(fobj, x0, scale, hstep, P['max_iter'],
+			central=True)
+		# Metropolis polish on the exact score, then a second descent.
+		# Descent alone stops in whichever minimum the map search handed
+		# over, which leaves a pose in the right pocket at the wrong
+		# orientation whenever the two are parted by a small barrier
+		n_polish = int(P.get('polish', 0))
+		if n_polish > 0:
+			rng = np.random.default_rng(P['seed'])
+			T_p = 0.5
+			sig = np.array([0.6, np.radians(12.0), np.radians(30.0)])
+			x_cur = x1.copy(); e_cur = fobj(x_cur); nev += 1
+			x_top, e_top = x_cur.copy(), e_cur
+			for _ in range(n_polish):
+				x_try = x_cur.copy()
+				grp = int(rng.integers(0, 3 if ntor else 2))
+				if grp == 0:
+					x_try[:3] += rng.normal(0.0, sig[0], 3)
+				elif grp == 1:
+					u = rng.normal(size=3); u /= np.linalg.norm(u)
+					x_try[3:6] = rotvec(rotmat(u * rng.normal() * sig[1])
+						@ rotmat(x_try[3:6]))
+				else:
+					k_t = int(rng.integers(0, ntor))
+					x_try[6 + k_t] += rng.normal() * sig[2]
+				e_try = fobj(x_try); nev += 1
+				if not np.isfinite(e_try): continue
+				if e_try <= e_cur or rng.random() < np.exp(
+						-(e_try - e_cur) / T_p):
+					x_cur, e_cur = x_try, e_try
+					if e_cur < e_top: x_top, e_top = x_cur.copy(), e_cur
+			x2, E2, n2 = lbfgs(fobj, x_top, scale, hstep, P['max_iter'],
+				central=True)
+			nev += n2
+			if fobj(x2) < fobj(x1): x1 = x2
+			nev += 2
+		if ntor: x1[6:] = (x1[6:] + np.pi) % (2 * np.pi) - np.pi
+		Ef = exact(x1)
+		if Ef[0] > E0[0]: x1, Ef = x0, E0
+		return {'index': P['index'], 'x': x1, 'objective': Ef[0],
+			'inter': Ef[1], 'intra': Ef[2], 'denom': Ef[3],
+			'n_exact': int(nev + 2), 'coordinates': build(x1)}
+	if kind == 'protein':
+		cpx = P['complex']
+		if P['ff_kind'] == 'score': ff = Score(P['ff_name'])
+		else: ff = ForceField(P['ff_name'])
+		mov, fix = P['moving'], P['fixed']
+		sg_mov, sg_fix = P['sg_moving'], P['sg_fixed']
+		heavy_mov, heavy_fix = P['heavy_moving'], P['heavy_fixed']
+		guard_ss = P['ff_kind'] == 'ff'
+		X0 = np.asarray(P['coordinates'], dtype=np.float64).copy()
+		c0 = X0[mov].mean(0)
+		kw = {'grad': False, 'box': None}
+		def energy():
+			nonlocal kw
+			try: return float(ff(cpx, **kw))
+			except TypeError:
+				kw = {}
+				return float(ff(cpx))
+		def place(x):
+			X = X0.copy()
+			X[mov] = (X0[mov] - c0) @ rotmat(x[3:6]).T + c0 + x[:3]
+			return X
+		def blocked(X):
+			'''
+			True when a placement must not be evaluated: chains
+			interpenetrating below 1 A, or with a ForceField any
+			cross-chain SG pair inside the 2.5 A disulfide perception
+			Arguments:
+			----------
+				X: (N, 3) complex coordinates
+			Returns:
+			--------
+				bool
+			'''
+			A, B = X[heavy_mov], X[heavy_fix]
+			d2 = ((A[:, None, :] - B[None, :, :]) ** 2).sum(2)
+			if d2.min() < 1.0: return True
+			if guard_ss and len(sg_mov) and len(sg_fix):
+				A, B = X[sg_mov], X[sg_fix]
+				d2 = ((A[:, None, :] - B[None, :, :]) ** 2).sum(2)
+				if d2.min() < 6.25: return True
+			return False
+		n_eval = 0
+		def fobj(x):
+			nonlocal n_eval
+			X = place(x)
+			if blocked(X): return float('inf')
+			cpx.data['Coordinates'] = X
+			n_eval += 1
+			return energy()
+		rng = np.random.default_rng(P['seed'])
+		# A perturbation that lands the two chains on top of one another is
+		# redrawn, not pushed further along the direction that caused it,
+		# which would walk the chain away from the interface altogether
+		def perturbation():
+			y = np.zeros(6)
+			if P['perturb'] is None: return y
+			dt, dr = P['perturb']
+			v = rng.normal(size=3); v /= np.linalg.norm(v)
+			y[:3] = v * abs(rng.normal()) * dt
+			u = rng.normal(size=3); u /= np.linalg.norm(u)
+			y[3:6] = u * np.radians(abs(rng.normal()) * dr)
+			return y
+		x = perturbation()
+		e_cur = fobj(x)
+		tries = 0
+		while not np.isfinite(e_cur) and tries < 50:
+			x = perturbation(); e_cur = fobj(x); tries += 1
+		if not np.isfinite(e_cur):
+			x = np.zeros(6); e_cur = fobj(x)
+		X_start = place(x)
+		T = P['T']; n_steps = P['n_steps']
+		sig = np.array([0.25, np.radians(1.5)])
+		lo_s = np.array([0.05, np.radians(0.2)])
+		hi_s = np.array([0.5, np.radians(2.0)])
+		cnt = np.zeros(2); acc_n = np.zeros(2)
+		e_best, x_best = e_cur, x.copy()
+		energies = np.empty(n_steps); accepted = np.zeros(n_steps, dtype=bool)
+		best_step = 0
+		for s in range(n_steps):
+			grp = int(rng.integers(0, 2))
+			x_new = x.copy()
+			if grp == 0:
+				x_new[:3] += rng.normal(size=3) * sig[0]
+			else:
+				u = rng.normal(size=3); u /= np.linalg.norm(u)
+				R = rotmat(u * rng.normal() * sig[1]) @ rotmat(x[3:6])
+				x_new[3:6] = rotvec(R)
+			e_new = fobj(x_new)
+			if not np.isfinite(e_new): acc = False
+			elif e_new <= e_cur: acc = True
+			elif T <= 0.0: acc = False
+			else: acc = bool(rng.random() < np.exp(-(e_new - e_cur) / T))
+			energies[s] = e_new if np.isfinite(e_new) else float('nan')
+			accepted[s] = acc
+			cnt[grp] += 1; acc_n[grp] += int(acc)
+			if acc:
+				x, e_cur = x_new, e_new
+				if e_cur < e_best:
+					e_best, x_best, best_step = e_cur, x.copy(), s
+			if cnt[grp] >= 50:
+				sig[grp] *= math.exp(0.5 * (acc_n[grp] / cnt[grp] - 0.3))
+				sig[grp] = min(hi_s[grp], max(lo_s[grp], sig[grp]))
+				cnt[grp] = acc_n[grp] = 0
+		scale = np.array([1.0] * 3 + [0.3] * 3)
+		hstep = np.array([0.02] * 3 + [np.radians(0.5)] * 3)
+		def repackinterface(rng_r, cut=8.0, n_steps=2000):
+			'''
+			Repack the side chains that line the contact, by simulated
+			annealing over the backbone-dependent rotamer library, in the
+			manner of Pack() but restricted to the residues the two sides
+			share. Rosetta's docking movers repack between rigid-body
+			moves, and on a rebuilt model the side chains of an interface
+			are the part of it that is least trustworthy
+			Arguments:
+			----------
+				rng_r:   numpy Generator
+				cut:     Distance in angstroms within which a residue of
+					one side counts as lining the other
+				n_steps: Annealing proposals
+			Returns:
+			--------
+				int: Residues repacked, 0 when none line the contact
+			'''
+			X = cpx.data['Coordinates']
+			AA = cpx.data['Amino Acids']
+			D = np.sqrt(((X[heavy_mov][:, None, :]
+				- X[heavy_fix][None, :, :]) ** 2).sum(2))
+			near = set(heavy_mov[np.where((D < cut).any(1))[0]].tolist())
+			near |= set(heavy_fix[np.where((D < cut).any(0))[0]].tolist())
+			rotlib = DBLoad().get('Rotamer Library')
+			cand = {}
+			for r_i in sorted(AA):
+				info = AA[r_i]
+				if not any(a in near for a in info[2] + info[3]): continue
+				c = info[0]
+				db = cpx.aminoacids.get(c.upper(), {})
+				tri = (db.get('Tricode') or [None])[0]
+				if not (db.get('Chi Angle Atoms') or []) or not tri: continue
+				phi = cpx.GetDihedral(r_i, 'PHI')
+				psi = cpx.GetDihedral(r_i, 'PSI')
+				if math.isnan(phi): phi = 0.0
+				if math.isnan(psi): psi = 0.0
+				flip = c != c.upper()
+				n_chi, rows = _rotliblookup(rotlib, tri,
+					-phi if flip else phi, -psi if flip else psi)
+				if n_chi == 0 or not rows: continue
+				pr = np.array([max(float(row[1]), 0.0) for row in rows],
+					dtype=np.float64)
+				if pr.sum() <= 0.0: continue
+				mus = np.array([[float(row[2 + ci]) for ci in range(n_chi)]
+					for row in rows], dtype=np.float64)
+				pr = pr / pr.sum()
+				cand[r_i] = (-mus if flip else mus, np.cumsum(pr), n_chi)
+			if not cand: return 0
+			ids = list(cand)
+			fused = {i for i in ids if cpx.aminoacids[
+				AA[i][0].upper()].get('Fused')}
+			start = {q: tuple(cpx.GetDihedral(q, 'CHI', chi_type=ci + 1)
+				for ci in range(cand[q][2])) for q in ids}
+			tab = None
+			if hasattr(ff, 'elecpairsum') \
+					and 'at_e_idx' in (getattr(ff, '_cache', None) or {}):
+				try: tab = _packtable(cpx, ff, ids, cand, fused, start)
+				except Exception: tab = None
+			T0, T1 = 10.0, 0.1
+			N = int(n_steps if tab is not None else min(n_steps, 25 * len(ids)))
+			if tab is not None:
+				E1, E2 = tab['E1'], tab['E2']
+				nbrs, okf, Kst = tab['nbrs'], tab['ok'], tab['K']
+				state = {q: Kst[q] for q in ids}
+				E_run = 0.0; E_top = 0.0; top = dict(state)
+				for st in range(N):
+					T = T0 * (T1 / T0) ** (st / max(1, N - 1))
+					q = ids[int(rng_r.integers(0, len(ids)))]
+					cum = cand[q][1]
+					k = min(int(np.searchsorted(cum, rng_r.random())),
+						len(cum) - 1)
+					was = state[q]
+					if k == was or not okf[q][k]: continue
+					row = E1[q]
+					dE = float(row[k] - row[was])
+					for j, tbl in nbrs[q]:
+						dE += float(tbl[k, state[j]] - tbl[was, state[j]])
+					if dE <= 0.0 or rng_r.random() < math.exp(
+							-dE / max(T, 1e-12)):
+						state[q] = k; E_run += dE
+						if E_run < E_top: E_top, top = E_run, dict(state)
+				Xr = tab['X0'].copy()
+				for q in ids: Xr[tab['mov'][q]] = tab['xyz'][q][top[q]]
+				cpx.data['Coordinates'] = Xr
+				return len(ids)
+			E_cur = energy(); held = {q: -1 for q in ids}
+			E_top, top = E_cur, dict(held)
+			for st in range(N):
+				T = T0 * (T1 / T0) ** (st / max(1, N - 1))
+				q = ids[int(rng_r.integers(0, len(ids)))]
+				mus, cum, n_chi = cand[q]
+				k = min(int(np.searchsorted(cum, rng_r.random())),
+					len(cum) - 1)
+				if k == held[q]: continue
+				was = held[q]
+				snap = start[q] if was < 0 else None
+				if not _apply(cpx, q, mus[k], n_chi, fused): continue
+				E_try = energy()
+				dE = E_try - E_cur
+				if dE <= 0.0 or rng_r.random() < math.exp(-dE / max(T, 1e-12)):
+					held[q] = k; E_cur = E_try
+					if E_cur < E_top: E_top, top = E_cur, dict(held)
+				else:
+					_apply(cpx, q, mus[was] if was >= 0 else snap,
+						n_chi, fused)
+			for q, k in top.items():
+				_apply(cpx, q, cand[q][0][k] if k >= 0 else start[q],
+					cand[q][2], fused)
+			return len(ids)
+		# Alternate repacking with rigid-body minimisation, the cycle that
+		# Rosetta's high-resolution docking runs. Repacking moves side
+		# chains, so the reference frame the rigid body is measured from is
+		# rebuilt after each pass and the displacement starts again at zero
+		n_repack = 0
+		x_ref, e_ref = x_best, e_best
+		for cyc in range(int(P.get('repack', 0))):
+			cpx.data['Coordinates'] = place(x_ref)
+			n_repack = repackinterface(rng)
+			if not n_repack: break
+			X0 = cpx.data['Coordinates'].copy()
+			c0 = X0[mov].mean(0)
+			x_ref = np.zeros(6)
+			e_ref = fobj(x_ref)
+			x_ref, e_ref, _ = lbfgs(fobj, x_ref, scale, hstep,
+				P['max_iter'], central=True)
+		if not int(P.get('repack', 0)):
+			x_ref, e_ref, _ = lbfgs(fobj, x_best, scale, hstep,
+				P['max_iter'], central=True)
+			if not np.isfinite(e_ref) or e_ref > e_best:
+				x_ref, e_ref = x_best, e_best
+		X_final = place(x_ref)
+		cpx.data['Coordinates'] = X0
+		return {'index': P['index'], 'x': x_ref, 'objective': float(e_ref),
+			'coordinates': X_final,
+			'coordinates_perturbed': X_start,
+			'energies': energies, 'accepted': accepted,
+			'best_step': int(best_step), 'n_exact': int(n_eval),
+			'bonds_changed': {int(k): sorted(int(j) for j in v)
+				for k, v in cpx.data['Bonds'].items()} != P['bonds']}
+	raise ValueError('Dock: unknown task kind %r' % (kind,))
+
+def Dock(pose1, pose2=None, ff=None, centre=None, size=25.0, spacing=0.5,
+		maps=None, chain=None, n_runs=8, n_steps=None, n_poses=9,
+		T=None, min_rmsd=1.0, energy_range=3.0, polish=250,
+		perturb=(3.0, 8.0), repack=False, cpu=1, seed=None, verbose=False):
+	'''
+	Dock a small molecule into a receptor, or refine the placement of one
+	protein chain against another. Ligand docking follows AutoDock Vina
+	(Trott & Olson 2010, J Comput Chem 31:455): the receptor is turned into
+	one affinity map per ligand atom type by scoring a one-atom probe with
+	the Score() function at every grid point, independent Monte Carlo
+	searches with local optimisation after every move run on the maps, and
+	the minima found are rescored, refined and clustered with the exact
+	Score() function, so every reported number is a Score() value.
+	Protein/protein docking is a local rigid-body Monte Carlo refinement of
+	the moving chain about its starting placement, scored by the full
+	energy of the complex, with an optional side-chain repack, in the
+	manner of Rosetta's high-resolution docking (Gray et al. 2003, J Mol
+	Biol 331:281). Blind protein/protein docking is not attempted
+	Arguments:
+	----------
+		pose1:        Receptor Pose. Protein or nucleic acid for a ligand,
+		              protein for a partner chain
+		pose2:        Molecule to dock, or a Pose whose chains are docked
+		              against pose1, or None to move chains of pose1 itself
+		ff:           Score or ForceField. None picks Score('AutoDock Vina')
+		              for a ligand and Score('REF15') for a protein. A
+		              ligand needs a score set with XS atom types; a
+		              protein takes any other Score or any ForceField
+		centre:       Box centre in angstroms, (3,). None centres the box
+		              on the heavy atoms of the ligand as given
+		size:         Box edge in angstroms, a scalar or (3,). The ligand
+		              centroid is confined to the box, its atoms to the box
+		              plus a 4 A margin
+		spacing:      Map grid spacing in angstroms. 0.5 re-docks a ligand
+		              of a dozen torsions; 1.0 builds the maps eight times
+		              faster and suffices for a small, nearly rigid ligand
+		maps:         The 'maps' entry of a previous log on the same
+		              receptor, centre, size and spacing, reused instead of
+		              rebuilt when its key matches
+		chain:        Chain ID or list of IDs of pose1 that move when pose2
+		              is None
+		n_runs:       Independent searches, Vina's exhaustiveness. Each one
+		              is given its own starting site among the most
+		              favourable regions of the maps, so this also sets how
+		              many distinct pockets of the box are examined
+		n_steps:      Monte Carlo steps per search. None uses Vina's count
+		              for a ligand, 70*3*(50 + heavy atoms + 10*(6 +
+		              torsions))/2, and 300 for a protein
+		n_poses:      Poses returned at most
+		T:            Metropolis temperature in the score's own unit. None
+		              is 1.2 for a ligand and 0.8 for a protein
+		min_rmsd:     Cluster radius in angstroms, heavy-atom RMSD for a
+		              ligand and C-alpha RMSD of the moving chain for a
+		              protein, both in the receptor frame
+		energy_range: Poses scoring worse than the best by more than this
+		              are dropped
+		polish:       Metropolis steps run on each candidate against the
+		              exact score, between the two quasi-Newton descents of
+		              the refinement, so that a pose can cross a small
+		              barrier into a neighbouring minimum. 0 disables it.
+		              Ligand mode only
+		perturb:      Protein only, (angstroms, degrees) of the random
+		              rigid-body perturbation each run starts from. None
+		              starts every run at the given placement
+		repack:       Protein only. True alternates three rounds of
+		              repacking the side chains that line the interface
+		              with rigid-body minimisation, which is the cycle
+		              Rosetta's high-resolution docking runs; an integer
+		              sets how many rounds; False or 0 keeps the whole
+		              structure rigid apart from the placement
+		cpu:          Worker processes for the maps, the searches and the
+		              refinements. 1 runs in this process. The result does
+		              not depend on cpu. Workers are started afresh on macOS
+		              and Windows, so a script that calls Dock with cpu > 1
+		              must keep that call under if __name__ == '__main__',
+		              as with any use of multiprocessing
+		seed:         Seed for the random generator, None for unseeded
+		verbose:      True prints progress and the final table
+	Returns:
+	--------
+		float: Score of the best pose, kcal/mol for Vina, the energy of the
+		complex otherwise. The ligand, or the moving chain, is left at that
+		pose
+		dict: Log holding 'poses', a list of dicts best first with
+		'coordinates', 'affinity', 'inter', 'intra', 'objective',
+		'rmsd_to_best', 'run' and 'cluster_size', and for a protein also
+		'interaction', the energy of the complex minus its parts; 'mode';
+		'maps' (ligand) with the grid and its key; 'energies' and
+		'accepted' per run; 'best_step'; 'n_evals_exact'; 'n_evals_grid';
+		'n_torsions' and 'rotatable_bonds' (ligand); 'box'; 'time_maps',
+		'time_search', 'time_refine'; 'coordinates_start'; 'complex'
+		(protein, when pose2 was a Pose)
+	'''
+	t_start = time.perf_counter()
+	if n_runs < 1: raise ValueError('Dock: n_runs must be at least 1')
+	if n_poses < 1: raise ValueError('Dock: n_poses must be at least 1')
+	if polish < 0: raise ValueError('Dock: polish must not be negative')
+	if min_rmsd < 0: raise ValueError('Dock: min_rmsd must not be negative')
+	if n_steps is not None and n_steps < 1:
+		raise ValueError('Dock: n_steps must be at least 1')
+	if cpu < 1: raise ValueError('Dock: cpu must be at least 1')
+	if T is not None and T <= 0: raise ValueError('Dock: T must be positive')
+	kind2 = None if pose2 is None else (getattr(pose2, 'data', None)
+		or {}).get('Type')
+	if pose2 is not None and kind2 not in ('Molecule', 'Protein', 'DNA', 'RNA'):
+		raise ValueError(
+			'Dock: pose2 must be a Molecule (ligand) or a Pose (partner)')
+	mode = 'ligand' if kind2 == 'Molecule' else 'protein'
+	def isff(f): return hasattr(f, '_prepare')
+	def isvina(f):
+		return (not isff(f) and 'XS_atom_types' in getattr(f, 'Parameters', {})
+			and any(t[0] == 'TorsionalPenalty' for t in getattr(f, 'terms', [])))
+	def run(tasks):
+		'''
+		Run engine tasks in this process or in a pool, results in task
+		order either way
+		Arguments:
+		----------
+			tasks: list of (kind, payload) with payload['index'] set
+		Returns:
+		--------
+			list: results ordered by payload['index']
+		'''
+		if cpu == 1 or len(tasks) == 1:
+			res = [_dockworker(t) for t in tasks]
+		else:
+			import multiprocessing
+			with multiprocessing.get_context().Pool(min(int(cpu),
+					len(tasks))) as pool:
+				res = pool.map(_dockworker, tasks, chunksize=1)
+		return sorted(res, key=lambda r: r['index'])
+	def say(msg):
+		if verbose: print(msg, flush=True)
+	ss = np.random.SeedSequence(seed)
+	if mode == 'ligand':
+		if ff is None: ff = Score('AutoDock Vina')
+		if isff(ff):
+			raise ValueError('Dock: a ForceField cannot score a '
+				"receptor/ligand pair, use Score('AutoDock Vina')")
+		if not isvina(ff):
+			raise ValueError('Dock: Score(%r) ignores the ligand, use '
+				"Score('AutoDock Vina')" % (getattr(ff, 'name', '?'),))
+		if not (pose1.data.get('Amino Acids') or pose1.data.get('Nucleotides')):
+			raise ValueError('Dock: pose1 must be an imported or built '
+				'receptor with residues')
+		lig = pose2
+		A, B, BO = lig.data['Atoms'], lig.data['Bonds'], lig.data.get('BondOrders')
+		if not BO or not any(len(v) for v in BO.values()):
+			raise ValueError('Dock: ligand has no bond orders, import it '
+				'from SDF, MOL or MOL2')
+		ids = sorted(A)
+		if ids != list(range(len(ids))):
+			raise ValueError('Dock: ligand atom indices must be contiguous')
+		heavy = [i for i in ids if A[i][1] != 'H']
+		if not heavy: raise ValueError('Dock: ligand has no heavy atoms')
+		if not any(A[i][1] == 'H' for i in sorted(pose1.data['Atoms'])):
+			print('Dock: warning, the receptor carries no hydrogens, so '
+				'nitrogen and oxygen donor typing is degraded; '
+				'pose.ReBuild() adds them')
+		X_in = np.asarray(lig.data['Coordinates'], dtype=np.float64).copy()
+		hv = np.array(heavy, dtype=np.int64)
+		c0 = X_in[hv].mean(0)
+		if centre is None: centre_v = c0.copy()
+		else:
+			centre_v = np.asarray(centre, dtype=np.float64).reshape(-1)
+			if centre_v.shape != (3,):
+				raise ValueError('Dock: centre must be three coordinates')
+		size_v = np.asarray(size, dtype=np.float64).reshape(-1)
+		if size_v.shape == (1,): size_v = np.repeat(size_v, 3)
+		if size_v.shape != (3,) or (size_v <= 0).any():
+			raise ValueError('Dock: size must be a positive edge length '
+				'or three of them')
+		if spacing <= 0 or spacing > size_v.min() / 4.0:
+			raise ValueError('Dock: spacing must be positive and at most '
+				'a quarter of the box')
+		half = size_v / 2.0
+		if (np.abs(X_in[hv] - centre_v) > half + 4.0).any():
+			print('Dock: warning, ligand atoms start outside the box')
+		Xr = np.asarray(pose1.data['Coordinates'], dtype=np.float64)
+		if not (np.abs(Xr - centre_v).max(1) <= half.max() + 8.0).any():
+			print('Dock: warning, no receptor atom within reach of the box')
+		# Rotatable bonds: single, both ends heavy with another heavy
+		# neighbour, not in a ring (bridge test), not an amide C-N
+		hset = set(heavy)
+		def order(i, j):
+			nb = B.get(i, [])
+			if j in nb:
+				k = nb.index(j); ob = BO.get(i, [])
+				if k < len(ob): return ob[k]
+			return 1
+		def reach(start, block, nodes):
+			seen = {start}; q = [start]
+			while q:
+				u = q.pop()
+				for v in B.get(u, []):
+					if v not in nodes or (u, v) == block or (v, u) == block:
+						continue
+					if v not in seen: seen.add(v); q.append(v)
+			return seen
+		def isamide(c, n):
+			if A[c][1] != 'C' or A[n][1] != 'N': return False
+			return any(A[o][1] == 'O' and order(c, o) == 2 for o in B.get(c, []))
+		allset = set(ids)
+		rot = []
+		for i in heavy:
+			for j in B.get(i, []):
+				if j <= i or j not in hset or order(i, j) != 1: continue
+				if not [k for k in B[i] if k in hset and k != j]: continue
+				if not [k for k in B[j] if k in hset and k != i]: continue
+				if i in reach(j, (i, j), hset): continue
+				if isamide(i, j) or isamide(j, i): continue
+				side_j = reach(j, (i, j), allset)
+				side_i = reach(i, (i, j), allset)
+				if len(side_j) <= len(side_i): rot.append((i, j, side_j))
+				else: rot.append((j, i, side_i))
+		# Tree order: anchors sorted by graph distance from the root, the
+		# heavy atom that no torsion moves in the most bonds
+		fixed_count = {i: 0 for i in heavy}
+		for i, j, side in rot:
+			for a in heavy:
+				if a not in side: fixed_count[a] += 1
+		root = max(heavy, key=lambda a: (fixed_count[a], -a))
+		dist = {root: 0}; q = deque([root])
+		while q:
+			u = q.popleft()
+			for v in B.get(u, []):
+				if v not in dist: dist[v] = dist[u] + 1; q.append(v)
+		tors = []
+		for i, j, side in rot:
+			if root in side: i, j, side = j, i, reach(i, (i, j), allset)
+			tors.append((dist.get(i, 0), i, j, np.array(sorted(side),
+				dtype=np.int64)))
+		tors.sort(key=lambda t: (t[0], t[1], t[2]))
+		tors = [(i, j, mov) for _, i, j, mov in tors]
+		ntor = len(tors)
+		# Intra pairs for the grid-stage clash guard: heavy pairs more
+		# than three bonds apart
+		pi_, pj_ = [], []
+		for a in heavy:
+			d = {a: 0}; q = deque([a])
+			while q:
+				u = q.popleft()
+				if d[u] >= 3: continue
+				for v in B.get(u, []):
+					if v not in d: d[v] = d[u] + 1; q.append(v)
+			for b in heavy:
+				if b > a and b not in d: pi_.append(a); pj_.append(b)
+		# Typing and torsion count from one exact call
+		E_in, per = ff(pose1, ligand=lig, decompose=True)
+		cache = getattr(ff, '_cache', None) or {}
+		names = sorted(ff.Parameters['XS_atom_types'])
+		n_r = len(pose1.data['Atoms'])
+		xs_arr = cache.get('xs_types')
+		if xs_arr is None:
+			raise ValueError('Dock: the score function exposes no atom '
+				'typing; a Vina-family Score() is needed')
+		XS = {int(i): names[int(x)] for i, x in enumerate(xs_arr) if x >= 0}
+		XS_r = {i: nm for i, nm in XS.items() if i < n_r}
+		nrot = float(cache.get('nrot', per['_summary'].get('nrot', 0.0)))
+		scl = float(ff.scale)
+		lig_types = sorted({XS[n_r + a] for a in heavy if (n_r + a) in XS})
+		atype_names = [XS.get(n_r + a) for a in heavy]
+		L = {'X0': X_in, 'c0': c0, 'tors': tors, 'centre': centre_v,
+			'heavy': hv, 'intra_i': np.array(pi_, dtype=np.int64),
+			'intra_j': np.array(pj_, dtype=np.int64)}
+		# Maps
+		margin = 4.0
+		lo = centre_v - half - margin
+		npts = np.ceil((2.0 * half + 2.0 * margin) / spacing).astype(int) + 1
+		topo = hash((tuple((int(k), tuple(sorted(int(j) for j in v)))
+			for k, v in sorted(pose1.data['Bonds'].items())),
+			tuple((int(k), tuple(a)) for k, a in sorted(pose1.data['Atoms'].items())),
+			Xr.tobytes(), ff.name))
+		key = (topo, tuple(np.round(centre_v, 6)), tuple(np.round(size_v, 6)),
+			float(spacing))
+		t0 = time.perf_counter()
+		have = {}
+		if maps is not None:
+			if maps.get('key') == key:
+				have = dict(maps.get('types', {}))
+				for t, arr in have.items():
+					if tuple(np.shape(arr)) != tuple(int(n) for n in npts):
+						raise ValueError('Dock: the %s map given has shape '
+							'%r but this box needs %r' % (t, tuple(np.shape(arr)),
+							tuple(int(n) for n in npts)))
+			else: print('Dock: warning, the maps given were built for '
+				'another receptor or box and are rebuilt')
+		need = [t for t in lig_types if t not in have]
+		if need:
+			axes = [lo[d] + spacing * np.arange(npts[d]) for d in range(3)]
+			G = np.stack(np.meshgrid(*axes, indexing='ij'), -1).reshape(-1, 3)
+			n_chunk = max(1, min(64, len(G) // 2000)) if cpu > 1 else 1
+			chunks = np.array_split(np.arange(len(G)), n_chunk)
+			tasks = []
+			for t in need:
+				for ci, c in enumerate(chunks):
+					tasks.append(('maps', {'index': len(tasks), 'type': t,
+						'chunk': ci, 'receptor': pose1, 'sf_name': ff.name,
+						'xs_receptor': XS_r, 'points': G[c]}))
+			say('Dock: building %d maps of %d points (%s)' % (len(need),
+				len(G), ', '.join(need)))
+			res = run(tasks)
+			for t in need: have[t] = np.empty(len(G), dtype=np.float64)
+			for task, r in zip(tasks, res):
+				P = task[1]
+				have[P['type']][chunks[P['chunk']]] = r['values']
+			for t in need: have[t] = have[t].reshape(tuple(npts))
+		maps_out = {'key': key, 'origin': lo.copy(), 'shape': tuple(int(n)
+			for n in npts), 'spacing': float(spacing), 'types': have}
+		t_maps = time.perf_counter() - t0
+		M = np.stack([have[t] for t in lig_types])
+		tidx = {t: k for k, t in enumerate(lig_types)}
+		L['atype'] = np.array([tidx[t] for t in atype_names], dtype=np.int64)
+		# Search
+		if n_steps is None:
+			n_steps_v = int(70 * 3 * (50 + len(heavy) + 10 * (6 + ntor)) / 2)
+		else: n_steps_v = int(n_steps)
+		T_v = 1.2 if T is None else float(T)
+		children = ss.spawn(int(n_runs) + 1)
+		t0 = time.perf_counter()
+		say('Dock: %d searches of %d steps, %d torsions' % (n_runs,
+			n_steps_v, ntor))
+		tasks = [('search', {'index': i, 'ligand': L, 'maps': M, 'lo': lo,
+			'npts': npts, 'spacing': float(spacing), 'half': half,
+			'T': T_v, 'n_steps': n_steps_v, 'min_rmsd': float(min_rmsd),
+			'n_keep': 50, 'seed': children[i]}) for i in range(int(n_runs))]
+		res_search = run(tasks)
+		t_search = time.perf_counter() - t0
+		n_grid = sum(r['n_grid'] for r in res_search)
+		try:
+			# Exact stage
+			t0 = time.perf_counter()
+			cand = []
+			for r in res_search:
+				for e, x in r['reservoir']: cand.append((r['index'], x))
+			def coords(x):
+				return _dockworker(('coords', {'ligand': L, 'x': x}))['coordinates']
+			n_exact = 1
+			exact = []
+			for run_i, x in cand:
+				lig.data['Coordinates'] = coords(x)
+				E, per = ff(pose1, ligand=lig, decompose=True, xs_override=XS,
+					nrot_override=nrot)
+				n_exact += 1
+				s = per['_summary']
+				exact.append((s['inter_total_kJ'] * scl + s['intra_total_kJ'] * scl,
+					run_i, x, lig.data['Coordinates'][hv].copy()))
+			exact.sort(key=lambda t: t[0])
+			def cluster(items, rms):
+				'''
+				Greedy leader clustering in energy order
+				Arguments:
+				----------
+					items: list sorted by energy, each with heavy coordinates
+						at position 3
+					rms:   cluster radius
+				Returns:
+				--------
+					list: (leader item, member count) in energy order
+				'''
+				leaders = []
+				for it in items:
+					for L_ in leaders:
+						if np.sqrt(((L_[0][3] - it[3]) ** 2).sum(1).mean()) < rms:
+							L_[1] += 1; break
+					else: leaders.append([it, 1])
+				return leaders
+			leaders = cluster(exact, float(min_rmsd))[:int(n_poses) + 1]
+			say('Dock: refining %d poses' % len(leaders))
+			tasks = [('refine', {'index': k, 'receptor': pose1, 'ligand_obj': lig,
+				'ligand': L, 'xs': XS, 'nrot': nrot, 'scale': scl, 'half': half,
+				'x': it[2], 'max_iter': 100, 'sf_name': ff.name,
+				'polish': int(polish), 'seed': children[int(n_runs)]})
+				for k, (it, cnt) in enumerate(leaders)]
+			res = run(tasks)
+			n_exact += sum(r['n_exact'] for r in res)
+			refined = []
+			for (it, cnt), r in zip(leaders, res):
+				refined.append((r['objective'], it[1], r['x'], r['coordinates'][hv],
+					r['inter'], r['intra'], r['denom'], r['coordinates'], cnt))
+			refined.sort(key=lambda t: t[0])
+			final = cluster(refined, float(min_rmsd))
+			best_obj = final[0][0][0]
+			intra_best = final[0][0][5]
+			poses = []
+			for it, cnt in final:
+				obj, run_i, x, Xh, inter, intra, denom, Xfull, cnt0 = it
+				if obj > best_obj + float(energy_range): continue
+				if len(poses) >= int(n_poses): break
+				aff = (inter + intra - intra_best) / denom
+				poses.append({'coordinates': Xfull, 'affinity': float(aff),
+					'inter': float(inter), 'intra': float(intra),
+					'objective': float(obj), 'run': int(run_i),
+					'cluster_size': int(cnt + cnt0 - 1),
+					'rmsd_to_best': float(np.sqrt(((Xh - final[0][0][3]) ** 2)
+						.sum(1).mean()))})
+			t_refine = time.perf_counter() - t0
+			lig.data['Coordinates'] = poses[0]['coordinates'].copy()
+			E_best = float(ff(pose1, ligand=lig, xs_override=XS, nrot_override=nrot))
+			n_exact += 1
+		except BaseException:
+			lig.data['Coordinates'] = X_in.copy()
+			raise
+		lig.data['Rg'] = None; lig.data['Energy'] = E_best
+		if verbose:
+			print('Dock: %-5s %-10s %-8s %-6s %-4s' % ('pose', 'affinity',
+				'rmsd', 'size', 'run'))
+			for k, p in enumerate(poses):
+				print('Dock: %-5d %-10.3f %-8.2f %-6d %-4d' % (k + 1,
+					p['affinity'], p['rmsd_to_best'], p['cluster_size'],
+					p['run']))
+		return E_best, {
+			'poses': poses,
+			'mode': 'ligand',
+			'maps': maps_out,
+			'energies': [r['energies'] for r in res_search],
+			'accepted': [r['accepted'] for r in res_search],
+			'best_step': [int(r['best_step']) for r in res_search],
+			'n_torsions': int(ntor),
+			'rotatable_bonds': [(int(i), int(j)) for i, j, _ in tors],
+			'box': (centre_v.copy(), size_v.copy()),
+			'n_evals_exact': int(n_exact),
+			'n_evals_grid': int(n_grid),
+			'time_maps': float(t_maps),
+			'time_search': float(t_search),
+			'time_refine': float(t_refine),
+			'time_total': float(time.perf_counter() - t_start),
+			'coordinates_start': X_in}
+	# Protein/protein mode: local rigid-body refinement of the moving chains
+	if ff is None: ff = Score('REF15')
+	if isvina(ff):
+		raise ValueError("Dock: Score('AutoDock Vina') scores a "
+			'receptor/ligand pair, not two chains')
+	if pose1.data.get('Type') != 'Protein' or not pose1.data.get('Amino Acids'):
+		raise ValueError('Dock: protein/protein mode needs protein poses')
+	if pose2 is not None:
+		if pose2.data.get('Type') != 'Protein' or not pose2.data.get('Amino Acids'):
+			raise ValueError('Dock: protein/protein mode needs protein poses')
+		n1 = len(pose1.data['Amino Acids'])
+		cpx = Concatenate(pose1, pose2)
+		AA = cpx.data['Amino Acids']
+		mov_res = [r for r in sorted(AA) if r >= n1]
+		fix_res = [r for r in sorted(AA) if r < n1]
+		X2 = np.asarray(pose2.data['Coordinates'], dtype=np.float64)
+		mov_chk = [a for r in mov_res for a in AA[r][2] + AA[r][3]]
+		if len(mov_chk) != len(X2) or not np.allclose(
+				cpx.data['Coordinates'][sorted(mov_chk)], X2):
+			raise ValueError('Dock: Concatenate did not preserve the atom '
+				'order of pose2, cannot map the result back')
+	else:
+		if chain is None:
+			raise ValueError('Dock: name the moving chain(s) with chain=')
+		chains = [chain] if isinstance(chain, str) else list(chain)
+		cpx = pose1
+		AA = cpx.data['Amino Acids']
+		present = sorted({AA[r][1] for r in AA})
+		for c in chains:
+			if c not in present:
+				raise ValueError('Dock: chain %r not in pose' % (c,))
+		mov_res = [r for r in sorted(AA) if AA[r][1] in chains]
+		fix_res = [r for r in sorted(AA) if AA[r][1] not in chains]
+		if not fix_res:
+			raise ValueError('Dock: at least one chain must stay fixed')
+	atoms = cpx.data['Atoms']
+	mov = np.array(sorted(a for r in mov_res for a in AA[r][2] + AA[r][3]),
+		dtype=np.int64)
+	fix = np.array(sorted(a for r in fix_res for a in AA[r][2] + AA[r][3]),
+		dtype=np.int64)
+	heavy_mov = np.array([a for a in mov if atoms[a][1] != 'H'], dtype=np.int64)
+	heavy_fix = np.array([a for a in fix if atoms[a][1] != 'H'], dtype=np.int64)
+	sg_mov = np.array([a for a in mov if atoms[a][0] == 'SG'], dtype=np.int64)
+	sg_fix = np.array([a for a in fix if atoms[a][0] == 'SG'], dtype=np.int64)
+	ca_mov = np.array([a for r in mov_res for a in AA[r][2]
+		if atoms[a][0] == 'CA'], dtype=np.int64)
+	X_in = np.asarray(cpx.data['Coordinates'], dtype=np.float64).copy()
+	bonds0 = {int(k): sorted(int(j) for j in v)
+		for k, v in cpx.data['Bonds'].items()}
+	ff_kind = 'ff' if isff(ff) else 'score'
+	if ff_kind == 'ff' and len(sg_mov) and len(sg_fix):
+		d = np.sqrt(((X_in[sg_mov][:, None, :] - X_in[sg_fix][None, :, :]) ** 2)
+			.sum(2)).min()
+		if d < 2.5:
+			raise ValueError('Dock: chains are disulfide-bonded in the input '
+				'(SG-SG %.2f A), a ForceField would bond them' % d)
+	kw = {'grad': False, 'box': None}
+	def energy(p):
+		nonlocal kw
+		try: return float(ff(p, **kw))
+		except TypeError:
+			kw = {}
+			return float(ff(p))
+	def group(p, res_ids):
+		'''
+		Pose holding the chains of one side, split from the complex and
+		re-joined when a side has more than one chain
+		Arguments:
+		----------
+			p:       complex Pose
+			res_ids: residue indices of the side
+		Returns:
+		--------
+			Pose
+		'''
+		chains_ = []
+		for r in res_ids:
+			c = p.data['Amino Acids'][r][1]
+			if c not in chains_: chains_.append(c)
+		parts = [Split(p, chain=c) for c in chains_]
+		out = parts[0]
+		for q in parts[1:]: out = Concatenate(out, q)
+		return out
+	def separated(p):
+		return energy(group(p, fix_res)) + energy(group(p, mov_res))
+	out_, err_ = sys.stdout, sys.stderr
+	sys.stdout = sys.stderr = io.StringIO()
+	try: E_sep = separated(cpx)
+	finally: sys.stdout, sys.stderr = out_, err_
+	T_v = 0.8 if T is None else float(T)
+	n_steps_v = 300 if n_steps is None else int(n_steps)
+	children = ss.spawn(2 * int(n_runs))
+	n_cycles = 3 if repack is True else int(repack or 0)
+	base = {'complex': cpx, 'ff_kind': ff_kind, 'ff_name': ff.name,
+		'repack': n_cycles,
+		'moving': mov, 'fixed': fix, 'sg_moving': sg_mov, 'sg_fixed': sg_fix,
+		'heavy_moving': heavy_mov, 'heavy_fixed': heavy_fix, 'bonds': bonds0,
+		'coordinates': X_in,
+		'T': T_v, 'max_iter': 30}
+	t0 = time.perf_counter()
+	say('Dock: %d rigid-body searches of %d steps on %d moving atoms' % (
+		n_runs, n_steps_v, len(mov)))
+	tasks = [('protein', dict(base, index=i, seed=children[i],
+		n_steps=n_steps_v, perturb=perturb)) for i in range(int(n_runs))]
+	try:
+		res = run(tasks)
+		t_search = time.perf_counter() - t0
+		if any(r['bonds_changed'] for r in res):
+			raise RuntimeError('Dock: the bond graph of the complex changed '
+				'during the search, which the ForceField does when two '
+				'chains come within disulfide range; the input was restored')
+		t0 = time.perf_counter()
+		seps = [E_sep] * len(res)
+		n_exact = sum(r['n_exact'] for r in res)
+		if n_cycles:
+			# Repacking moved side chains, so the energies of the separated
+			# chains are no longer those of the input and are remeasured on
+			# each run's own structure
+			X_keep = cpx.data['Coordinates']
+			for k, r in enumerate(res):
+				cpx.data['Coordinates'] = r['coordinates']
+				sys.stdout = sys.stderr = io.StringIO()
+				try: seps[k] = separated(cpx)
+				finally: sys.stdout, sys.stderr = out_, err_
+			cpx.data['Coordinates'] = X_keep
+		items = sorted(range(len(res)), key=lambda k: res[k]['objective'])
+		leaders = []
+		for k in items:
+			Xk = res[k]['coordinates'][ca_mov]
+			for L_ in leaders:
+				if np.sqrt(((res[L_[0]]['coordinates'][ca_mov] - Xk) ** 2)
+						.sum(1).mean()) < float(min_rmsd):
+					L_[1] += 1; break
+			else: leaders.append([k, 1])
+		best_obj = res[leaders[0][0]]['objective']
+		Xb = res[leaders[0][0]]['coordinates'][ca_mov]
+		poses = []
+		for k, cnt in leaders:
+			r = res[k]
+			if r['objective'] > best_obj + float(energy_range): continue
+			if len(poses) >= int(n_poses): break
+			poses.append({'coordinates': r['coordinates'],
+				'coordinates_perturbed': r['coordinates_perturbed'],
+				'affinity': float(r['objective']),
+				'objective': float(r['objective']),
+				'interaction': float(r['objective'] - seps[k]),
+				'inter': float(r['objective'] - seps[k]), 'intra': float(seps[k]),
+				'run': int(k), 'cluster_size': int(cnt),
+				'rmsd_to_best': float(np.sqrt(((r['coordinates'][ca_mov] - Xb)
+					** 2).sum(1).mean()))})
+		t_refine = time.perf_counter() - t0
+		best = res[leaders[0][0]]
+		cpx.data['Coordinates'] = best['coordinates'].copy()
+		E_best = energy(cpx)
+		n_exact += 1
+	except BaseException:
+		cpx.data['Coordinates'] = X_in
+		raise
+	if pose2 is not None:
+		pose2.data['Coordinates'] = cpx.data['Coordinates'][mov].copy()
+	cpx.data['Energy'] = E_best
+	if verbose:
+		print('Dock: %-5s %-12s %-12s %-8s %-6s %-4s' % ('pose', 'E(AB)',
+			'interaction', 'rmsd', 'size', 'run'))
+		for k, p in enumerate(poses):
+			print('Dock: %-5d %-12.3f %-12.3f %-8.2f %-6d %-4d' % (k + 1,
+				p['affinity'], p['interaction'], p['rmsd_to_best'],
+				p['cluster_size'], p['run']))
+	return E_best, {
+		'poses': poses,
+		'mode': 'protein',
+		'complex': cpx,
+		'moving_atoms': mov,
+		'energies': [r['energies'] for r in res],
+		'accepted': [r['accepted'] for r in res],
+		'best_step': [int(r['best_step']) for r in res],
+		'n_evals_exact': int(n_exact),
+		'n_evals_grid': 0,
+		'E_separated': float(E_sep),
+		'time_maps': 0.0,
+		'time_search': float(t_search),
+		'time_refine': float(t_refine),
+		'time_total': float(time.perf_counter() - t_start),
+		'coordinates_start': X_in}
+
 def Port(name='openff', accept_rosetta_license=False):
 	'''
 	Download one force field or score function from its pinned upstream
