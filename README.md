@@ -1,5 +1,5 @@
 # Pose
-A bare-metal Python library for building and manipulating the molecular structures of proteins, nucleic acids, and small organic molecules
+A bare-metal Python library for building and manipulating the molecular structures of proteins, nucleic acids, and small organic molecules.
 
 ![Python >= 3](https://img.shields.io/badge/python-%3E%3D3-blue)
 ![NumPy](https://img.shields.io/badge/dependency-NumPy-orange)
