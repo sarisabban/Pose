@@ -332,7 +332,7 @@ A hash of the bond graph + atom records + amino-acid assignments is cached, so r
 
 | Method                                                                          | Description |
 |---------------------------------------------------------------------------------|-------------|
-| `ff = ForceField(name='Default', strict=False)`                                 | Build a force field. `name` is any key in `database.json['Energy Parameters']`, case-insensitive: `Default` and `OpenFF` ship, `Port()` adds `ff19SB` and `CHARMM36`. `strict=True` raises `RuntimeError` on a SMIRKS coverage gap, `strict=False` leaves the gap at zero |
+| `ff = ForceField(name='Default', strict=True)`                                  | Build a force field. `name` is any key in `database.json['Energy Parameters']`, case-insensitive: `Default` and `OpenFF` ship, `Port()` adds `ff19SB` and `CHARMM36`. `strict=True` raises `RuntimeError` on a SMIRKS coverage gap, `strict=False` leaves the gap at zero |
 | `E = ff(pose, grad=False, box=None, v=False)`                                   | Total potential energy in kJ/mol. `grad=False` returns a float, `grad=True` returns `(E, F)` with forces `(N, 3)` in kJ/mol/Å. `box=None` disables PBC, a `(3,)` array is an orthorhombic box, a `(3, 3)` array is triclinic, both in Å. `v=True` prints SMIRKS patterns that matched nothing |
 | `E, F = ff(pose, grad=True, box=None)`                                          | Same call with `grad=True`, returning energy plus analytic per-atom forces |
 | `ff.BondPotential(pose, cache, alg='harmonic', grad=True, box=None)`            | Bond stretching. `alg='harmonic'` is `Σ K_b·(r − r₀)²`, `alg='morse'` is `Σ D_e·(1 − e^(−a(r − r₀)))²` |
@@ -653,7 +653,7 @@ Come ask questions, share what you've built with Pose, or discuss contributions.
 
 If Pose is useful in your research, please cite it. The repository ships a `CITATION.cff` file at the project root with the canonical citation metadata; GitHub's "Cite this repository" button and most reference managers (Zotero, Mendeley) can import it directly. The current entry is:
 
-> Sabban, S. *Pose: A bare metal Python library for building and manipulating protein molecular structures.* 2023. https://github.com/sarisabban/Pose (ORCID: [0000-0002-9621-2395](https://orcid.org/0000-0002-9621-2395))
+> Sabban, S. *Pose: A bare metal Python library for building and manipulating protein molecular structures.* 2026. https://github.com/sarisabban/Pose (ORCID: [0000-0002-9621-2395](https://orcid.org/0000-0002-9621-2395))
 
 ---
 

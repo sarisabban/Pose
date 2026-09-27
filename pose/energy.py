@@ -18,7 +18,7 @@ class ForceField():
 	_VALSET = {'C': (4,), 'N': (3,), 'O': (2,), 'S': (2, 4, 6),
 				'P': (3, 5), 'Se': (2, 4, 6), 'F': (1,), 'Cl': (1,),
 				'Br': (1,), 'I': (1,), 'B': (3,)}
-	def __init__(self, name='Default', strict=False):
+	def __init__(self, name='Default', strict=True):
 		'''
 		Initialise the force field with a named parameter set from database.json
 		Arguments:
@@ -29,9 +29,9 @@ class ForceField():
 				Selects both the SMIRKS-keyed parameter sections and the
 				list of potential methods to evaluate (from `Terms`
 				sub-key)
-			strict: if True, raise RuntimeError on any SMIRKS coverage gap
-				(unmatched bond/angle/torsion/improper centre/atom). If
-				False (default), warn but continue with K=0 fall-through.
+			strict: if True (default), raise RuntimeError on any SMIRKS coverage
+				gap (unmatched bond/angle/torsion/atom). If False, warn but
+				continue with K=0 fall-through.
 		Returns:
 		--------
 			None: instance is configured in-place
@@ -238,16 +238,6 @@ class ForceField():
 						quad = (x, i, j, y) if i < j else (y, j, i, x)
 						if quad not in matched_propers:
 							gaps.append(f'torsion {nms[x]}-{nms[i]}-{nms[j]}-{nms[y]}')
-		if self.Parameters.get('improper_style',
-			'smirnoff') == 'smirnoff':
-			matched_centres = {tup[0]
-				for tup in assigns['impropers']}
-			matched_centres |= {tup[2]
-				for tup in assigns['impropers']}
-			for c in atoms_set:
-				if (len(nbr_local[c]) == 3
-					and c not in matched_centres):
-					gaps.append(f'improper centre {nms[c]}')
 		for i in atoms_set:
 			if assigns['vdw'].get(i) is None:
 				gaps.append(f'vdW atom {nms[i]}')
@@ -264,7 +254,7 @@ class ForceField():
 			if self.strict:
 				raise RuntimeError(msg)
 			if id(pose) not in self._warned_poses:
-				if v: print(msg)
+				warnings.warn(msg, RuntimeWarning)
 				self._warned_poses.add(id(pose))
 		constraints = assigns.get('constraints', set())
 		bond_Kb = np.zeros(len(pairs)); bond_r0 = np.zeros(len(pairs))

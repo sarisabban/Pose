@@ -8178,7 +8178,7 @@ def _dockworker(task):
 	if kind == 'protein':
 		cpx = P['complex']
 		if P['ff_kind'] == 'score': ff = Score(P['ff_name'])
-		else: ff = ForceField(P['ff_name'])
+		else: ff = ForceField(P['ff_name'], strict=P['ff_strict'])
 		mov, fix = P['moving'], P['fixed']
 		sg_mov, sg_fix = P['sg_moving'], P['sg_fixed']
 		heavy_mov, heavy_fix = P['heavy_moving'], P['heavy_fixed']
@@ -8944,6 +8944,7 @@ def Dock(pose1, pose2=None, ff=None, centre=None, size=25.0, spacing=0.5,
 	children = ss.spawn(2 * int(n_runs))
 	n_cycles = 3 if repack is True else int(repack or 0)
 	base = {'complex': cpx, 'ff_kind': ff_kind, 'ff_name': ff.name,
+		'ff_strict': getattr(ff, 'strict', True),
 		'repack': n_cycles,
 		'moving': mov, 'fixed': fix, 'sg_moving': sg_mov, 'sg_fixed': sg_fix,
 		'heavy_moving': heavy_mov, 'heavy_fixed': heavy_fix, 'bonds': bonds0,

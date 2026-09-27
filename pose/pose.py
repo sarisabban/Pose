@@ -2154,8 +2154,7 @@ class Pose():
 			'Coordinates': np.zeros((0, 3))}
 		co = chain if chain is not None else sorted({k[0] for k in residues})
 		sk = sorted(residues,
-			key=lambda k: (
-				co.index(k[0]) if k[0] in co else 99, k[1], k[2]))
+			key=lambda k: co.index(k[0]) if k[0] in co else 99)
 		if mol == 'Protein':
 			At, Am, Co = {}, {}, []
 			count, ai = 0, 0
