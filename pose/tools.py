@@ -1152,6 +1152,236 @@ def Concatenate(pose1, pose2, fuse=False):
 	new._update()
 	return new
 
+def Complementarity(pose1, pose2=None, chain=None, RP=1.7):
+	'''
+	Shape correlation statistic Sc of Lawrence & Colman (1993, J. Mol.
+	Biol. 234:946-950) for the interface between two proteins A and B.
+	Arguments:
+	----------
+		pose1: Protein Pose. Without pose2 it holds both molecules and
+			chain names the second one
+		pose2: Protein Pose of the second molecule
+		chain: Chain ID, or list of chain IDs, of pose1 that make up the
+			second molecule when pose2 is not given; all other chains
+			make up the first
+	Returns:
+	--------
+		tuple: (Sc, area) where area is the buried interface area in
+		square angstroms left after the 1.5 A exclusion, summed over both
+		surfaces
+	'''
+	DENS, W, BAND = 15.0, 0.5, 1.5
+	F = DBLoad()['Energy Parameters']
+	F = next((F[k]['vdW'] for k in F if k.lower() == 'openff'), None)
+	if F is None: raise Exception('The OpenFF vdW parameters are missing')
+	Z = {'C': 6, 'N': 7, 'O': 8, 'F': 9, 'P': 15, 'S': 16, 'Cl': 17,
+		'Se': 34, 'Br': 35, 'I': 53}
+	def Heavy(p, keep):
+		aas = p.data.get('Amino Acids')
+		if not aas: raise Exception('Complementarity needs protein poses')
+		atoms, X = p.data['Atoms'], p.data['Coordinates']
+		out = []
+		for r in sorted(aas):
+			if not keep(aas[r][1]): continue
+			for a in aas[r][2] + aas[r][3]:
+				el = atoms[a][1].capitalize()
+				if el in ('H', 'D'): continue
+				v = F.get(f'[#{Z.get(el)}:1]')
+				if v is None:
+					raise Exception(f'No OpenFF radius for element {el}')
+				out.append((v['r'], X[a]))
+		return out
+	if pose2 is not None:
+		mols = [Heavy(pose1, lambda c: True), Heavy(pose2, lambda c: True)]
+	elif chain is not None:
+		chs = [chain] if isinstance(chain, str) else list(chain)
+		mols = [Heavy(pose1, lambda c: c not in chs),
+			Heavy(pose1, lambda c: c in chs)]
+	else: raise Exception('Give pose2, or the chain of pose1 to separate')
+	if not mols[0] or not mols[1]: raise Exception('A molecule has no atoms')
+	R = np.array([r for mol in mols for r, xyz in mol], float)
+	X = np.array([xyz for mol in mols for r, xyz in mol], float)
+	M = np.array([m for m, mol in enumerate(mols) for _ in mol])
+	E = R + RP
+	EM = E.max()
+	CUT1 = 2 * EM + 2 * RP + BAND
+	CUT2 = CUT1 + 2 * EM
+	def Pairs(P, Q, cut):
+		I, J, D = [np.zeros(0, int)], [np.zeros(0, int)], [np.zeros(0)]
+		if not len(P) or not len(Q): return I[0], J[0], D[0]
+		lo = np.minimum(P.min(0), Q.min(0))
+		kq = np.floor((Q - lo) / cut).astype(np.int64) + 1
+		dim = np.maximum(kq.max(0),
+			np.floor((P.max(0) - lo) / cut).astype(np.int64) + 1) + 2
+		code = lambda k: (k[:, 0] * dim[1] + k[:, 1]) * dim[2] + k[:, 2]
+		o = np.argsort(code(kq), kind='stable')
+		cs = code(kq)[o]
+		for b in range(0, len(P), 20000):
+			Pb = P[b:b + 20000]
+			kp = np.floor((Pb - lo) / cut).astype(np.int64) + 1
+			for off in np.array(np.meshgrid([-1, 0, 1], [-1, 0, 1],
+				[-1, 0, 1])).reshape(3, -1).T:
+				c = code(kp + off)
+				s = np.searchsorted(cs, c)
+				n = np.searchsorted(cs, c, 'right') - s
+				i = np.repeat(np.arange(len(Pb)), n)
+				j = o[np.arange(n.sum()) - np.repeat(np.cumsum(n) - n, n)
+					+ np.repeat(s, n)]
+				d2 = ((Pb[i] - Q[j]) ** 2).sum(1)
+				k = d2 < cut * cut
+				I.append(i[k] + b); J.append(j[k]); D.append(d2[k])
+		return np.concatenate(I), np.concatenate(J), np.concatenate(D)
+	def Hit(P, Q, lim):
+		i, j, d2 = Pairs(P, Q, lim.max())
+		out = np.zeros(len(P), bool)
+		out[i[d2 < lim[j] ** 2]] = True
+		return out
+	def Sphere(n):
+		k = np.arange(n) + 0.5
+		z = 1 - 2 * k / n
+		r, a = np.sqrt(1 - z * z), np.pi * (3 - np.sqrt(5)) * k
+		return np.stack([r * np.cos(a), r * np.sin(a), z], 1)
+	def Unit(v):
+		return v / np.linalg.norm(v, axis=-1, keepdims=True)
+	def Ragged(n):
+		own = np.repeat(np.arange(len(n)), n)
+		return own, np.arange(n.sum()) - np.repeat(np.cumsum(n) - n, n)
+	surf = []
+	for m in (0, 1):
+		A, B = np.nonzero(M == m)[0], np.nonzero(M != m)[0]
+		Xa, Ea, Ra = X[A], E[A], R[A]
+		i, j, d2 = Pairs(Xa, X[B], CUT2)
+		dB = np.full(len(A), np.inf)
+		np.minimum.at(dB, i, np.sqrt(d2))
+		in1, in2 = dB < CUT1, dB < CUT2
+		free = lambda C: ~Hit(C, Xa, Ea - 1e-9)
+		pts, nml, area, prb, kind = [], [], [], [], []
+		probes = []
+		for a in np.nonzero(in2)[0]:
+			n = max(1, int(round(DENS * 4 * np.pi * Ra[a] ** 2)))
+			u = Sphere(n)
+			C = Xa[a] + Ea[a] * u
+			k = free(C)
+			probes.append(C[k])
+			if in1[a]:
+				pts.append(Xa[a] + Ra[a] * u[k]); nml.append(u[k])
+				area.append(np.full(k.sum(), 4 * np.pi * Ra[a] ** 2 / n))
+				prb.append(C[k]); kind.append(np.zeros(k.sum(), int))
+		i, j, d2 = Pairs(Xa, Xa, 2 * EM)
+		d = np.sqrt(d2)
+		sas = (i < j) & (d < Ea[i] + Ea[j]) & (d > np.abs(Ea[i] - Ea[j]))
+		o = np.lexsort((j[sas], i[sas]))
+		ni, nj = i[sas][o], j[sas][o]
+		g = sas & (in2[i] | in2[j])
+		pi, pj, d = i[g], j[g], d[g]
+		u = (Xa[pj] - Xa[pi]) / d[:, None]
+		x0 = (d * d + Ea[pi] ** 2 - Ea[pj] ** 2) / (2 * d)
+		t = Xa[pi] + u * x0[:, None]
+		rho = np.sqrt(np.maximum(Ea[pi] ** 2 - x0 * x0, 0))
+		h = np.where(np.abs(u[:, :1]) < 0.9, [[1.0, 0, 0]], [[0, 1.0, 0]])
+		e1 = Unit(np.cross(u, h))
+		e2 = np.cross(u, e1)
+		nt = np.maximum(3, np.ceil(2 * np.pi * rho * np.sqrt(DENS))).astype(int)
+		p, k = Ragged(nt)
+		th = (k + 0.5) * 2 * np.pi / nt[p]
+		C = t[p] + rho[p, None] * (np.cos(th)[:, None] * e1[p]
+			+ np.sin(th)[:, None] * e2[p])
+		g = free(C)
+		p, C = p[g], C[g]
+		probes.append(C)
+		g = in1[pi[p]] | in1[pj[p]]
+		p, C = p[g], C[g]
+		vi = (Xa[pi[p]] - C) / Ea[pi[p], None]
+		vj = (Xa[pj[p]] - C) / Ea[pj[p], None]
+		phi = np.arccos(np.clip((vi * vj).sum(1), -1, 1))
+		g = phi > 1e-6
+		p, C, vi, vj, phi = p[g], C[g], vi[g], vj[g], phi[g]
+		nf = np.maximum(1, np.ceil(phi * RP * np.sqrt(DENS))).astype(int)
+		q, k = Ragged(nf)
+		s = (k + 0.5) / nf[q]
+		v = (np.sin((1 - s) * phi[q])[:, None] * vi[q]
+			+ np.sin(s * phi[q])[:, None] * vj[q]) / np.sin(phi[q])[:, None]
+		Y = C[q] + RP * v
+		w = Y - t[p[q]]
+		ax = np.linalg.norm(w - (w * u[p[q]]).sum(1)[:, None] * u[p[q]],
+			axis=1)
+		pts.append(Y); nml.append(-v); prb.append(C[q])
+		kind.append(np.ones(len(Y), int))
+		area.append(RP * ax * (phi[q] / nf[q]) * 2 * np.pi / nt[p[q]])
+		start = np.searchsorted(ni, np.arange(len(A) + 1))
+		cnt = start[pi + 1] - start[pi]
+		q, k = Ragged(cnt)
+		kk = nj[start[pi[q]] + k]
+		g = kk > pj[q]
+		q, kk = q[g], kk[g]
+		allkey = np.sort(ni * len(A) + nj)
+		c2 = pj[q] * len(A) + kk
+		g = allkey[np.minimum(np.searchsorted(allkey, c2), len(allkey) - 1)] \
+			== c2
+		t1, t2, t3 = pi[q][g], pj[q][g], kk[g]
+		a1, a2, a3 = Xa[t1], Xa[t2], Xa[t3]
+		r1, r2, r3 = Ea[t1], Ea[t2], Ea[t3]
+		dd = np.linalg.norm(a2 - a1, axis=1)
+		ex = (a2 - a1) / dd[:, None]
+		ii = ((a3 - a1) * ex).sum(1)
+		ey = a3 - a1 - ii[:, None] * ex
+		jj = np.linalg.norm(ey, axis=1)
+		g = jj > 1e-9
+		t1, t2, t3, a1, r1, r2, r3, dd, ex, ii, ey, jj = (z[g] for z in (
+			t1, t2, t3, a1, r1, r2, r3, dd, ex, ii, ey, jj))
+		ey = ey / jj[:, None]
+		ez = np.cross(ex, ey)
+		x = (r1 ** 2 - r2 ** 2 + dd ** 2) / (2 * dd)
+		y = (r1 ** 2 - r3 ** 2 + ii ** 2 + jj ** 2) / (2 * jj) - ii / jj * x
+		z2 = r1 ** 2 - x * x - y * y
+		g = z2 > 0
+		base = a1[g] + x[g, None] * ex[g] + y[g, None] * ey[g]
+		zz = np.sqrt(z2[g])[:, None] * ez[g]
+		tri = np.concatenate([np.stack([t1, t2, t3], 1)[g]] * 2)
+		C = np.concatenate([base + zz, base - zz])
+		g = free(C) & in2[tri].any(1)
+		tri, C = tri[g], C[g]
+		probes.append(C)
+		g = in1[tri].any(1)
+		tri, C = tri[g], C[g]
+		nc = int(round(DENS * 4 * np.pi * RP ** 2))
+		V = Sphere(nc)
+		for b in range(0, len(C), 2000):
+			cb, tb = C[b:b + 2000], tri[b:b + 2000]
+			v = (Xa[tb] - cb[:, None]) / Ea[tb][:, :, None]
+			sg = np.sign((np.cross(v[:, 0], v[:, 1]) * v[:, 2]).sum(1))
+			ins = np.ones((len(cb), nc), bool)
+			for x0, x1 in ((0, 1), (1, 2), (2, 0)):
+				ins &= (np.cross(v[:, x0], v[:, x1]) @ V.T) * sg[:, None] >= 0
+			r, c = np.nonzero(ins)
+			pts.append(cb[r] + RP * V[c]); nml.append(-V[c]); prb.append(cb[r])
+			area.append(np.full(len(r), 4 * np.pi * RP ** 2 / nc))
+			kind.append(np.full(len(r), 2))
+		pts, nml, area, prb, kind = (np.concatenate(z) for z in (pts, nml,
+			area, prb, kind))
+		probes = np.concatenate(probes)
+		re = np.nonzero(kind > 0)[0]
+		bad = Hit(pts[re], probes, np.full(len(probes), RP - 1e-7))
+		k = np.ones(len(pts), bool)
+		k[re[bad]] = False
+		pts, nml, area, prb = pts[k], nml[k], area[k], prb[k]
+		bur = Hit(prb, X[B], E[B])
+		near = Hit(pts[bur], pts[~bur], np.full((~bur).sum(), BAND))
+		keep = np.nonzero(bur)[0][~near]
+		if not len(keep): raise Exception(f'No buried surface on molecule {m}')
+		surf.append((pts[keep], nml[keep], area[keep]))
+	med = []
+	for m in (0, 1):
+		(xa, na, _), (xb, nb, _) = surf[m], surf[1 - m]
+		sv = np.empty(len(xa))
+		for b in range(0, len(xa), 512):
+			d2 = ((xa[b:b + 512, None] - xb[None]) ** 2).sum(2)
+			k = d2.argmin(1)
+			sv[b:b + 512] = -(na[b:b + 512] * nb[k]).sum(1) * np.exp(
+				-W * d2[np.arange(len(k)), k])
+		med.append(np.median(sv))
+	return (med[0] + med[1]) / 2, float(surf[0][2].sum() + surf[1][2].sum())
+
 def Translate(sequence, fmt='protein', organism='ecoli',
 		src=None):
 	'''
