@@ -1408,6 +1408,181 @@ def Complementarity(pose1, pose2=None, chain=None, RP=1.7):
 	area = float(surfs[0][0][2].sum() + surfs[0][1][2].sum())
 	return (med[0] + med[1]) / 2, area, cms[0], cms[1]
 
+def BuriedUnsatisfiedHbonds(pose, chain=None, RP=1.4, waters=None):
+	'''
+	Buried polar nitrogen and oxygen atoms that form no hydrogen bond, after
+	McDonald & Thornton (1994, J. Mol. Biol. 238:777-793), with the
+	modifications listed in the Pose documentation
+	Arguments:
+	----------
+		pose:  Protein Pose
+		chain: Chain ID, or list of chain IDs, that make up one side of an
+			interface. When given, only polar atoms buried by the
+			interface (accessible in their own side alone, buried in
+			the complex) are reported
+		RP:    Probe radius in angstroms, 1.4 being the water probe
+		waters: Optional (N, 3) coordinates of crystal water oxygens, used
+			as hydrogen bond partners that both donate and accept, but
+			not in the accessibility calculation
+	Returns:
+	--------
+		tuple: (count, atoms) where atoms is a list of (residue index,
+		atom name) of the buried unsatisfied polar atoms
+	'''
+	aas = pose.data.get('Amino Acids')
+	if not aas: raise Exception('BuriedUnsatisfiedHbonds needs a protein pose')
+	atoms, bonds = pose.data['Atoms'], pose.data['Bonds']
+	orders = pose.data['BondOrders']
+	res = {a: r for r in aas for a in aas[r][2] + aas[r][3]}
+	ids = [a for a in sorted(res) if atoms[a][1].upper() not in ('H', 'D')]
+	el = [atoms[a][1].capitalize() for a in ids]
+	if any(e not in ('C', 'N', 'O', 'S', 'Se') for e in el):
+		raise Exception('No Chothia radius for '
+			f'{set(el) - {"C", "N", "O", "S", "Se"}}')
+	at = {a: k for k, a in enumerate(ids)}
+	X = pose.data['Coordinates'][ids].astype(float)
+	nb = [[at[b] for b in bonds.get(a, []) if b in at] for a in ids]
+	bo = [[o for b, o in zip(bonds.get(a, []), orders.get(a, [])) if b in at]
+		for a in ids]
+	E = np.array([1.40 if e == 'O' else 1.85 if e in ('S', 'Se') else
+		(1.50 if len(nb[k]) == 1 and bo[k][0] == 1 else 1.65) if e == 'N' else
+		1.76 if atoms[ids[k]][5] == 'sp2' else 1.87
+		for k, e in enumerate(el)]) + RP
+	def Near(P, Q, cut):
+		I, J = [np.zeros(0, int)], [np.zeros(0, int)]
+		for b in range(0, len(P), 256):
+			d2 = ((P[b:b + 256, None] - Q[None]) ** 2).sum(-1)
+			i, j = np.nonzero(d2 < cut * cut)
+			I.append(i + b); J.append(j)
+		return np.concatenate(I), np.concatenate(J)
+	def Exposed(sel, pool):
+		out = np.zeros(len(sel), bool)
+		i, j = Near(X[sel], X[pool], 2 * E.max())
+		j = pool[j]
+		g = (sel[i] != j) & (((X[sel[i]] - X[j]) ** 2).sum(1)
+			< (E[sel[i]] + E[j]) ** 2)
+		i, j = i[g], j[g]
+		for n, a in enumerate(sel):
+			J = j[i == n]
+			z = X[a, 2] - E[a] + 0.05 * (np.arange(int(2 * E[a] / 0.05)) + 0.5)
+			r = np.sqrt(np.maximum(E[a] ** 2 - (z - X[a, 2]) ** 2, 0))
+			rj = np.sqrt(np.maximum(E[J] ** 2 - (z[:, None] - X[J, 2]) ** 2, 0))
+			dx, dy = X[J, 0] - X[a, 0], X[J, 1] - X[a, 1]
+			d, t = np.hypot(dx, dy), np.arctan2(dy, dx)
+			for s in range(len(z)):
+				if np.any((rj[s] > 0) & (d + r[s] <= rj[s])): continue
+				k = (rj[s] > 0) & (d < r[s] + rj[s]) & (d > np.abs(r[s]-rj[s]))
+				if not k.any():
+					out[n] = True
+					break
+				f = np.arccos(np.clip((r[s] ** 2 + d[k] ** 2 - rj[s, k] ** 2)
+					/ (2 * r[s] * d[k]), -1, 1))
+				lo = (t[k] - f) % (2 * np.pi)
+				hi = lo + 2 * f
+				lo = np.concatenate([lo, lo - 2 * np.pi])
+				hi = np.concatenate([hi, hi - 2 * np.pi])
+				o = np.argsort(lo)
+				lo, cm = lo[o], np.maximum.accumulate(hi[o])
+				prev = np.concatenate([[-np.inf], cm[:-1]])
+				if (np.any((lo > prev) & (lo > 0) & (prev < 2 * np.pi))
+					or cm[-1] < 2 * np.pi):
+					out[n] = True
+					break
+		return out
+	def Angle(a, b, c):
+		u, v = a - b, c - b
+		return np.degrees(np.arccos(np.clip(np.dot(u, v) / (np.linalg.norm(u)
+			* np.linalg.norm(v)), -1, 1)))
+	def Put(a, b, c, L, th, ph):
+		bc = (c - b) / np.linalg.norm(c - b)
+		n = np.cross(b - a, bc)
+		n = n / (np.linalg.norm(n) + 1e-12)
+		th, ph = np.radians(th), np.radians(ph)
+		return c + L * (-np.cos(th) * bc + np.sin(th) * np.cos(ph)
+			* np.cross(n, bc) + np.sin(th) * np.sin(ph) * n)
+	don, acc, polar = {}, set(), set()
+	for d, a in enumerate(ids):
+		e, name, m = el[d], atoms[a][0], len(nb[d])
+		his = aas[res[a]][0].upper() == 'H' and e == 'N' and name != 'N'
+		if e in ('O', 'S') or his: acc.add(d)
+		if e in ('N', 'O'): polar.add(d)
+		if e == 'N' and m >= 3: polar.discard(d); continue
+		if e == 'N' and m == 2 and (max(bo[d]) > 1 or his):
+			dd, ddd = nb[d]
+			if name == 'N' and atoms[ids[ddd]][0] == 'CA': dd, ddd = ddd, dd
+			th = (360 - Angle(X[dd], X[d], X[ddd])) / 2
+			th -= 2 if name == 'N' and atoms[ids[dd]][0] == 'CA' else 0
+			don[d] = ('fix', [Put(X[ddd], X[dd], X[d], 1.0, th, 180)])
+		elif e == 'N' and m == 1:
+			dd = nb[d][0]
+			ddd = next((x for x in nb[dd] if x != d), None)
+			ref = X[ddd] if ddd is not None else X[dd] + [1.0, 0, 0]
+			if bo[d][0] > 1:
+				don[d] = ('fix', [Put(ref, X[dd], X[d], 1.0, 120, p)
+					for p in (0, 180)])
+			else:
+				don[d] = ('fix', [Put(ref, X[dd], X[d], 1.014, 110, p)
+					for p in (180, 60, -60)])
+		elif e in ('O', 'S') and m == 1 and bo[d][0] == 1:
+			dd = nb[d][0]
+			L, th = (1.0, 110) if e == 'O' else (1.33, 96)
+			ddd = next((x for x in nb[dd] if x != d), None)
+			if e == 'O' and atoms[ids[dd]][5] == 'sp2' and ddd is not None:
+				don[d] = ('alt', [Put(X[ddd], X[dd], X[d], L, th, p)
+					for p in (0, 180)])
+			else: don[d] = ('arc', (dd, L, th))
+		elif e == 'N':
+			don[d] = ('line', 4 - m)
+	if waters is not None:
+		w0 = len(X)
+		X = np.vstack([X, np.asarray(waters, float).reshape(-1, 3)])
+		for w in range(w0, len(X)):
+			el.append('O'); nb.append([]); bo.append([])
+			don[w] = ('line', 2)
+			acc.add(w)
+	gave, took, best, pool = set(), set(), {}, {}
+	D = np.array(sorted(don), int)
+	A = np.array(sorted(acc), int)
+	if len(D) and len(A):
+		i, j = Near(X[D], X[A], 3.9)
+		for d, a in zip(D[i], A[j]):
+			if d == a: continue
+			kind, v = don[d]
+			if kind in ('fix', 'alt'): Hs = v
+			elif kind == 'arc': Hs = [Put(X[a], X[v[0]], X[d], v[1], v[2], 0)]
+			else: Hs = [X[d] + (X[a] - X[d]) / np.linalg.norm(X[a] - X[d])]
+			for k, h in enumerate(Hs):
+				r = np.linalg.norm(h - X[a])
+				if r >= 2.4: continue
+				if Angle(X[d],h,X[a])<=(120 if el[d] == 'N' else 110): continue
+				if any(Angle(X[d], X[a], X[x]) <= 90
+					or Angle(h, X[a], X[x]) <= 90 for x in nb[a]): continue
+				if kind == 'fix':
+					if (d, k) not in best or r < best[(d, k)][0]:
+						best[(d, k)] = (r, a)
+				else:
+					c = pool.setdefault(d, {})
+					c[a] = min(r, c.get(a, r))
+	for (d, k), (r, a) in best.items():
+		gave.add(d); took.add(a)
+	for d, c in pool.items():
+		for a in sorted(c, key=c.get)[:don[d][1] if don[d][0] == 'line' else 1]:
+			gave.add(d); took.add(a)
+	P = np.array([d for d in sorted(polar) if not ((d in gave and d in took)
+		if el[d] == 'O' and d in don else (d in gave or d in took))], int)
+	allat = np.arange(len(ids))
+	buried = ~Exposed(P, allat)
+	if chain is not None:
+		chs = [chain] if isinstance(chain, str) else list(chain)
+		side = np.array([aas[res[a]][1] in chs for a in ids])
+		if side.all() or not side.any():
+			raise Exception('The chains do not split the pose in two')
+		for s in (side, ~side):
+			g = buried & s[P]
+			buried[g] = Exposed(P[g], allat[s])
+	out = [(res[ids[d]], atoms[ids[d]][0]) for d in P[buried]]
+	return len(out), out
+
 def Translate(sequence, fmt='protein', organism='ecoli',
 		src=None):
 	'''
