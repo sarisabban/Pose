@@ -4,6 +4,7 @@ A pure-NumPy, chirality-aware, structural engine for building and manipulating t
 ![Python >= 3](https://img.shields.io/badge/python-%3E%3D3-blue)
 ![NumPy](https://img.shields.io/badge/dependency-NumPy-orange)
 ![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue.svg)
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.23016599.svg)](https://doi.org/10.5281/zenodo.23016599)
 
 <img src="pose/Video1.gif" width="25%"/><img src="pose/Video2.gif" width="25%"/><img src="pose/Video3.gif" width="25%"/><img src="pose/Video4.gif" width="25%"/>
 <img src="pose/Video5.gif" width="25%"/><img src="pose/Video6.gif" width="25%"/><img src="pose/Video8.gif" width="25%"/><img src="pose/Video7.gif" width="25%"/>
