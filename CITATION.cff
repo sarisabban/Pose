@@ -6,10 +6,10 @@ authors:
   given-names: "Sari"
   orcid: "https://orcid.org/0000-0002-9621-2395"
 
-title: "Pose: A bare metal Python library for building and manipulating protein molecular structures"
+title: "Pose: a pure-NumPy, chirality-aware, structural engine for building and manipulating the molecular structures of proteins, nucleic acids, and small organic molecules"
 
 version: 1.0.0
 
-date-released: 2023-06-01
+date-released: 2026-09-28
 
 url: "https://github.com/sarisabban/Pose"
