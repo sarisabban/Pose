@@ -756,6 +756,87 @@ def Clash(pose, other=None, overlap=0.4, hydrogens=False, separation=4,
 		print(f'{len(out)} clashes')
 	return out
 
+def ipSAE(pose, pae, pae_cutoff=10.0, dist_cutoff=10.0):
+	'''
+	Interaction prediction Score from Aligned Errors (ipSAE) per chain pair
+	Arguments:
+	----------
+		pose: Pose object holding the predicted complex (one residue per
+			PAE row)
+		pae: (N,N) array of predicted aligned errors, rows are aligned
+			residues, columns are scored residues, N is the number of
+			residues in pose
+		pae_cutoff: only residue pairs with PAE below this value (A) count
+		dist_cutoff: CB-CB distance (A, CA for Gly) used for dist1/dist2
+	Returns:
+	--------
+		dict: {(chainA,chainB): {...}} for every ordered chain pair (A->B),
+		plus the key ('max',chainA,chainB) for the maximum of each
+		unordered pair. Each entry holds ipSAE, ipSAE_d0chn, ipSAE_d0dom,
+		ipTM_d0chn, nres1, nres2, dist1, dist2, n0chn, n0dom, d0chn and
+		d0dom. The directional entries also hold n0res and d0res of the
+		best aligned residue, both None when the score is 0. d0 is
+		computed from max(L,27) residues, so it never falls below 1.04
+	'''
+	AAs = pose.data['Amino Acids']; atoms = pose.data['Atoms']
+	xyz = pose.data['Coordinates']
+	res = sorted(AAs.keys()); n = len(res)
+	pae = np.asarray(pae, dtype=float)
+	if pae.shape != (n, n):
+		raise Exception(f'PAE is {pae.shape} but the pose has {n} residues')
+	pts = np.empty((n, 3))
+	for i, r in enumerate(res):
+		names = {atoms[a][0]: a for a in reversed(AAs[r][2] + AAs[r][3])}
+		if 'CB' in names: pts[i] = xyz[names['CB']]
+		elif 'CA' in names: pts[i] = xyz[names['CA']]
+		else: raise Exception(f'Residue {r} has no CB or CA atom')
+	chain = np.array([AAs[r][1] for r in res])
+	ids = [str(c) for c in dict.fromkeys(chain)]
+	dist = np.linalg.norm(pts[:, None] - pts[None, :], axis=-1)
+	def d0(L):
+		return 1.24 * (max(float(L), 27) - 15) ** (1 / 3) - 1.8
+	def score(P, mask, d):
+		out = np.zeros(len(P))
+		for i in range(len(P)):
+			if mask[i].any():
+				out[i] = np.mean(1 / (1 + (P[i][mask[i]] / d[i]) ** 2))
+		return out
+	out = {}
+	for a in ids:
+		for b in ids:
+			if a == b: continue
+			ia = np.where(chain == a)[0]; ib = np.where(chain == b)[0]
+			P = pae[np.ix_(ia, ib)]; mask = P < pae_cutoff
+			near = mask & (dist[np.ix_(ia, ib)] < dist_cutoff)
+			n0chn = len(ia) + len(ib)
+			nres1 = int(mask.any(1).sum()); nres2 = int(mask.any(0).sum())
+			n0dom = nres1 + nres2
+			d0res = np.array([d0(L) for L in mask.sum(1)])
+			d0chn = d0(n0chn); d0dom = d0(n0dom)
+			sres = score(P, mask, d0res); k = int(np.argmax(sres))
+			same = np.full(len(ia), 1.0)
+			out[(a, b)] = {
+				'ipSAE': float(sres[k]),
+				'ipSAE_d0chn': float(score(P, mask, same * d0chn).max()),
+				'ipSAE_d0dom': float(score(P, mask, same * d0dom).max()),
+				'ipTM_d0chn': float(
+					score(P, np.ones_like(mask), same * d0chn).max()),
+				'nres1': nres1, 'nres2': nres2,
+				'dist1': int(near.any(1).sum()),
+				'dist2': int(near.any(0).sum()),
+				'n0chn': n0chn, 'n0dom': n0dom,
+				'd0chn': float(d0chn), 'd0dom': float(d0dom),
+				'd0res': float(d0res[k]) if sres[k] > 0 else None,
+				'n0res': int(mask.sum(1)[k]) if sres[k] > 0 else None}
+	for x, a in enumerate(ids):
+		for b in ids[x + 1:]:
+			f, g = out[(a, b)], out[(b, a)]
+			m = {k: max(f[k], g[k]) for k in f if k not in ('n0res', 'd0res')}
+			for u, v in (('nres1', 'nres2'), ('dist1', 'dist2')):
+				m[u] = max(f[u], g[v]); m[v] = max(f[v], g[u])
+			out[('max', a, b)] = m
+	return out
+
 def Isoelectric(sequence):
 	'''
 	Isoelectric point (pI) of a protein via Lehninger pKa values
