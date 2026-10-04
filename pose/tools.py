@@ -11909,12 +11909,12 @@ def Port(name='openff', accept_rosetta_license=False):
 	print('[+] Done')
 	return True
 
-def Gates(gate, target, binder, hotspots=None, ff=None, sasa_cutoff=20.0, cutoff=5.0):
+def Analyse(metric, target, binder, hotspots=None, ff=None, sasa_cutoff=20.0, cutoff=5.0):
 	'''
-	Binder-design gates
+	Binder-design metrics
 	Arguments:
 	----------
-		gate:   Which gate to run, one of:
+		metric:                    Which metric to run, one of:
 			'rg':                  Radius of gyration of the binder in A (compactness)
 			'interface':           (Sc, area): shape complementarity and the rim-trimmed patch area it is computed over
 			'interface area':      Buried SASA in A^2 summed over both surfaces: SASA(target) + SASA(binder) - SASA(complex)
@@ -11940,6 +11940,13 @@ def Gates(gate, target, binder, hotspots=None, ff=None, sasa_cutoff=20.0, cutoff
 			'8-mer':               Number of 8-residue stretches shared by target and binder
 			'interface energy':    ff(complex) - ff(target) - ff(binder)
 			'hbonds':              Number of actual hydrogen bonds across the target/binder interface
+			'binder length':       Number of residues in the binder
+			'binder loops':        Percentage of binder residues in loops (DSSP, not helix H/G/I and not strand E/B)
+			'interface residues':  Number of binder residues with any atom within 4.0 A of the target
+			'C-term direction':    True if the binder's C-terminus points away from the target
+			'unsatisfied hbonds':  Number of buried polar N/O atoms at the interface that form no hydrogen bond
+			'binder energy':       Returns the binder's potential energy
+			'binder RMSD':         RMSD of the binder CA atoms before and after relaxing it with Minimise
 		target:      Pose of the target protein
 		binder:      Pose of the binder protein
 		hotspots:    List of target residue indices
@@ -11947,11 +11954,11 @@ def Gates(gate, target, binder, hotspots=None, ff=None, sasa_cutoff=20.0, cutoff
 		sasa_cutoff: Per-residue SASA in A^2 above which a residue
 			counts as exposed
 		cutoff:      Distance in Angstroms below which a hotspot
-			residue counts as contacted; used by gate '9'
+			residue counts as contacted; used by 'hotspot contacts'
 	Returns:
 	--------
-		The selected gate's value: float, int, tuple, or dict depending
-		on which gate key is given; see the gate list above for each
+		The selected metric's value: float, int, tuple, or dict depending
+		on which metric key is given; see the metric list above for each
 	'''
 	binder.CalcFASTA()
 	binder.CalcSASA()
@@ -11961,54 +11968,54 @@ def Gates(gate, target, binder, hotspots=None, ff=None, sasa_cutoff=20.0, cutoff
 	AAs = binder.data['Amino Acids']
 	res = sorted(AAs.keys())
 	L = len(seq)
-	if gate == 'rg':
+	if metric == 'rg':
 		binder.CalcRg()
 		return binder.data['Rg']
-	elif gate == 'interface':
+	elif metric == 'interface':
 		Sc, area, CMS_A, CMS_B = Complementarity(target, binder)
 		return Sc, area
-	elif gate == 'interface area':
+	elif metric == 'interface area':
 		target.CalcSASA()
 		s = lambda p: sum(v[6] for v in p.data['Amino Acids'].values())
 		return s(target) + s(binder) - s(complex_pose)
-	elif gate == 'DE':
+	elif metric == 'DE':
 		return 100 * (seq.count('D') + seq.count('E')) / L
-	elif gate == 'KE':
+	elif metric == 'KE':
 		return 100 * (seq.count('K') + seq.count('E')) / L
-	elif gate == 'C':
+	elif metric == 'C':
 		return seq.count('C')
-	elif gate == 'DG':
+	elif metric == 'DG':
 		return seq.count('DG')
-	elif gate == 'NG':
+	elif metric == 'NG':
 		return seq.count('NG')
-	elif gate == 'HPQ':
+	elif metric == 'HPQ':
 		return seq.count('HPQ')
-	elif gate == 'DP':
+	elif metric == 'DP':
 		return seq.count('DP')
-	elif gate == 'glycan sites':
+	elif metric == 'glycan sites':
 		return len(PROSITE(seq, 'N-{P}-[ST]'))
-	elif gate == 'M':
+	elif metric == 'M':
 		return sum(1 for i in res
 			if AAs[i][0] == 'M' and AAs[i][6] > sasa_cutoff)
-	elif gate == 'W':
+	elif metric == 'W':
 		return sum(1 for i in res
 			if AAs[i][0] == 'W' and AAs[i][6] > sasa_cutoff)
-	elif gate == 'RK':
+	elif metric == 'RK':
 		return sum(1 for k, i in enumerate(res)
 			if AAs[i][0] in ('R', 'K') and AAs[i][6] > sasa_cutoff
 			and not (k + 1 < len(res) and AAs[res[k+1]][0] == 'P'))
-	elif gate == 'hydrophobic surface':
+	elif metric == 'hydrophobic surface':
 		binder.CalcSASA()
 		AAs = binder.data['Amino Acids']
 		surface = [v[0] for v in AAs.values() if v[6] > sasa_cutoff]
 		return sum(1 for r in surface if r in 'WFLIMVY') / len(surface)
-	elif gate == 'charge':
+	elif metric == 'charge':
 		return (seq.count('K') + seq.count('R')
 			- seq.count('D') - seq.count('E'))
-	elif gate == 'iP':
+	elif metric == 'iP':
 		seq = next(iter(binder.data['FASTA'].values()))
 		return Isoelectric(seq)
-	elif gate == 'hotspot contacts':
+	elif metric == 'hotspot contacts':
 		AAs = target.data['Amino Acids']
 		b_xyz = binder.data['Coordinates']
 		count = 0
@@ -12018,21 +12025,21 @@ def Gates(gate, target, binder, hotspots=None, ff=None, sasa_cutoff=20.0, cutoff
 			d = np.linalg.norm(xyz[:, None, :] - b_xyz[None, :, :], axis=-1)
 			if d.min() < cutoff: count += 1
 		return count
-	elif gate == 'clashes':
+	elif metric == 'clashes':
 		t_atoms, b_atoms = target.data['Atoms'], binder.data['Atoms']
 		t = target.data['Coordinates'][[a for a, v in t_atoms.items() if v[1].upper() != 'H']]
 		b = binder.data['Coordinates'][[a for a, v in b_atoms.items() if v[1].upper() != 'H']]
 		return int((np.linalg.norm(t[:, None] - b[None], axis=-1) < 2.5).sum())
-	elif gate == 'C-term distance':
+	elif metric == 'C-term distance':
 		last_res = max(binder.data['Amino Acids'])
 		xyz = binder.GetAtomCoord(last_res, 'C')
 		d = np.linalg.norm(target.data['Coordinates'] - xyz, axis=1)
 		return float(d.min())
-	elif gate == 'C-term exposure':
+	elif metric == 'C-term exposure':
 		n1 = len(target.data['Amino Acids'])
 		last_res = n1 + max(binder.data['Amino Acids'])
 		return complex_pose.data['Amino Acids'][last_res][6]
-	elif gate == 'glycan distance':
+	elif metric == 'glycan distance':
 		target.CalcFASTA()
 		seq = next(iter(target.data['FASTA'].values()))
 		sites = PROSITE(seq, 'N-{P}-[ST]')
@@ -12044,16 +12051,16 @@ def Gates(gate, target, binder, hotspots=None, ff=None, sasa_cutoff=20.0, cutoff
 			n_xyz = target.GetAtomCoord(r, 'ND2')
 			out[r] = np.linalg.norm(b_xyz - n_xyz, axis=1)
 		return out
-	elif gate == '8-mer':
+	elif metric == '8-mer':
 		length = 8
 		t_seq = ''.join(target.data['FASTA'].values())
 		b_seq = ''.join(binder.data['FASTA'].values())
 		t_windows = {t_seq[i:i+length] for i in range(len(t_seq)-length+1)}
 		b_windows = {b_seq[i:i+length] for i in range(len(b_seq)-length+1)}
 		return len(t_windows & b_windows)
-	elif gate == 'interface energy':
+	elif metric == 'interface energy':
 		return ff(complex_pose) - ff(target) - ff(binder)
-	elif gate == 'hbonds':
+	elif metric == 'hbonds':
 		cx_atoms = complex_pose.data['Atoms']
 		cx_bonds = complex_pose.data['Bonds']
 		cx_AAs = complex_pose.data['Amino Acids']
@@ -12079,5 +12086,43 @@ def Gates(gate, target, binder, hotspots=None, ff=None, sasa_cutoff=20.0, cutoff
 				continue
 			found.add((D, A))
 		return len(found)
+	elif metric == 'binder length':
+			return L
+	elif metric == 'binder loops':
+		binder.CalcDSSP()
+		ss = ''.join(binder.data['SS'].values())
+		return 100 * sum(1 for s in ss if s not in 'HGIEB') / len(ss)
+	elif metric == 'interface residues':
+		t_xyz = target.data['Coordinates']
+		count = 0
+		for i, v in binder.data['Amino Acids'].items():
+			xyz = binder.data['Coordinates'][v[2] + v[3]]
+			d = np.linalg.norm(xyz[:, None, :] - t_xyz[None, :, :], axis=-1)
+			if d.min() <= 4.0: count += 1
+		return count
+	elif metric == 'C-term direction':
+		t_atoms = target.data['Atoms']
+		t = target.data['Coordinates'][[a for a, v in t_atoms.items() if v[1].upper() != 'H']]
+		ca_last = binder.GetAtomCoord(res[-1], 'CA')
+		ca_prev = binder.GetAtomCoord(res[-2], 'CA')
+		outward = ca_last - t.mean(axis=0)
+		direction = ca_last - ca_prev
+		return bool(np.dot(outward, direction) > 0)
+	elif metric == 'unsatisfied hbonds':
+		BO, off = {}, 0
+		for p in (target, binder):
+			old = sorted(p.data['Atoms'])
+			m = {o: off + i for i, o in enumerate(old)}
+			for o in old: BO[m[o]] = p.data['BondOrders'][o]
+			off += len(old)
+		complex_pose.data['BondOrders'] = BO
+		cAAs = complex_pose.data['Amino Acids']
+		return BuriedUnsatisfiedHbonds(complex_pose, chain=cAAs[len(cAAs) - 1][1])[0]
+	elif metric == 'binder energy':
+		return ff(binder)
+	elif metric == 'binder RMSD':
+		relaxed = copy.deepcopy(binder)
+		Minimise(relaxed, ff=ff)
+		return RMSD(binder, relaxed)
 	else:
-		raise ValueError(f'Unknown gate: {gate!r}')
+		raise ValueError(f'Unknown metric: {metric!r}')
