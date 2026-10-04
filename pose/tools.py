@@ -12126,3 +12126,93 @@ def Analyse(metric, target, binder, hotspots=None, ff=None, sasa_cutoff=20.0, cu
 		return RMSD(binder, relaxed)
 	else:
 		raise ValueError(f'Unknown metric: {metric!r}')
+
+def Gates(target, binder, hotspots, ff, ff_relax,
+	area=(1300, 3800), rg=(1.25, 2.2, 0.38), charge=(-10, 10), pI=(7.4, 0.5),
+	hydrophobic=0.35, clashes=0, cys=0, hpq=0, length=(70, 120),
+	sc=0.6, energy=0.0, hbonds=3,
+	cterm_distance=15.0, cterm_direction=True, cterm_exposure=20.0,
+	hotspot_contacts=3, hotspot_cutoff=4.5, glycan=7.0, kmer=0,
+	interface_residues=7, unsat_hbonds=4, loops=90.0,
+	binder_energy=0.0, rmsd=3.5, sasa_cutoff=20.0):
+	'''
+	Apply every binder-design gate that Analyse() can measure
+	Arguments:
+	----------
+		target:             Pose of the target protein
+		binder:             Pose of the binder protein
+		hotspots:           List of target residue indices (Pose indices, from 0)
+		ff:                 Score() for the interface and binder energy gates
+		ff_relax:           ForceField('OpenFF') for the binder RMSD gate
+		area:               (min, max) interface area in A^2
+		rg:                 (slack, coefficient, exponent), max Rg = slack * coefficient * N^exponent
+		charge:             (min, max) net charge
+		pI:                 (target, margin), fails when the pI is within margin of target
+		hydrophobic:        Max fraction of exposed binder residues that are W F L I M V Y
+		clashes:            Max number of heavy-atom pairs under 2.5 A
+		cys:                Max number of Cys
+		hpq:                Max number of HPQ motifs
+		length:             (min, max) binder length in residues
+		sc:                 Min shape complementarity
+		energy:             Interface energy must be below this value
+		hbonds:             Min number of interface hydrogen bonds
+		cterm_distance:     Min distance in A from the C-terminus to the target
+		cterm_direction:    Required C-terminus direction, True is pointing away
+		cterm_exposure:     Min SASA in A^2 of the last residue
+		hotspot_contacts:   Min number of hotspots contacted
+		hotspot_cutoff:     Distance in A below which a hotspot counts as contacted
+		glycan:             Min distance in A from any sequon ND2 to every binder atom
+		kmer:               Max number of 8-mers shared with the target
+		interface_residues: Min number of binder residues at the interface
+		unsat_hbonds:       Max number of buried unsatisfied polar atoms
+		loops:              Max percentage of binder residues in loops
+		binder_energy:      Max binder energy
+		rmsd:               Max CA RMSD in A of the binder after relaxing it
+		sasa_cutoff:        Per-residue SASA in A^2 above which a residue counts as exposed
+		Any argument set to None is skipped: a cutoff skips its own gate, and
+		hotspots, hotspot_cutoff, ff, ff_relax or sasa_cutoff skip every gate that needs them
+	Returns:
+	--------
+		tuple: (True, []) when every gate passes, otherwise (False, list of
+		strings 'gate: value (needs rule)' for each gate that failed)
+	'''
+	N = Analyse('binder length', target, binder)
+	span = lambda v, a: a[0] <= v <= a[1]
+	least = lambda v, a: v >= a
+	most = lambda v, a: v <= a
+	nearest = lambda v: min([float(d.min()) for d in v.values()] or [float('inf')])
+	rows = [
+		('interface area', area, 'interface area', {}, None, span, lambda a: f'{a[0]} to {a[1]} A^2'),
+		('Rg', rg, 'rg', {}, None, lambda v, a: v <= a[0] * a[1] * N ** a[2], lambda a: f'at most {a[0] * a[1] * N ** a[2]:.2f} A'),
+		('net charge', charge, 'charge', {}, None, span, lambda a: f'{a[0]} to {a[1]}'),
+		('pI', pI, 'iP', {}, None, lambda v, a: abs(v - a[0]) > a[1], lambda a: f'more than {a[1]} from {a[0]}'),
+		('hydrophobic surface', hydrophobic, 'hydrophobic surface', {'sasa_cutoff': sasa_cutoff}, None, most, lambda a: f'at most {a}'),
+		('clashes', clashes, 'clashes', {}, None, most, lambda a: f'at most {a}'),
+		('Cys', cys, 'C', {}, None, most, lambda a: f'at most {a}'),
+		('HPQ', hpq, 'HPQ', {}, None, most, lambda a: f'at most {a}'),
+		('length', length, 'binder length', {}, None, span, lambda a: f'{a[0]} to {a[1]}'),
+		('shape complementarity', sc, 'interface', {}, lambda v: v[0], least, lambda a: f'at least {a}'),
+		('interface energy', energy, 'interface energy', {'ff': ff}, None, lambda v, a: v < a, lambda a: f'below {a}'),
+		('hbonds', hbonds, 'hbonds', {}, None, least, lambda a: f'at least {a}'),
+		('C-term distance', cterm_distance, 'C-term distance', {}, None, least, lambda a: f'at least {a} A'),
+		('C-term direction', cterm_direction, 'C-term direction', {}, None, lambda v, a: v == a, lambda a: f'{a}'),
+		('C-term exposure', cterm_exposure, 'C-term exposure', {}, None, lambda v, a: v > a, lambda a: f'more than {a} A^2'),
+		('hotspot contacts', hotspot_contacts, 'hotspot contacts', {'hotspots': hotspots, 'cutoff': hotspot_cutoff}, None, least, lambda a: f'at least {a} within {hotspot_cutoff} A'),
+		('glycan', glycan, 'glycan distance', {}, nearest, lambda v, a: v > a, lambda a: f'more than {a} A'),
+		('8-mer overlap', kmer, '8-mer', {}, None, most, lambda a: f'at most {a}'),
+		('interface residues', interface_residues, 'interface residues', {}, None, least, lambda a: f'at least {a}'),
+		('unsatisfied hbonds', unsat_hbonds, 'unsatisfied hbonds', {}, None, most, lambda a: f'at most {a}'),
+		('binder loops', loops, 'binder loops', {}, None, most, lambda a: f'at most {a} %'),
+		('binder energy', binder_energy, 'binder energy', {'ff': ff}, None, most, lambda a: f'at most {a}'),
+		('binder RMSD', rmsd, 'binder RMSD', {'ff': ff_relax}, None, most, lambda a: f'at most {a} A')]
+	failed = []
+	for name, arg, metric, kw, pick, ok, rule in rows:
+		if arg is None or any(x is None for x in kw.values()): continue
+		try:
+			v = Analyse(metric, target, binder, **kw)
+			if pick: v = pick(v)
+			if not ok(v, arg):
+				failed.append(f'{name}: {round(v, 3) if isinstance(v, float) else v} (needs {rule(arg)})')
+		except Exception as e:
+			failed.append(f'{name}: could not be measured ({e})')
+	return len(failed) == 0, failed
