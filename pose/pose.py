@@ -309,6 +309,32 @@ class Pose():
 				result.add(nb)
 				stack.append(nb)
 		return result
+	def _downstreamsidechain(self, res, piv_a, piv_b):
+		'''
+		Like _downstreamatoms, but confined to one residue's own sidechain
+		atoms. Used for CHI rotation on a Fused (ring) sidechain, where the
+		ring reconnects to the backbone and a plain bond-graph walk would
+		leak into the backbone and neighbouring residues
+		Arguments:
+		----------
+			res:    Residue index whose sidechain atoms bound the walk
+			piv_a:  Atom index of the pivot's anchor atom (stays fixed)
+			piv_b:  Atom index of the pivot's moving atom (BFS seed)
+		Returns:
+		--------
+			set: atom indices in res's own sidechain reachable from piv_b
+			without crossing piv_a or leaving the sidechain
+		'''
+		allowed = set(self.data['Amino Acids'][res][3])
+		if piv_b not in allowed: return set()
+		bonds = self.data['Bonds']
+		result, stack = {piv_b}, [piv_b]
+		while stack:
+			cur = stack.pop()
+			for nb in bonds.get(cur, []):
+				if nb == piv_a or nb in result or nb not in allowed: continue
+				result.add(nb); stack.append(nb)
+		return result
 	def _prevres(self, i):
 		'''
 		Return the previous residue index on the same chain
@@ -2543,7 +2569,7 @@ class Pose():
 			v = coords[idx] - ori
 			coords[idx] = np.matmul(v, RM) + ori
 		self.data['Coordinates'] = coords
-	def RotateDihedral(self, res, theta, angle_type, chi_type=None):
+	def RotateDihedral(self, res, theta, angle_type, chi_type=None, fSC=False):
 		'''
 		Set a named dihedral of a residue or nucleotide to theta degrees
 		Arguments:
@@ -2552,6 +2578,7 @@ class Pose():
 			theta:      Target dihedral angle in degrees
 			angle_type: Protein: φ/ψ/ω/χ or for Nucleic: α/β/γ/δ/ε/ζ/χ
 			chi_type:   Required when angle_type='CHI' for proteins
+			fSC:        Allow rotating (thus breaking) fused sidechain chi angle
 		Returns:
 		--------
 			self.data['Coordinates'] updated: every atom downstream
@@ -2561,6 +2588,7 @@ class Pose():
 		at = angle_type.upper()
 		mol = self.data['Type']
 		nxt = self._nextres(res)
+		fused = False
 		if mol == 'Protein':
 			if at == 'PHI': pivots = res, 'N', res, 'CA'
 			elif at == 'PSI': pivots = res, 'CA', res, 'C'
@@ -2570,7 +2598,8 @@ class Pose():
 			elif at == 'CHI':
 				assert chi_type is not None, 'Protein CHI needs chi_type'
 				sym = self.data['Amino Acids'][res][0].upper()
-				if self.aminoacids[sym].get('Fused'): return
+				fused = self.aminoacids[sym].get('Fused')
+				if fused and not fSC: return
 				ca = self.aminoacids[sym]['Chi Angle Atoms'][chi_type-1]
 				pivots = res, ca[1], res, ca[2]
 			else:
@@ -2612,8 +2641,9 @@ class Pose():
 		u = u / mag
 		RM_zero = self._rotmat(-current, u)
 		RM_new = self._rotmat(theta, u)
-		for idx in self._downstreamatoms(
-		ra, aa, rb, ab):
+		downstream = (self._downstreamsidechain(res, piv_a, piv_b)
+			if fused and fSC else self._downstreamatoms(ra, aa, rb, ab))
+		for idx in downstream:
 			v = coords[idx] - ori
 			v = np.matmul(v, RM_zero)
 			v = np.matmul(v, RM_new)
