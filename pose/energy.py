@@ -648,6 +648,7 @@ class ForceField():
 		ELEM_IDX = {'C':0,'O':1,'H':2,'N':3,'S':4,'F':5,
 			'Br':6,'Cl':7,'I':8,'P':9}
 		fc_dict = getattr(pose, '_formal_charges', {}) or {}
+		fq = self._resonancecharges(sorted_ids, atoms, nbr, q_adj, fc_dict)
 		h = np.zeros((n, 22), dtype=np.float32)
 		for k, i in enumerate(sorted_ids):
 			elem = atoms[i][1]
@@ -656,7 +657,7 @@ class ForceField():
 			deg = len(nbr[i])
 			if 0 <= deg <= 6:
 				h[k, 10 + deg] = 1.0
-			h[k, 17] = float(fc_dict.get(i, 0))
+			h[k, 17] = fq[i]
 			rs = in_ring_sizes[i]
 			if 3 in rs: h[k, 18] = 1.0
 			if 4 in rs: h[k, 19] = 1.0
@@ -704,6 +705,71 @@ class ForceField():
 		out = np.zeros(max(sorted_ids) + 1, dtype=np.float64)
 		for k, i in enumerate(sorted_ids):
 			out[i] = float(q_final[k])
+		return out
+	def _resonancecharges(self, ids, atoms, nbr, adj, fcs):
+		'''
+		Formal charges averaged over the lowest-energy resonance forms
+		reached by moving electron pairs from donor to acceptor atoms
+		along alternating bonds, the NAGL charge-model input feature
+		(types and energies of openff-nagl, MIT licence)
+		Arguments:
+		----------
+			ids: list - sorted atom ids
+			atoms: dict - atom records, element at index 1
+			nbr: dict - atom id to bonded atom ids
+			adj: dict - position to {position: bond order}
+			fcs: dict - atom id to formal charge
+		Returns:
+		--------
+			dict: atom id to averaged formal charge
+		'''
+		R = {}
+		for t in (('O', 0, (2,), 'O', -1, (1,)),
+				('S', 0, (2,), 'S', -1, (1,)),
+				('N', 0, (1, 2), 'N', -1, (1, 1)),
+				('N', 0, (3,), 'N', -1, (2,))):
+			R[t[:3]], R[t[3:]] = ('A', 0.0, t[3:]), ('D', 5.0, t[:3])
+		R['N', 1, (1, 1, 2)] = ('A', 5.0, ('N', 0, (1, 1, 1)))
+		R['N', 0, (1, 1, 1)] = ('D', 0.0, ('N', 1, (1, 1, 2)))
+		pos = {i: k for k, i in enumerate(ids)}
+		el = {i: atoms[i][1] for i in ids}
+		fc = {i: int(fcs.get(i, 0)) for i in ids}
+		o = {(i, j): adj[pos[i]][pos[j]] for i in ids for j in nbr[i]}
+		bo = {i: tuple(sorted(o[i, j] for j in nbr[i])) for i in ids}
+		left = {i for i in ids if el[i] != 'H' and (el[i] != 'C'
+			or bo[i] != (1, 1, 1, 1) or fc[i])}
+		out = {i: float(fc[i]) for i in ids}
+		while left:
+			comp, todo = set(), [min(left)]
+			while todo:
+				a = todo.pop(); comp.add(a); left.discard(a)
+				todo += [b for b in nbr[a] if b in left]
+			T = lambda s, a: R.get((el[a], s[0][a], s[1][a]), ('X', 0.0))
+			queue, seen, forms = [({a: fc[a] for a in comp},
+				{a: bo[a] for a in comp}, {k: v for k, v in o.items()
+				if k[0] in comp and k[1] in comp})], set(), {}
+			while queue:
+				s = queue.pop()
+				k = (tuple(T(s, a)[0] for a in sorted(comp)),
+					tuple(sorted(s[2].items())))
+				if k in seen: continue
+				seen.add(k); forms[k[0]] = s
+				walk = [(d,) for d in comp if T(s, d)[0] == 'D']
+				while walk:
+					p = walk.pop()
+					if len(p) % 2 and len(p) > 1 and T(s, p[-1])[0] == 'A':
+						q, b, e = dict(s[0]), dict(s[1]), dict(s[2])
+						for x in (p[0], p[-1]): _, q[x], b[x] = T(s, x)[2]
+						for m, (u, v) in enumerate(zip(p, p[1:])):
+							e[u, v] = e[v, u] = e[u, v] + 1 - 2 * (m % 2)
+						queue.append((q, b, e))
+					walk += [p + (y,) for y in nbr[p[-1]] if y in comp
+						and y not in p and (len(p) < 2 or s[2][p[-1], y]
+						== s[2][p[0], p[1]] + (len(p) - 1) % 2)]
+			en = {k: sum(T(f, a)[1] for a in comp) for k, f in forms.items()}
+			low = [f for k, f in forms.items() if en[k] - min(en.values())
+				<= 1e-8 + 1e-5 * abs(min(en.values()))]
+			for a in comp: out[a] = sum(f[0][a] for f in low) / len(low)
 		return out
 	def _parsemapped(self, smi):
 		'''
