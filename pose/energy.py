@@ -885,11 +885,11 @@ class ForceField():
 			cache['_pd'] = np.empty((n, n))
 		a, b, d = cache['_pa'], cache['_pb'], cache['_pd']
 		Xc = X - X.mean(0)
-		sq = np.einsum('ij,ij->i', Xc, Xc)
-		np.dot(Xc, Xc.T, out=a)
-		np.multiply(a, -2.0, out=a)
-		np.add(a, sq[:, None], out=a)
-		np.add(a, sq[None, :], out=a)
+		a.fill(0.0)
+		for k in range(3):
+			np.subtract.outer(Xc[:, k], Xc[:, k], out=d)
+			np.multiply(d, d, out=d)
+			np.add(a, d, out=a)
 		np.fill_diagonal(a, 1.0)
 		np.maximum(a, self._EPS ** 2, out=a)
 		np.divide(cache['_ps'], a, out=b)
@@ -939,11 +939,11 @@ class ForceField():
 			cache['_gd'] = np.empty((n, n))
 		a, b, d = cache['_ga'], cache['_gb'], cache['_gd']
 		Xc = X - X.mean(0)
-		sq = np.einsum('ij,ij->i', Xc, Xc)
-		np.dot(Xc, Xc.T, out=a)
-		np.multiply(a, -2.0, out=a)
-		np.add(a, sq[:, None], out=a)
-		np.add(a, sq[None, :], out=a)
+		a.fill(0.0)
+		for k in range(3):
+			np.subtract.outer(Xc[:, k], Xc[:, k], out=d)
+			np.multiply(d, d, out=d)
+			np.add(a, d, out=a)
 		np.fill_diagonal(a, 1.0)
 		np.maximum(a, self._EPS ** 2, out=a)
 		np.divide(cache['_gs'], a, out=b)
