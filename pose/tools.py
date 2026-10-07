@@ -5146,7 +5146,7 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None, nrot_override=None):
 		return bfs_cache[atom_idx]
 	def lookuptype(tricode, atom_name, atoms, bonds, n,
 			atom_types_db, residue_types_db, D_TO_L, N_TERM_H,
-			ai=None):
+			ai=None, names=None):
 		'''
 		Resolve (tricode, atom_name) to a Rosetta atom type and charge
 		Arguments:
@@ -5161,6 +5161,7 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None, nrot_override=None):
 			residue_types_db: dict - Rosetta residue-type table
 			D_TO_L: dict - D-amino-acid tricode to L tricode
 			N_TERM_H: set - N-terminal hydrogen atom names
+			names: dict or None - filled with ai -> matched .params name
 		Returns:
 		--------
 			tuple: (atom_type_or_None, partial_charge_float)
@@ -5180,6 +5181,7 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None, nrot_override=None):
 		for c in cands:
 			e = table.get(c) if c else None
 			if e is not None:
+				if names is not None: names[ai] = c
 				return e['type'], float(e.get('charge', 0.0))
 		if ai is None or not (0 <= ai < n): return None, 0.0
 		parent = next((atoms[b][0] for b in bonds.get(ai, ())
@@ -5198,6 +5200,7 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None, nrot_override=None):
 		d = atom_name[0] if atom_name and atom_name[0].isdigit() else None
 		pick = next((m for m in cand if d and m.startswith(d)), sorted(cand)[0])
 		e = table[pick]
+		if names is not None: names[ai] = pick
 		return e['type'], float(e.get('charge', 0.0))
 	def applyatom(ai, new_type, new_charge, ros_types, q_arr, ljR, ljW,
 			lkdG, lkLam, lkVol, is_donor, is_accep,
@@ -5405,7 +5408,7 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None, nrot_override=None):
 		return n_term_res
 	def atomwaters(i, X, water_atom, water_cnt, water_off, water_xyz, LKB_WTS,
 			adj, ang_sp2, ang_sp3, atom_res, atom_types_db, dih_sp2, dih_sp3,
-			is_H, is_polar_h, opt_dist, ros_types):
+			is_H, is_polar_h, opt_dist, ros_types, lkb_hlen, lkb_ring):
 		'''
 		Append the LkBall virtual waters belonging to one atom
 		Arguments:
@@ -5428,6 +5431,8 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None, nrot_override=None):
 			is_polar_h: np.ndarray - bool, atom is a polar hydrogen
 			opt_dist: float - ideal atom-to-water distance
 			ros_types: list - per-atom Rosetta type names
+			lkb_hlen: dict - polar H index to its ideal X-H bond length
+			lkb_ring: dict - ring acceptor index to (base, other, angle)
 		Returns:
 		--------
 			No return value, the water_* containers are filled in place
@@ -5447,10 +5452,18 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None, nrot_override=None):
 		polar_h_nbrs = [j for j in nbrs if is_polar_h[j]]
 		if is_d:
 			for h in polar_h_nbrs:
-				w = i_xyz + opt_dist * unit(X[h] - i_xyz)
+				u = unit(X[h] - i_xyz)
+				w = (i_xyz + opt_dist * u if h not in lkb_hlen
+					else X[h] + (opt_dist - lkb_hlen[h]) * u)
 				i_waters.append(w)
 		if is_a:
-			if is_ring and len(heavy_nbrs) >= 2:
+			if is_ring and i in lkb_ring:
+				c1, c2, th = lkb_ring[i]
+				u = unit(X[c1] - i_xyz); v = X[c2] - i_xyz
+				v = unit(v - np.dot(v, u) * u)
+				w = i_xyz + opt_dist * (math.cos(th) * u - math.sin(th) * v)
+				i_waters.append(w)
+			elif is_ring and len(heavy_nbrs) >= 2:
 				c1, c2 = heavy_nbrs[0], heavy_nbrs[1]
 				mid = 0.5 * (X[c1] + X[c2])
 				w = i_xyz + opt_dist * unit(i_xyz - mid)
@@ -5539,6 +5552,7 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None, nrot_override=None):
 					atom_res[int(ai)] = int(r)
 		ros_types = [None] * n
 		q_arr = np.zeros(n, dtype=np.float64)
+		pnames = {}; pres = {}
 		for ri, info in aas.items():
 			tri = info[5] if len(info) >= 6 else None
 			if tri is None: continue
@@ -5556,7 +5570,8 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None, nrot_override=None):
 				nm = atoms[ai][0]
 				t, q = lookuptype(tri, nm, atoms, bonds, n,
 						atom_types_db, residue_types_db, D_TO_L,
-						N_TERM_H, ai=ai)
+						N_TERM_H, ai=ai, names=pnames)
+				pres[ai] = residue_types_db.get(D_TO_L.get(tri, tri))
 				ros_types[ai] = t
 				q_arr[ai] = q
 		ljR = np.zeros(n); ljW = np.zeros(n)
@@ -5830,6 +5845,32 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None, nrot_override=None):
 		dih_sp2 = tuple(math.radians(float(v)) for v in LKB['dih_sp2'])
 		dih_sp3 = tuple(math.radians(float(v)) for v in LKB['dih_sp3'])
 		wat_idx = [i for i in range(n) if ros_types[i] in LKB_WTS]
+		lkb_hlen = {}; lkb_ring = {}
+		for i, pn in pnames.items():
+			ic = (pres.get(i) or {}).get('icoor') or {}
+			if is_polar_h[i] and pn in ic: lkb_hlen[i] = ic[pn][1]
+			if (is_polar_h[i] and int(atom_res[i]) in n_term_res
+				and atoms[i][0] in N_TERM_H and 'TerminalHLength' in params):
+				lkb_hlen[i] = params['TerminalHLength']
+			if not (atom_types_db.get(ros_types[i], {}).get('ring')
+				and atom_types_db.get(ros_types[i], {}).get('acceptor')):
+				continue
+			order = list(pres[i]['atoms'])
+			nb = sorted((j for j in adj.get(i, ()) if not is_H[j]
+				and pnames.get(j) in order),
+				key=lambda j: order.index(pnames[j]))
+			if len(nb) != 2: continue
+			a, b = pnames[nb[0]], pnames[nb[1]]
+			d1 = next((ic[k][1] for k, m in ((pn, a), (a, pn))
+				if k in ic and ic[k][2] == m), None)
+			d2 = next((ic[k][1] for k, m in ((pn, b), (b, pn))
+				if k in ic and ic[k][2] == m), None)
+			al = next((math.pi - math.radians(ic[k][0]) for k, m in
+				((b, a), (a, b)) if k in ic and ic[k][2] == pn
+				and ic[k][3] == m), None)
+			if None in (d1, d2, al): continue
+			mx = 0.5 * (d1 + d2 * math.cos(al)); my = 0.5 * d2 * math.sin(al)
+			lkb_ring[i] = (nb[0], nb[1], math.acos(-mx / math.hypot(mx, my)))
 		def place_waters(X, only=None):
 			'''
 			Build LkBall virtual-water positions for coordinates X from the
@@ -5854,7 +5895,8 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None, nrot_override=None):
 			for i in todo:
 				atomwaters(i, X, water_atom, water_cnt, water_off, water_xyz,
 					LKB_WTS, adj, ang_sp2, ang_sp3, atom_res, atom_types_db,
-					dih_sp2, dih_sp3, is_H, is_polar_h, opt_dist, ros_types)
+					dih_sp2, dih_sp3, is_H, is_polar_h, opt_dist, ros_types,
+					lkb_hlen, lkb_ring)
 			if water_xyz:
 				water_xyz_arr = np.stack(water_xyz, axis=0)
 			else:
@@ -6871,6 +6913,7 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None, nrot_override=None):
 				dtype=np.float64).reshape(36, 36)
 			neglogP_rot = np.asarray(rot_dat['neglogP_rot'],
 				dtype=np.float64).reshape(36, 36)
+			neglogP_rot = np.minimum(neglogP_rot, MAXE)
 			cm = np.asarray(rot_dat['chi_means'],
 				dtype=np.float64).reshape(n_disc_chi, 36, 36)
 			cs = np.asarray(rot_dat['chi_sigmas'],
@@ -10196,6 +10239,7 @@ def Port(name='openff', accept_rosetta_license=False):
 		atoms = {}
 		bonds = []
 		aliases = {}
+		icoor = {}
 		name = None; aa = None
 		for line in txt.splitlines():
 			line = line.split('#', 1)[0].rstrip()
@@ -10227,8 +10271,11 @@ def Port(name='openff', accept_rosetta_license=False):
 				bonds.append([a, b, bo])
 			elif toks[0] == 'CUT_BOND' and len(toks) >= 3:
 				bonds.append([toks[1], toks[2], 1])
+			elif toks[0] == 'ICOOR_INTERNAL' and len(toks) >= 7:
+				icoor[toks[1]] = [float(toks[3]), float(toks[4]),
+					toks[5], toks[6]]
 		return {'name': name, 'aa': aa, 'atoms': atoms,
-			'bonds': bonds, 'aliases': aliases}
+			'bonds': bonds, 'aliases': aliases, 'icoor': icoor}
 	def _splineddy2(x0, y0, dy0, x1, y1, dy1):
 		'''
 		Second derivatives at the two endpoints of the cubic Hermite
@@ -11420,6 +11467,8 @@ def Port(name='openff', accept_rosetta_license=False):
 		term_q = {'PRO': _casecharges(pro_case),
 			'GLY': _casecharges(gly_case),
 			'generic': _casecharges(ncases[-1])}
+		term_hlen = float(re.search(r'^SET_ICOOR 1H\s+\S+\s+\S+\s+(\S+)',
+			ncases[-1], re.M).group(1))
 		ccase = _patchcases(cterm_txt)[-1]
 		term_q['cterm'] = {nm: float(re.search(
 			r'^SET_ATOMIC_CHARGE %s\s+(-?[\d.]+)' % nm, ccase, re.M).group(1))
@@ -11811,6 +11860,7 @@ def Port(name='openff', accept_rosetta_license=False):
 				'sigmoidal_S':     elec['sigmoidal_S']},
 			'TerminalCharges': term_q,
 			'TerminalTypes':   term_t,
+			'TerminalHLength': term_hlen,
 			'HBondSp2':        hb_sp2,
 			'LkBall': dict(lkball,
 				lk_lambda_default=lk_lambda_default),
