@@ -2200,6 +2200,13 @@ class Pose():
 						and v['Tricode'][1] == tri), None)
 					if sym is not None: is_D = True
 				if sym is None: continue
+				xyz = {r[0]: np.array(r[4:7]) for r in uniq}
+				h = xyz.get('HA2', xyz.get('1HA'))
+				if (tri == 'GLY' and h is not None
+					and all(k in xyz for k in ('N', 'CA', 'C'))):
+					v = xyz['CA']
+					is_D = float(np.dot(xyz['N'] - v,
+						np.cross(xyz['C'] - v, h - v))) > 0
 				hm = {v[0]: v[5] for v in (
 					self.aminoacids[sym].get('Sidechain Atoms',[]) +
 					self.aminoacids['Backbone middle']['Backbone Atoms']+
