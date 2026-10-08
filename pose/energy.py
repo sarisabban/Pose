@@ -599,8 +599,7 @@ class ForceField():
 			.get(self.name, {}).get('AM1BCC') or {})
 		if 'gcn_layers' not in nagl or 'readout' not in nagl:
 			raise RuntimeError(
-				'AM1BCC weights missing from database.json. '
-				'Run database_nagl_extract.py to install them.')
+				'AM1BCC weights missing from database.json.')
 		self._perceivecharges(pose)
 		atoms = pose.data['Atoms']
 		bonds = pose.data['Bonds']
@@ -1570,8 +1569,7 @@ class Score():
 		SP = DBLoad().get('Score Parameters', {}) or {}
 		if not SP:
 			raise ValueError(
-				'Score: database.json has no "Score Parameters" key. '
-				'Run vina.py / ref15.py first to populate.')
+				'Score: database.json has no "Score Parameters" key.')
 		key_map = {k.upper(): k for k in SP}
 		if name.upper() not in key_map:
 			raise ValueError(
@@ -1669,7 +1667,7 @@ class Score():
 		self._cache['_pairs_memo'] = {}
 		self._cache['_ljraw_memo'] = {}
 		per_term = {}
-		torsional = False
+		torsional, e = False, 0.0
 		for method_name, kwargs in self.terms:
 			if method_name == 'TorsionalPenalty':
 				torsional = True
@@ -1680,8 +1678,13 @@ class Score():
 					'Score: method %s not found' % method_name)
 			out = fn(pose, cache=self._cache, ligand=ligand, **kwargs)
 			per_term[method_name] = out
+			e = e + self._cache.pop('_peratom', 0) * self.scale * (
+				out.get('inter_weighted', 0) / (out.get('inter_raw') or 1))
 		inter_kj = sum(v.get('inter_weighted', 0.0)
 			for v in per_term.values())
+		if torsional:
+			e = np.maximum(e, 0)
+			inter_kj -= float(np.sum(e * e / (1000 + e))) / self.scale
 		intra_kj = sum(v.get('intra_weighted', 0.0)
 			for v in per_term.values())
 		if torsional:
@@ -3077,7 +3080,7 @@ class Score():
 					* math.cos(PI / 180 * (csang2 - a_mu)))
 				ss_dih = self.dihedraldegrees(coords[cb1], coords[sg1],
 					coords[sg2], coords[cb2])
-				if d1 and d2: ss_dih = -ss_dih
+				if d1: ss_dih = -ss_dih
 				e1 = (math.exp(dss_logA1) * math.exp(dss_kappa1
 					* math.cos(PI/180 * (ss_dih - dss_mu1))))
 				e2 = (math.exp(dss_logA2) * math.exp(dss_kappa2

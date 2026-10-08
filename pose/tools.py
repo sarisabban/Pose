@@ -4997,8 +4997,6 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None, nrot_override=None):
 			('TRP','NE1'):'N_D',
 			('ASN','ND2'):'N_D', ('ASN','OD1'):'O_A',
 			('GLN','NE2'):'N_D', ('GLN','OE1'):'O_A',
-			('HIS','ND1'):'N_A', ('HIS','NE2'):'N_D',
-			('HIS_D','ND1'):'N_D', ('HIS_D','NE2'):'N_A',
 			('SER','OG'):'O_DA',
 			('THR','OG1'):'O_DA',
 			('TYR','OH'):'O_DA',
@@ -5038,7 +5036,13 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None, nrot_override=None):
 					else:
 						has_h = has_polar_h(gi, r_atoms, l_atoms,
 					r_bonds, l_bonds, coords, H_coords_r, n_r)
-						xs[gi] = name_to_idx['N_D' if has_h else 'N_A']
+						nb = atomnbrs(gi, r_bonds, l_bonds, n_r)
+						acc = len(nb) < 3 or len(nb) == 3 and not any(
+							len(atomnbrs(j, r_bonds, l_bonds, n_r)) == {'C': 3,
+							'N': 2}.get(atomel(j, r_atoms, l_atoms, n_r))
+							for j in nb)
+						xs[gi] = name_to_idx[('N_P', 'N_A', 'N_D',
+							'N_DA')[2 * has_h + acc]]
 				elif el == 'O':
 					ov = (protein_xs(gi, r_atoms, r_atom_to_tri, PROT_XS)
 						if gi < n_r else None)
@@ -6239,7 +6243,10 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None, nrot_override=None):
 		ai = pairs[:, 0]; aj = pairs[:, 1]
 		coords = cache['coords']
 		rij = np.linalg.norm(coords[ai] - coords[aj], axis=1)
-		return float(pair_fn(ai, aj, rij, cache).sum())
+		v = pair_fn(ai, aj, rij, cache)
+		if pairs is cache['inter_pairs']:
+			cache['_peratom'] = np.bincount(aj, v, len(coords))
+		return float(v.sum())
 	def evalpairs(cache, kind, pair_fn):
 		'''
 		Apply a per-pair function and sum its result over inter and
@@ -9609,7 +9616,6 @@ def Port(name='openff', accept_rosetta_license=False):
 		case the reason has already been printed
 	'''
 	_KCAL_TO_KJ = 4.184
-	_BINS_PER_A2 = 20
 	_VINA_BASE = ('https://raw.githubusercontent.com/'
 		'ccsb-scripps/AutoDock-Vina/'
 		'3c65c0b3e6c2c1d183f6a175ecb65e3c5ba91645/src/lib/')
@@ -10318,42 +10324,6 @@ def Port(name='openff', accept_rosetta_license=False):
 		c2 = (3*b*f - 3*a*e) / (6*(b-a))
 		c3 = (e - f) / (6*(b-a))
 		return [c0, c1, c2, c3]
-	def _binofdis(ii):
-		'''
-		Rosetta distance-bin index for a tenth-angstrom step
-		Arguments:
-		----------
-			ii: Distance step, in tenths of an angstrom
-		Returns:
-		--------
-			int: index of the bin holding that squared distance
-		'''
-		d = ii / 10.0
-		return int(d * d * _BINS_PER_A2 + 1)
-	def _lksolvderiv(at_self, at_other, d, LJ_R, lk_inv_lambda2,
-			lk_coeff):
-		'''
-		Distance derivative of one Lazaridis-Karplus solvation term
-		Arguments:
-		----------
-			at_self: Index of the atom being desolvated
-			at_other: Index of the atom doing the desolvating
-			d: Separation in angstroms
-			LJ_R: Lennard-Jones radius per atom type
-			lk_inv_lambda2: Inverse squared correlation length per atom type
-			lk_coeff: Solvation prefactor for each ordered type pair
-		Returns:
-		--------
-			float: the derivative of the solvation energy with respect to d
-		'''
-		inv_d = 1.0 / d
-		inv_d2 = inv_d * inv_d
-		dr = d - LJ_R[at_self]
-		x = (dr * dr) * lk_inv_lambda2[at_self]
-		s = math.exp(-x) * lk_coeff[at_self][at_other] * inv_d2
-		ds = -2.0 * s * (
-			(d - LJ_R[at_self]) * lk_inv_lambda2[at_self] + inv_d)
-		return ds
 	def _etableonepair(at1, at2, self_idx, other_idx, sigma_pair,
 			LJ_R, LJ_W, LK_DG, LK_L, LK_V, lj_r6, lj_r12, lj_si, lj_ss,
 			lk_coeff, far_lo, max_dis, bpa2, sol_lo, sol_hi, sol_cap,

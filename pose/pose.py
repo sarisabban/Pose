@@ -64,7 +64,7 @@ class Pose():
 			'Mn':54.938 , 'Fe':55.845 , 'Co':58.933 , 'Ni':58.693 ,
 			'Cu':63.546 , 'Zn':65.38  , 'Ga':69.723 , 'Ge':72.631 ,
 			'As':74.922 , 'Se':78.971 , 'Br':79.904 , 'Kr':84.798 ,
-			'Rb':84.468 , 'Sr':87.62  , 'Y' :88.906 , 'Zr':91.224 ,
+			'Rb':85.468 , 'Sr':87.62  , 'Y' :88.906 , 'Zr':91.224 ,
 			'Nb':92.906 , 'Mo':95.95  , 'Tc':98.907 , 'Ru':101.07 ,
 			'Rh':102.906, 'Pd':106.42 , 'Ag':107.868, 'Cd':112.414,
 			'In':114.818, 'Sn':118.711, 'Sb':121.760, 'Te':126.7  ,
@@ -547,6 +547,11 @@ class Pose():
 				bb = 'Backbone end' if i == n-1 else 'Backbone middle'
 			new_ch = (i == 0 and aa_start > 0)
 			self._bondtree(bb, aa, new_chain=new_ch)
+		for i in range(n - 1):
+			a, b = sequence[i], sequence[i + 1]
+			if b in 'Pp' and a not in 'Gg' and a.isupper() != b.isupper():
+				self.RotateDihedral(aa_start + i,
+					(120.0, -120.0)[a.islower()], 'PSI')
 	def _buildnucleotide(self, sequence, fmt, chains=None):
 		'''
 		Build a DNA or RNA strand (optionally duplex) into the pose
@@ -2200,13 +2205,6 @@ class Pose():
 						and v['Tricode'][1] == tri), None)
 					if sym is not None: is_D = True
 				if sym is None: continue
-				xyz = {r[0]: np.array(r[4:7]) for r in uniq}
-				h = xyz.get('HA2', xyz.get('1HA'))
-				if (tri == 'GLY' and h is not None
-					and all(k in xyz for k in ('N', 'CA', 'C'))):
-					v = xyz['CA']
-					is_D = float(np.dot(xyz['N'] - v,
-						np.cross(xyz['C'] - v, h - v))) > 0
 				hm = {v[0]: v[5] for v in (
 					self.aminoacids[sym].get('Sidechain Atoms',[]) +
 					self.aminoacids['Backbone middle']['Backbone Atoms']+
@@ -2222,6 +2220,9 @@ class Pose():
 					count += 1
 				Am[ai] = [sym.lower() if is_D else sym, ch, BB, SC, 'L', tri, 0]
 				ai += 1
+			for k in [k for k in Am if Am[k][0] == 'G']:
+				if {a[0].islower() for a in Am.values() if a[1] == Am[k][1]
+					and a[0] not in 'Gg'} == {True}: Am[k][0] = 'g'
 			Co = np.array(Co)
 			if not Am: raise Exception(f'No recognized residues in {filename}')
 			err = []
@@ -2402,6 +2403,10 @@ class Pose():
 					tri = resn
 				if tri not in self.nucleotides: continue
 				nr = {r[0]: r for r in residues[(ch, rn, ic)]}
+				miss = sorted({"O5'", "C5'", "C4'", "O4'", "C3'", "O3'",
+					"C1'"} - set(nr))
+				if miss: raise Exception(f'Missing backbone atoms in {filename}'
+					f': nucleotide {ch} {rn} ({tri}) missing {miss}')
 				db = self.nucleotides[tri]
 				bbm = db['Backbone Atoms']
 				bsm = db['Base Atoms']
@@ -2736,7 +2741,8 @@ class Pose():
 			coords = self.data['Coordinates']
 			atoms = self.data['Atoms']
 			bonds = self.data['Bonds']
-			for h in new_h:
+			left = set(new_h)
+			for h in sorted(new_h, key=lambda h: atoms[bonds[h][0]][1] in 'OS'):
 				heavy = [j for j in bonds.get(h, [])
 					if atoms[j][1] != 'H']
 				if len(heavy) != 1:
@@ -2761,6 +2767,18 @@ class Pose():
 				Fr = frame(coords[p], coords[a1], coords[a2])
 				loc = Ft @ (tmpl[h] - tmpl[p])
 				coords[h] = coords[p] + Fr.T @ loc
+				if atoms[p][1] in 'OS' and len(pn) == 1:
+					ok = np.ones(len(coords), bool)
+					ok[list(left) + [p, a1]] = False
+					spin = lambda t: coords[p] + Fr.T @ [loc[0],
+						np.cos(t) * loc[1] - np.sin(t) * loc[2],
+						np.sin(t) * loc[1] + np.cos(t) * loc[2]]
+					far = lambda t: np.linalg.norm(coords[ok] - spin(t),
+						axis=1).min()
+					coords[h] = spin(max((0, np.pi) if atoms[a1][5] == 'sp2'
+						else (0, 2.0944, -2.0944),
+						key=lambda t: (min(1.5, far(t)), t == 0, far(t))))
+				left.discard(h)
 		mol = self.data['Type']
 		if mol == 'Protein':
 			AAs = self.data['Amino Acids']
@@ -2826,7 +2844,7 @@ class Pose():
 			AAs2 = self.data['Amino Acids']
 			coords = self.data['Coordinates']
 			tmpl_coords = self.data['Coordinates'].copy()
-			new_h = []
+			new_h, added = [], []
 			for i in range(len(AAs2)):
 				has_orig = (
 					(i, 'N') in orig_coords
@@ -2874,6 +2892,41 @@ class Pose():
 					else:
 						local = F_new @ (coords[ai] - ori_new)
 						coords[ai] = on + F_orig_inv @ local
+						if (not is_mutated and aname not in self.probbatoms
+							and aname != 'CB' and AAs2[i][0] not in 'Pp'):
+							added.append(ai)
+			At, B, T = self.data['Atoms'], self.data['Bonds'], tmpl_coords
+			done = {a for a in range(len(coords)) if At[a][1] != 'H'}
+			done, turn = done - set(added), {}
+			unit = lambda v: v / np.linalg.norm(v)
+			nb = lambda a, *no: next((b for b in B[a] if b in done
+				and At[b][1] != 'H' and b not in no), None)
+			def arm(x):
+				p = nb(x); g = nb(p, x); h = nb(p, x, g)
+				h = nb(g, p, x) if h is None else h
+				d = np.linalg.norm(T[x] - T[p])
+				th = np.arccos(np.dot(unit(T[x] - T[p]), unit(T[g] - T[p])))
+				n1 = np.cross(T[g] - T[h], T[p] - T[g])
+				n2 = np.cross(T[p] - T[g], T[x] - T[p])
+				ph = np.arctan2(np.dot(np.cross(n1, n2), unit(T[p] - T[g])),
+					np.dot(n1, n2))
+				bc = unit(coords[p] - coords[g])
+				n = unit(np.cross(coords[g] - coords[h], bc))
+				return p, g, h, lambda s: coords[p] + d * (-np.cos(th) * bc
+					+ np.sin(th) * (np.cos(ph + s) * np.cross(n, bc)
+					+ np.sin(ph + s) * n))
+			for x in added:
+				p, g, h, put = arm(x)
+				if h in B[p]:
+					coords[x] = put(0); done.add(x); continue
+				arms = [arm(y)[3] for y in B[p] if y not in done
+					and At[y][1] != 'H' and nb(y) == p]
+				far = [a for a in done if a not in (p, g, h)]
+				free = 'sp2' not in (At[p][5], At[g][5]) or At[p][5] != At[g][5]
+				turn.setdefault(p, max((0, 2.0944, -2.0944) if free else (0,),
+					key=lambda s: min(np.linalg.norm(coords[far] - f(s),
+					axis=1).min() for f in arms)))
+				coords[x] = put(turn[p]); done.add(x)
 			placehydrogens(new_h, tmpl_coords)
 			if mirror:
 				self.data['Coordinates'] *= [1, 1, -1]
@@ -2948,7 +3001,7 @@ class Pose():
 			for i in range(N):
 				prv = self._prevres(i)
 				nxt = self._nextres(i)
-				has_P = self._hasatom(i, 'P')
+				has_P = self._hasatom(i, 'P') and prv is not None
 				if prv is not None and self._hasatom(prv, "O3'") and has_P:
 					ALPHAs[i] = self.GetDihedral(i, 'ALPHA')
 				if has_P:
@@ -3299,7 +3352,7 @@ class Molecule():
 			'Mn':54.938 , 'Fe':55.845 , 'Co':58.933 , 'Ni':58.693 ,
 			'Cu':63.546 , 'Zn':65.38  , 'Ga':69.723 , 'Ge':72.631 ,
 			'As':74.922 , 'Se':78.971 , 'Br':79.904 , 'Kr':84.798 ,
-			'Rb':84.468 , 'Sr':87.62  , 'Y' :88.906 , 'Zr':91.224 ,
+			'Rb':85.468 , 'Sr':87.62  , 'Y' :88.906 , 'Zr':91.224 ,
 			'Nb':92.906 , 'Mo':95.95  , 'Tc':98.907 , 'Ru':101.07 ,
 			'Rh':102.906, 'Pd':106.42 , 'Ag':107.868, 'Cd':112.414,
 			'In':114.818, 'Sn':118.711, 'Sb':121.760, 'Te':126.7  ,
