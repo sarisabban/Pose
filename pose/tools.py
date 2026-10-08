@@ -7905,6 +7905,9 @@ def Minimise(pose, ff=None, max_steps=500, ftol=1.0, alg='lbfgs', dt_fs=0.5,
 		root mean square against a per-atom force magnitude
 	'''
 	if ff is None: ff = ForceField()
+	if not hasattr(ff, '_prepare'):
+		raise ValueError("Minimise needs a ForceField() for its forces, "
+			"pass a Score() to Anneal(alg='mc') instead")
 	if alg not in ('fire', 'lbfgs'):
 		raise ValueError("Minimise: unknown alg=%r "
 			"(allowed: 'fire', 'lbfgs')" % (alg,))
@@ -8141,6 +8144,9 @@ def MolecularDynamics(pose, ff=None, n_steps=1000, dt_fs=2.0, T=300.0,
 		'frames', 'n_constraints' and 'dof'
 	'''
 	if ff is None: ff = ForceField()
+	if not hasattr(ff, '_prepare'):
+		raise ValueError("MolecularDynamics needs a ForceField() for its "
+			"forces, pass a Score() to Anneal(alg='mc') instead")
 	if thermostat not in ('nve', 'langevin'):
 		raise ValueError("thermostat must be 'nve' or 'langevin'")
 	if constraints not in ('hbonds', 'none'):
