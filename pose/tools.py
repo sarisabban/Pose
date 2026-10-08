@@ -10946,7 +10946,7 @@ def Port(name='openff', accept_rosetta_license=False):
 				elif 'alpha' in par: new[sm]['alpha'] = par['alpha']
 		block = {
 			'Constants': {'epsilon_r': 1.0, 'f_lj': 0.5,
-				'f_elec': 5.0 / 6.0},
+				'f_elec': float(root.find('Electrostatics').get('scale14'))},
 			'Constraints':      constraints,
 			'Bonds':            bonds,
 			'Angles':           angles,
