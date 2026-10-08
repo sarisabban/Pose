@@ -8394,7 +8394,7 @@ def _dockworker(task):
 			return (X - c0) @ rotmat(x[3:6]).T + centre + x[:3]
 		return build
 	def lbfgs(fun, x, scale, h, max_iter, central=False, mem=10,
-			c1=1e-4, etol=1e-4, stall_k=3):
+			c1=1e-4, etol=1e-4, stall_k=3, jac=None):
 		'''
 		Limited-memory BFGS on a state vector with a finite-difference
 		gradient and Armijo backtracking, in coordinates scaled so that
@@ -8414,6 +8414,8 @@ def _dockworker(task):
 			c1:       Armijo sufficient-decrease constant
 			etol:     Energy change below which an iteration is stalled
 			stall_k:  Consecutive stalled iterations that end the run
+			jac:      Analytic gradient, state -> array, or None for
+				finite differences
 		Returns:
 		--------
 			tuple: (best state, best objective, evaluations used)
@@ -8424,6 +8426,7 @@ def _dockworker(task):
 		def f(z): return fun(z * s_)
 		E = f(z); nev = 1
 		def grad(z, E):
+			if jac is not None: return jac(z * s_) * s_, 1
 			g = np.zeros(n); k = 0
 			for d in range(n):
 				zp = z.copy(); zp[d] += h_[d]; Ep = f(zp); k += 1
@@ -8556,14 +8559,57 @@ def _dockworker(task):
 		def fobj(x):
 			X = build(x)
 			return gridE(X) + intra(X)
+		def fjac(x):
+			'''
+			Analytic gradient of fobj: atom forces from the maps, the wall
+			and the clash guard, turned into the translation, the rotation
+			vector (through its Jacobian) and each torsion
+			Arguments:
+			----------
+				x: state vector
+			Returns:
+			--------
+				(6 + n_torsions,) array: gradient of fobj
+			'''
+			X = build(x); G = np.zeros_like(X)
+			Pg = (X[hv] - lo) / spacing
+			Gg = 200.0 * (np.clip(Pg - nmax, 0.0, None)
+				- np.clip(-Pg, 0.0, None))
+			inside = (Pg >= 0.0) & (Pg <= nmax - 1e-6)
+			Pg = np.clip(Pg, 0.0, nmax - 1e-6)
+			i0 = Pg.astype(np.int64); f = Pg - i0
+			for dx in (0, 1):
+				for dy in (0, 1):
+					for dz in (0, 1):
+						v = M[atype, i0[:, 0] + dx, i0[:, 1] + dy,
+							i0[:, 2] + dz]
+						w = np.stack([np.where((dx, dy, dz)[a], f[:, a],
+							1.0 - f[:, a]) for a in range(3)], axis=1)
+						for a in range(3):
+							o = [b for b in range(3) if b != a]
+							Gg[:, a] += (inside[:, a] * v * (2 * (dx, dy, dz)[a]
+								- 1) * w[:, o[0]] * w[:, o[1]])
+			G[hv] = Gg / spacing
+			if len(pi_):
+				d = X[pi_] - X[pj_]; r = np.sqrt((d * d).sum(1))
+				c = -2.0 * np.clip(3.0 - r, 0.0, None) / np.maximum(r, 1e-12)
+				np.add.at(G, pi_, c[:, None] * d)
+				np.add.at(G, pj_, -c[:, None] * d)
+			p0 = np.asarray(L['centre']) + x[:3]
+			v = x[3:6]; th = float(np.sqrt(v @ v))
+			K = np.array([[0.0, -v[2], v[1]], [v[2], 0.0, -v[0]],
+				[-v[1], v[0], 0.0]])
+			J = (np.eye(3) + (1 - np.cos(th)) / th ** 2 * K + (th - np.sin(th))
+				/ th ** 3 * K @ K) if th > 1e-8 else np.eye(3)
+			out = np.zeros(dim); out[:3] = G.sum(0)
+			out[3:6] = J.T @ np.cross(X - p0, G).sum(0)
+			for k, (i, j, mov) in enumerate(tors):
+				u = (X[j] - X[i]) / np.linalg.norm(X[j] - X[i])
+				out[6 + k] = u @ np.cross(X[mov] - X[j], G[mov]).sum(0)
+			return out
 		scale = np.array([1.0] * 3 + [0.3] * 3 + [0.5] * ntor)
 		hstep = np.array([0.02] * 3 + [np.radians(0.5)] * 3
 			+ [np.radians(0.5)] * ntor)
-		# Vina's own budget is (25 + movable atoms) / 3 iterations, which it
-		# spends on an analytic gradient. A finite-difference descent needs
-		# more of them to reach the same minimum, and a basin-hopping walk
-		# whose descent falls short accepts almost every move, which makes
-		# it a random walk rather than a search
 		local_steps = max(40, int((25 + len(hv)) / 3))
 		rg = float(np.sqrt(((L['X0'][hv] - L['c0']) ** 2).sum(1).mean()))
 		rng = np.random.default_rng(P['seed'])
@@ -8573,13 +8619,6 @@ def _dockworker(task):
 			y = x.copy()
 			if ntor: y[6:] = (y[6:] + np.pi) % (2 * np.pi) - np.pi
 			return y
-		# The box is divided into sites, the most favourable regions of the
-		# maps taken in order and kept at least 3 A apart, and each run is
-		# given one of them and confined to it. A pocket enclosed by the
-		# protein cannot be reached downhill from outside, so a run that
-		# starts at random never enters one; and a run that starts at a
-		# pocket but is then free to wander the whole box walks out of it
-		# and does not come back, which leaves the box covered by nobody
 		centre_v = np.asarray(L['centre'], dtype=np.float64)
 		w = np.bincount(atype, minlength=len(M)).astype(np.float64)
 		w /= max(w.sum(), 1.0)
@@ -8608,7 +8647,7 @@ def _dockworker(task):
 				if n > r_site: y[:3] = site + d * (r_site / n)
 			return y
 		def localopt(x, budget):
-			xo, Eo, k = lbfgs(fobj, x, scale, hstep, budget)
+			xo, Eo, k = lbfgs(fobj, x, scale, hstep, budget, jac=fjac)
 			return wrap(clampbox(xo)), k
 		n_grid = 0
 		best = None
@@ -8703,10 +8742,6 @@ def _dockworker(task):
 		E0 = exact(x0)
 		x1, E1, nev = lbfgs(fobj, x0, scale, hstep, P['max_iter'],
 			central=True)
-		# Metropolis polish on the exact score, then a second descent.
-		# Descent alone stops in whichever minimum the map search handed
-		# over, which leaves a pose in the right pocket at the wrong
-		# orientation whenever the two are parted by a small barrier
 		n_polish = int(P.get('polish', 0))
 		if n_polish > 0:
 			rng = np.random.default_rng(P['seed'])
@@ -8793,9 +8828,6 @@ def _dockworker(task):
 			n_eval += 1
 			return energy()
 		rng = np.random.default_rng(P['seed'])
-		# A perturbation that lands the two chains on top of one another is
-		# redrawn, not pushed further along the direction that caused it,
-		# which would walk the chain away from the interface altogether
 		def perturbation():
 			y = np.zeros(6)
 			if P['perturb'] is None: return y
@@ -8958,10 +8990,6 @@ def _dockworker(task):
 				_apply(cpx, q, cand[q][0][k] if k >= 0 else start[q],
 					cand[q][2], fused)
 			return len(ids)
-		# Alternate repacking with rigid-body minimisation, the cycle that
-		# Rosetta's high-resolution docking runs. Repacking moves side
-		# chains, so the reference frame the rigid body is measured from is
-		# rebuilt after each pass and the displacement starts again at zero
 		n_repack = 0
 		x_ref, e_ref = x_best, e_best
 		for cyc in range(int(P.get('repack', 0))):
@@ -9171,8 +9199,6 @@ def Dock(pose1, pose2=None, ff=None, centre=None, size=25.0, spacing=0.5,
 		Xr = np.asarray(pose1.data['Coordinates'], dtype=np.float64)
 		if not (np.abs(Xr - centre_v).max(1) <= half.max() + 8.0).any():
 			print('Dock: warning, no receptor atom within reach of the box')
-		# Rotatable bonds: single, both ends heavy with another heavy
-		# neighbour, not in a ring (bridge test), not an amide C-N
 		hset = set(heavy)
 		def order(i, j):
 			nb = B.get(i, [])
@@ -9205,8 +9231,6 @@ def Dock(pose1, pose2=None, ff=None, centre=None, size=25.0, spacing=0.5,
 				side_i = reach(i, (i, j), allset)
 				if len(side_j) <= len(side_i): rot.append((i, j, side_j))
 				else: rot.append((j, i, side_i))
-		# Tree order: anchors sorted by graph distance from the root, the
-		# heavy atom that no torsion moves in the most bonds
 		fixed_count = {i: 0 for i in heavy}
 		for i, j, side in rot:
 			for a in heavy:
@@ -9225,8 +9249,6 @@ def Dock(pose1, pose2=None, ff=None, centre=None, size=25.0, spacing=0.5,
 		tors.sort(key=lambda t: (t[0], t[1], t[2]))
 		tors = [(i, j, mov) for _, i, j, mov in tors]
 		ntor = len(tors)
-		# Intra pairs for the grid-stage clash guard: heavy pairs more
-		# than three bonds apart
 		pi_, pj_ = [], []
 		for a in heavy:
 			d = {a: 0}; q = deque([a])
@@ -9237,7 +9259,6 @@ def Dock(pose1, pose2=None, ff=None, centre=None, size=25.0, spacing=0.5,
 					if v not in d: d[v] = d[u] + 1; q.append(v)
 			for b in heavy:
 				if b > a and b not in d: pi_.append(a); pj_.append(b)
-		# Typing and torsion count from one exact call
 		E_in, per = ff(pose1, ligand=lig, decompose=True)
 		cache = getattr(ff, '_cache', None) or {}
 		names = sorted(ff.Parameters['XS_atom_types'])
@@ -9534,9 +9555,6 @@ def Dock(pose1, pose2=None, ff=None, centre=None, size=25.0, spacing=0.5,
 		seps = [E_sep] * len(res)
 		n_exact = sum(r['n_exact'] for r in res)
 		if n_cycles:
-			# Repacking moved side chains, so the energies of the separated
-			# chains are no longer those of the input and are remeasured on
-			# each run's own structure
 			X_keep = cpx.data['Coordinates']
 			for k, r in enumerate(res):
 				cpx.data['Coordinates'] = r['coordinates']
