@@ -1609,7 +1609,7 @@ class Score():
 			if a[0] == v['Chi Angle Atoms'][-1][2]
 			and (a[1], a[5] if len(a) > 5 else '') == ('C', 'sp2')}
 	def __call__(self, pose, ligand=None, decompose=False,
-			xs_override=None, nrot_override=None):
+			xs_override=None, nrot_override=None, grad=False):
 		'''
 		Evaluate the score function for a pose (optionally with a ligand)
 		Arguments:
@@ -1620,11 +1620,13 @@ class Score():
 			xs_override:   dict or None - validation hook; combined-index
 				to XS type name, bypassing derived typing
 			nrot_override: int or None - validation hook
+			grad:          bool - if True, also return per-atom forces
 		Returns:
 		--------
 			float OR (float, dict): total score in the score\'s native
 			unit (REU, kcal/mol, or dimensionless); when decompose=True
-			also returns a per-term breakdown
+			also returns a per-term breakdown; when grad=True the score
+			is followed by the (N, 3) forces in native unit per A
 		'''
 		plain = (ligand is None and xs_override is None
 			and nrot_override is None)
@@ -1666,6 +1668,7 @@ class Score():
 		self._cache['_dihedral_memo'] = {}
 		self._cache['_pairs_memo'] = {}
 		self._cache['_ljraw_memo'] = {}
+		self._cache['_grad'] = np.zeros_like(X) if grad else None
 		per_term = {}
 		torsional, e = False, 0.0
 		for method_name, kwargs in self.terms:
@@ -1705,9 +1708,35 @@ class Score():
 				'inter_total_kJ': inter_kj,
 				'intra_total_kJ': intra_kj,
 				'total_native': total_native}
+		out = float(total_native)
+		if grad: out = (out, -self._cache['_grad'] * self.scale)
 		if decompose:
-			return float(total_native), per_term
-		return float(total_native)
+			return out, per_term
+		return out
+	def pairforce(self, cache, pairs, weight, fn):
+		'''
+		Add the gradient of a pair-energy sum to cache['_grad'] when a
+		gradient was asked for, each pair's radial derivative taken by a
+		central difference
+		Arguments:
+		----------
+			cache:  dict - cache returned by ScoreMatch()
+			pairs:  tuple - (pi, pj, r, w) pair arrays
+			weight: float - term weight
+			fn:     callable - (pi, pj, r) -> per-pair energy
+		Returns:
+		--------
+			None: cache['_grad'] is updated in place
+		'''
+		pi, pj, r, w = pairs
+		G = cache['_grad']
+		if G is None or len(pi) == 0: return
+		g = weight * w * (fn(pi, pj, r + 1e-6) - fn(pi, pj, r - 1e-6)) / 2e-6
+		g = (g / np.maximum(r, 1e-12))[:, None] * (
+			cache['coords'][pi] - cache['coords'][pj])
+		for k in range(3):
+			G[:, k] += (np.bincount(pi, g[:, k], len(G))
+				- np.bincount(pj, g[:, k], len(G)))
 	def Gauss1Potential(self, pose, cache, ligand=None, **kw):
 		'''
 		Small-molecule pair Gaussian centred at d=0 Å, exp(-(d/0.5)^2)
@@ -1815,6 +1844,7 @@ class Score():
 	def FaAtrPotential(self, pose, cache, ligand=None, **kw):
 		'''
 		Fa_atr - inter-residue LJ attractive split
+		Source: Alford et al. 2017 (J. Chem. Theory Comput. 13:3031), eqs 2, 4-5
 		Arguments:
 		----------
 			pose:   Pose or Molecule - receptor structure being scored
@@ -1828,12 +1858,15 @@ class Score():
 		'''
 		raw, _ = cache['fullatomljraw'](cache, same_res=False)
 		weight = float(self.Parameters['FaAtr']['weight'])
+		self.pairforce(cache, cache['fullatompairs'](cache), weight,
+			lambda i, j, r: cache['ljpair'](cache, i, j, r)[0])
 		return {'inter_raw': raw, 'intra_raw': 0.0,
 			'inter_weighted': raw * weight, 'intra_weighted': 0.0,
 			'raw': raw}
 	def FaRepPotential(self, pose, cache, ligand=None, **kw):
 		'''
 		Fa_rep - inter-residue LJ repulsive split
+		Source: Alford et al. 2017 (J. Chem. Theory Comput. 13:3031), eqs 2-3, 5
 		Arguments:
 		----------
 			pose:   Pose or Molecule - receptor structure being scored
@@ -1847,12 +1880,15 @@ class Score():
 		'''
 		_, raw = cache['fullatomljraw'](cache, same_res=False)
 		weight = float(self.Parameters['FaRep']['weight'])
+		self.pairforce(cache, cache['fullatompairs'](cache), weight,
+			lambda i, j, r: cache['ljpair'](cache, i, j, r)[1])
 		return {'inter_raw': raw, 'intra_raw': 0.0,
 			'inter_weighted': raw * weight, 'intra_weighted': 0.0,
 			'raw': raw}
 	def FaSolPotential(self, pose, cache, ligand=None, **kw):
 		'''
 		Fa_sol - inter-residue Lazaridis-Karplus solvation
+		Source: Alford et al. 2017 (J. Chem. Theory Comput. 13:3031), eqs 11-13
 		Arguments:
 		----------
 			pose:   Pose or Molecule - receptor structure being scored
@@ -1866,12 +1902,15 @@ class Score():
 		'''
 		raw = cache['fullatomsolraw'](cache, same_res=False)
 		weight = float(self.Parameters['FaSol']['weight'])
+		self.pairforce(cache, cache['fullatompairs'](cache), weight,
+			lambda i, j, r: cache['solpair'](cache, i, j, r))
 		return {'inter_raw': raw, 'intra_raw': 0.0,
 			'inter_weighted': raw * weight, 'intra_weighted': 0.0,
 			'raw': raw}
 	def FaIntraRepPotential(self, pose, cache, ligand=None, **kw):
 		'''
 		Fa_intra_rep - intra-residue LJ repulsive split with CP3
+		Source: Alford et al. 2017 (J. Chem. Theory Comput. 13:3031), eq 3
 		Arguments:
 		----------
 			pose:   Pose or Molecule - receptor structure being scored
@@ -1885,6 +1924,8 @@ class Score():
 		'''
 		pi, pj, r, w = cache['fullatompairs'](cache, same_res=True, cp='cp3')
 		weight = float(self.Parameters['FaIntraRep']['weight'])
+		self.pairforce(cache, (pi, pj, r, w), weight,
+			lambda i, j, r: cache['ljpair'](cache, i, j, r)[1])
 		if len(pi) == 0:
 			return {'inter_raw': 0.0, 'intra_raw': 0.0,
 				'inter_weighted': 0.0, 'intra_weighted': 0.0,
@@ -1897,6 +1938,7 @@ class Score():
 	def FaIntraSolXover4Potential(self, pose, cache, ligand=None, **kw):
 		'''
 		Fa_intra_sol_xover4 - intra-residue LK solvation, only
+		Source: Alford et al. 2017 (J. Chem. Theory Comput. 13:3031), eqs 11-13
 		Arguments:
 		----------
 			pose:   Pose or Molecule - receptor structure being scored
@@ -1910,12 +1952,15 @@ class Score():
 		'''
 		raw = cache['fullatomsolraw'](cache, same_res=True)
 		weight = float(self.Parameters['FaIntraSolXover4']['weight'])
+		self.pairforce(cache, cache['fullatompairs'](cache, True), weight,
+			lambda i, j, r: cache['solpair'](cache, i, j, r))
 		return {'inter_raw': 0.0, 'intra_raw': raw,
 			'inter_weighted': 0.0, 'intra_weighted': raw * weight,
 			'raw': raw}
 	def FaElecPotential(self, pose, cache, ligand=None, **kw):
 		'''
 		Fa_elec - Coulomb with sigmoidal distance-dependent
+		Source: Alford et al. 2017 (J. Chem. Theory Comput. 13:3031), eqs 5-10
 		Arguments:
 		----------
 			pose:   Pose or Molecule - receptor structure being scored
@@ -1936,14 +1981,17 @@ class Score():
 		d_min = float(C['fa_elec_min_dis'])
 		d_max = float(C['fa_elec_max_dis'])
 		q = cache['charges']
-		low_start = d_min - 0.25
-		low_end = d_min + 0.25
-		hi_start = d_max - 1.0
+		low_start = d_min - float(C['fa_elec_low_width'])
+		low_end = d_min + float(C['fa_elec_low_width'])
+		hi_start = d_max - float(C['fa_elec_high_width'])
 		hi_end = d_max
 		pi, pj, r, w = cache['fullatompairs'](cache, same_res=False, cp='cp4',
 			use_cp_rep=True)
 		raw = self.elecpairsum(pi, pj, r, w, C0, D, D0, S,
 			d_max, d_min, hi_end, hi_start, low_end, low_start, q)
+		self.pairforce(cache, (pi, pj, r, w), weight,
+			lambda i, j, r: self.elecpairsum(i, j, r, 1.0, C0, D, D0, S,
+			d_max, d_min, hi_end, hi_start, low_end, low_start, q, True))
 		return {'inter_raw': raw, 'intra_raw': 0.0,
 			'inter_weighted': raw * weight, 'intra_weighted': 0.0,
 			'raw': raw}
@@ -1952,6 +2000,7 @@ class Score():
 			qq=None):
 		'''
 		Per-pair Coulomb summation kernel for FaElec
+		Source: Alford et al. 2017 (J. Chem. Theory Comput. 13:3031), eqs 6-10
 		Arguments:
 		----------
 			ai: np.ndarray - per-pair first-atom indices
@@ -2051,6 +2100,7 @@ class Score():
 	def dielectric(self, d, D, D0, S):
 		'''
 		Sigmoidal distance-dependent dielectric used by FaElec
+		Source: Alford et al. 2017 (J. Chem. Theory Comput. 13:3031), eqs 7-8
 		Arguments:
 		----------
 			r: np.ndarray - per-pair distance
@@ -2067,6 +2117,7 @@ class Score():
 	def LkBallWtdPotential(self, pose, cache, ligand=None, **kw):
 		'''
 		Lk_ball_wtd - anisotropic LK solvation. For each polar
+		Source: Alford et al. 2017 (J. Chem. Theory Comput. 13:3031), eqs 14-20
 		Arguments:
 		----------
 			pose:   Pose or Molecule - receptor structure being scored
@@ -2116,14 +2167,68 @@ class Score():
 				water_cnt, water_off, water_xyz)
 			total += float(np.sum(
 				w_iso_j * lk_iso_j + w_ball_j * lk_iso_j * frac_j))
+		if cache['_grad'] is not None:
+			self.lkballforce(cache, pi, pj, r, w, weight)
 		raw = total
 		return {'inter_raw': raw, 'intra_raw': 0.0,
 			'inter_weighted': raw * weight, 'intra_weighted': 0.0,
 			'raw': raw}
+	def lkballforce(self, cache, pi, pj, r, w, weight):
+		'''
+		Add the gradient of lk_ball_wtd to cache['_grad']: the pair
+		distance part at fixed ball fraction, the ball fraction through
+		the other atom and the waters, and the waters through the atoms
+		that place them, by central differences of their placement
+		Arguments:
+		----------
+			cache:  dict - cache returned by ScoreMatch()
+			pi, pj: np.ndarray - heavy-atom pair indices
+			r:      np.ndarray - pair distances
+			w:      np.ndarray - count-pair weights
+			weight: float - term weight
+		Returns:
+		--------
+			None: cache['_grad'] is updated in place
+		'''
+		X = cache['coords']; G = cache['_grad']; adj = cache['adj']
+		wx = cache['lkb_water_xyz']; wo = cache['lkb_water_off']
+		wc = cache['lkb_water_cnt']; d2l = cache['lkb_d2_low']
+		rw = float(cache['lkb_ramp_w2']); isH = cache['is_H']
+		wi = cache['lkb_w_iso']; wb = cache['lkb_w_ball']
+		m = float(self.Parameters['LkBall']['water_fade'])
+		f = [self.ballfraction(a, b, X, d2l, rw, wc, wo, wx)
+			* np.any(wc[a] > 0) for a, b in ((pi, pj), (pj, pi))]
+		self.pairforce(cache, (pi, pj, r, w), weight, lambda i, j, r: sum(
+			l * (wi[a] * np.any(wc[a] > 0) + wb[a] * fa) for l, a, fa
+			in zip(cache['lkisopair'](cache, i, j, r), (i, j), f)))
+		gw = np.zeros_like(wx)
+		for a, b, l in zip((pi, pj), (pj, pi), cache['lkisopair'](
+				cache, pi, pj, r)):
+			for n in np.unique(wc[a[wc[a] > 0]]):
+				k = np.flatnonzero(wc[a] == n)
+				gi = wo[a[k]][:, None] + np.arange(n)
+				d = wx[gi] - X[b[k]][:, None]; d2 = (d * d).sum(2)
+				u = np.exp(-(d2 - d2.min(1)[:, None]) / m)
+				x = (d2.min(1) - d2l[b[k]] - m * np.log(u.sum(1))) / rw
+				q = weight * w[k] * l[k] * wb[a[k]] * np.where(
+					(x > 0) & (x < 1), -4 * x * (1 - x * x) / rw, 0.0)
+				g = 2 * (q[:, None] * u / u.sum(1)[:, None])[:, :, None] * d
+				np.add.at(gw, gi, g); np.add.at(G, b[k], -g.sum(1))
+		for i in np.flatnonzero(wc > 0):
+			g = gw[wo[i]:wo[i] + wc[i]]
+			if not g.any(): continue
+			for k in {i} | adj[i] | {k for j in adj[i] if not isH[j]
+					for k in adj[j] if not isH[k]}:
+				for c in range(3):
+					v = X[k, c]; X[k, c] = v + 1e-6
+					e = (cache['place_waters'](X, only={i})[0] * g).sum()
+					X[k, c] = v - 1e-6; G[k, c] += (e - (cache['place_waters'](
+						X, only={i})[0] * g).sum()) / 2e-6; X[k, c] = v
 	def ballfraction(self, p_polar, p_other, X, d2_low, ramp_w2, water_cnt,
 			water_off, water_xyz):
 		'''
 		Fractional water-occupancy weight for one LkBallWtd water site
+		Source: Alford et al. 2017 (J. Chem. Theory Comput. 13:3031), eqs 14-16
 		Arguments:
 		----------
 			rsq: float - squared distance from heavy atom to water site
@@ -2147,7 +2252,7 @@ class Score():
 		polar_off = water_off[p_polar[idx]]
 		polar_cnt = water_cnt[p_polar[idx]]
 		d2_low_other = d2_low[p_other[idx]]
-		MFADE = 1.0
+		MFADE = float(self.Parameters['LkBall']['water_fade'])
 		frac_loc = np.zeros(len(idx), dtype=np.float64)
 		weight_all = np.empty(len(idx), dtype=np.float64)
 		for n_w in np.unique(polar_cnt):
@@ -2171,6 +2276,7 @@ class Score():
 	def FaDunPotential(self, pose, cache, ligand=None, **kw):
 		'''
 		Fa_dun - Dunbrack rotamer probability.
+		Source: Alford et al. 2017 (J. Chem. Theory Comput. 13:3031), eqs 27-29
 		Arguments:
 		----------
 			pose:   Pose or Molecule - receptor structure being scored
@@ -2206,6 +2312,11 @@ class Score():
 			raw = self.residuerotamer(raw, ri, info, cache, pose,
 				per_res, residues_db, phi_n, phi_start, phi_step,
 				psi_n, psi_start, psi_step, SIG_MIN)
+			if cache['_grad'] is not None:
+				self.torsionforce(cache, pose, ri, self.memograd(cache, ri,
+					lambda: weight * self.residuerotamer(0.0, ri, info, cache,
+					pose, None, residues_db, phi_n, phi_start, phi_step,
+					psi_n, psi_start, psi_step, SIG_MIN)))
 		return {'inter_raw': 0.0, 'intra_raw': raw,
 			'inter_weighted': 0.0, 'intra_weighted': raw * weight,
 			'raw': raw}
@@ -2247,8 +2358,9 @@ class Score():
 		except Exception:
 			phi = float('nan'); psi = float('nan')
 		if str(info[0]).islower(): phi, psi = -phi, -psi
-		if math.isnan(phi): phi = -90.0
-		if math.isnan(psi): psi = 130.0
+		F = self.Parameters['FaDun']
+		if math.isnan(phi): phi = float(F['neutral_phi'])
+		if math.isnan(psi): psi = float(F['neutral_psi'])
 		fp = (phi - phi_start) / phi_step
 		fs = (psi - psi_start) / psi_step
 		ip0 = int(math.floor(fp))
@@ -2315,7 +2427,7 @@ class Score():
 				for k in range(n_chi))
 			grid = grids.get(rot_idx_now)
 			if grid is not None and grid['has_data'].any():
-				MAXE_NL = math.log(1e6)
+				MAXE_NL = -math.log(float(F['prob_floor']))
 				neg_log_P_v = cache['fadun_spline_eval'](
 					grid['neglogP'],
 					grid['neglogP_ypp_psi'], fp, fs)
@@ -2640,12 +2752,11 @@ class Score():
 			int: index of the matching well
 		'''
 		c = ((c + 180.0) % 360.0) - 180.0
-		if 0.0 <= c <= 120.0: return 1
-		if abs(c) >= 120.0: return 2
-		return 3
+		return 1 if 0.0 <= c <= 120.0 else 3 if -120.0 < c < 0.0 else 2
 	def RamaPreProTermPotential(self, pose, cache, ligand=None, **kw):
 		'''
 		Rama_prepro - phi/psi Ramachandran propensity.
+		Source: Alford et al. 2017 (J. Chem. Theory Comput. 13:3031), eq 24
 		Arguments:
 		----------
 			pose:   Pose or Molecule - receptor structure being scored
@@ -2716,12 +2827,19 @@ class Score():
 			fs = (psi + 180.0) / 10.0
 			e = cache['rama_spline_eval'](table, fp, fs)
 			raw += (e + log_shift + ent)
+			if cache['_grad'] is not None:
+				s = (-0.1 if str(info[0]).islower() else 0.1) * weight
+				gp, gs = self.splinegrad(lambda a, b:
+					cache['rama_spline_eval'](table, a, b), fp, fs)
+				self.torsionforce(cache, pose, ri,
+					{('PHI', None): s * gp, ('PSI', None): s * gs})
 		return {'inter_raw': 0.0, 'intra_raw': raw,
 			'inter_weighted': 0.0, 'intra_weighted': raw * weight,
 			'raw': raw}
 	def PAaPpPotential(self, pose, cache, ligand=None, **kw):
 		'''
 		P_aa_pp - P(aa|phi,psi) propensity.
+		Source: Alford et al. 2017 (J. Chem. Theory Comput. 13:3031), eqs 25-26
 		Arguments:
 		----------
 			pose:   Pose or Molecule - receptor structure being scored
@@ -2754,7 +2872,7 @@ class Score():
 			self._paapp_spline_cache = {}
 		cache_pp = self._paapp_spline_cache
 		if not cache_pp:
-			MAXE = math.log(1e6)
+			MAXE = -math.log(float(self.Parameters['PAaPp']['prob_floor']))
 			for aa, tbl in paapp.items():
 				grid = np.zeros((36, 36))
 				for i in range(36):
@@ -2784,12 +2902,19 @@ class Score():
 			grid, ypp_psi = cache_pp[tri]
 			neg_log_pp = cache['fadun_spline_eval'](grid, ypp_psi, fp, fs)
 			raw += neg_log_pp + math.log(paa.get(tri, 1.0))
+			if cache['_grad'] is not None:
+				s = (-0.1 if str(info[0]).islower() else 0.1) * weight
+				gp, gs = self.splinegrad(lambda a, b:
+					cache['fadun_spline_eval'](grid, ypp_psi, a, b), fp, fs)
+				self.torsionforce(cache, pose, int(ri),
+					{('PHI', None): s * gp, ('PSI', None): s * gs})
 		return {'inter_raw': 0.0, 'intra_raw': raw,
 			'inter_weighted': 0.0, 'intra_weighted': raw * weight,
 			'raw': raw}
 	def OmegaPotential(self, pose, cache, ligand=None, **kw):
 		'''
-		Omega - peptide-bond omega tether (OmegaTether term).
+		Omega - peptide-bond omega tether.
+		Source: Alford et al. 2017 (J. Chem. Theory Comput. 13:3031), eq 30
 		Arguments:
 		----------
 			pose:   Pose or Molecule - receptor structure being scored
@@ -2801,89 +2926,68 @@ class Score():
 			dict: per-term contribution with inter and intra raw and
 				weighted values, plus 'raw' where the term decomposes
 		'''
-		omega_k = float(self.Parameters['Omega']['tether_k'])
-		weight = float(self.Parameters['Omega']['weight'])
-		omega_tab = self.Parameters.get('Omega_tables') or {}
-		if not omega_tab:
-			return cache['fullatomstubterm']('Omega')
+		P = self.Parameters['Omega']; tabs = self.Parameters.get(
+			'Omega_tables') or {}
+		if not tabs: return cache['fullatomstubterm']('Omega')
+		k_cis, weight = float(P['tether_k']), float(P['weight'])
 		aas = pose.data.get('Amino Acids') or {}
-		cterm = set()
-		if aas:
-			ch_map = {}
-			for ri, info in aas.items():
-				ch = info[1] if len(info) > 1 else ''
-				ch_map.setdefault(ch, []).append(int(ri))
-			for ris in ch_map.values():
-				ris.sort()
-				if ris: cterm.add(ris[-1])
+		last = {}
+		for r, info in aas.items():
+			c = info[1] if len(info) > 1 else ''
+			last[c] = max(last.get(c, int(r)), int(r))
+		if not getattr(self, '_omega_spline_cache', None):
+			ps = cache['periodic_cubic_spline']
+			self._omega_spline_cache = {name: tuple(x for g in (t['mu'],
+				t['sigma']) for x in (np.array(g), np.stack([ps(np.array(g)[
+				i]) for i in range(36)]))) for name, t in tabs.items()}
+		spl = self._omega_spline_cache; ev = cache['fadun_spline_eval']
 		raw = 0.0
-		normalization = math.log(1.0 / (6.0 * math.sqrt(2 * math.pi)))
-		if not hasattr(self, '_omega_spline_cache'):
-			self._omega_spline_cache = {}
-		cache_o = self._omega_spline_cache
-		if not cache_o:
-			for key, t in omega_tab.items():
-				mu_g = np.array(t['mu'])
-				sig_g = np.array(t['sigma'])
-				mu_ypp = np.stack(
-					[cache['periodic_cubic_spline'](mu_g[i])
-						for i in range(36)])
-				sig_ypp = np.stack(
-					[cache['periodic_cubic_spline'](sig_g[i])
-						for i in range(36)])
-				cache_o[key] = (mu_g, mu_ypp, sig_g, sig_ypp)
-		for ri in sorted(aas):
-			if int(ri) in cterm: continue
-			tri = aas[ri][5] if len(aas[ri]) >= 6 else None
-			tri = self.D_TO_L.get(tri, tri)
-			if tri == 'HIS_D': tri = 'HIS'
-			if tri in self.NCAA_PARENT: tri = self.NCAA_PARENT[tri]
-			try:
-				om = cache['cdih'](pose, int(ri), 'OMEGA')
-				phi = cache['cdih'](pose, int(ri), 'PHI')
-				psi = cache['cdih'](pose, int(ri), 'PSI')
+		for r in sorted(aas):
+			if int(r) in last.values(): continue
+			info = aas[r]; mirror = -1.0 if str(info[0]).islower() else 1.0
+			try: om, phi, psi = (mirror * cache['cdih'](pose, int(r), t)
+				for t in ('OMEGA', 'PHI', 'PSI'))
 			except Exception: continue
-			if str(aas[ri][0]).islower(): om, phi, psi = -om, -phi, -psi
 			if math.isnan(om): continue
-			om_nn = om
-			while om_nn < 0: om_nn += 360
-			while om_nn >= 360: om_nn -= 360
-			om_p = om_nn
-			while om_p < -90: om_p += 360
-			while om_p > 270: om_p -= 360
-			if om_p < 90:
-				dangle = ((om_p - 0 + 180) % 360) - 180
-				raw += omega_k * dangle * dangle
+			s = mirror * weight
+			w = om % 360.0
+			if w > 270.0: w -= 360.0
+			if w < 90.0:
+				d = ((w + 180) % 360) - 180
+				raw += k_cis * d * d
+				self.torsionforce(cache, pose, int(r),
+					{('OMEGA', None): s * 2 * k_cis * d})
 				continue
-			und = float(self.Parameters['Omega']['undefined_torsion'])
-			if math.isnan(phi): phi = und
-			if math.isnan(psi): psi = und
-			if tri == 'GLY': key = 'gly'
-			elif tri in self.FUSED: key = 'pro'
-			elif tri in ('ILE', 'VAL'): key = 'valile'
-			else: key = 'all'
-			mu_g, mu_ypp, sig_g, sig_ypp = cache_o[key]
-			phi_nn = phi
-			while phi_nn < 0: phi_nn += 360
-			psi_nn = psi
-			while psi_nn < 0: psi_nn += 360
-			fp = (phi_nn - 5.0) / 10.0
-			fs = (psi_nn - 5.0) / 10.0
-			fp = fp % 36.0
-			fs = fs % 36.0
-			mu = cache['fadun_spline_eval'](mu_g, mu_ypp, fp, fs)
-			sigma = cache['fadun_spline_eval'](sig_g, sig_ypp, fp, fs)
+			aa = self.D_TO_L.get(info[5] if len(info) >= 6 else None,
+				info[5] if len(info) >= 6 else None)
+			aa = self.NCAA_PARENT.get('HIS' if aa == 'HIS_D' else aa,
+				'HIS' if aa == 'HIS_D' else aa)
+			cls = ('gly' if aa == 'GLY' else 'pro' if aa in self.FUSED
+				else 'valile' if aa in ('ILE', 'VAL') else 'all')
+			mg, my, sg, sy = spl[cls]
+			und = float(P['undefined_torsion'])
+			fp = ((und if math.isnan(phi) else phi) % 360.0 - 5.0) / 10.0 % 36
+			fs = ((und if math.isnan(psi) else psi) % 360.0 - 5.0) / 10.0 % 36
+			mu, sigma = ev(mg, my, fp, fs), ev(sg, sy, fp, fs)
 			if sigma < 1e-6: continue
-			entropy = -math.log(1.0 / (sigma * math.sqrt(2 * math.pi)))
-			offset = ((om_p - mu + 180) % 360) - 180
-			logprob = offset * offset / (2 * sigma * sigma)
-			raw += normalization + entropy + logprob
+			x = ((w - mu + 180) % 360) - 180
+			raw += math.log(sigma / float(P['sigma_ref'])) + x * x / (2
+				* sigma * sigma)
+			if cache['_grad'] is not None:
+				gm = self.splinegrad(lambda a, b: ev(mg, my, a, b), fp, fs)
+				gs = self.splinegrad(lambda a, b: ev(sg, sy, a, b), fp, fs)
+				dm, ds = -x / sigma ** 2, 1 / sigma - x * x / sigma ** 3
+				self.torsionforce(cache, pose, int(r),
+					{('OMEGA', None): -s * dm,
+					('PHI', None): 0.1 * s * (dm * gm[0] + ds * gs[0]),
+					('PSI', None): 0.1 * s * (dm * gm[1] + ds * gs[1])})
 		return {'inter_raw': 0.0, 'intra_raw': raw,
 			'inter_weighted': 0.0, 'intra_weighted': raw * weight,
 			'raw': raw}
 	def ProClosePotential(self, pose, cache, ligand=None, **kw):
 		'''
-		Pro_close - proline ring closure (ProClosureEnergy term).
+		Pro_close - proline ring closure.
+		Source: Alford et al. 2017 (J. Chem. Theory Comput. 13:3031), eq 31
 		Arguments:
 		----------
 			pose:   Pose or Molecule - receptor structure being scored
@@ -2895,73 +2999,146 @@ class Score():
 			dict: per-term contribution with inter and intra raw and
 				weighted values, plus 'raw' where the term decomposes
 		'''
-		weight = float(self.Parameters['ProClose']['weight'])
-		aas = pose.data.get('Amino Acids') or {}
-		atoms = pose.data['Atoms']
-		coords = np.asarray(pose.data['Coordinates'])
+		P = self.Parameters['ProClose']; weight = float(P['weight'])
+		aas = pose.data.get('Amino Acids') or {}; A = pose.data['Atoms']
+		X = np.asarray(pose.data['Coordinates'])
+		var = float(P['planar_sd']) ** 2
+		trans = [math.radians(float(P[k])) for k in ('trans_chi4_mean',
+			'trans_chi4_sd')]
+		cis = [math.radians(float(P[k])) for k in ('cis_chi4_mean',
+			'cis_chi4_sd')]
+		order = sorted(int(r) for r in aas)
+		before = dict(zip(order[1:], order[:-1]))
+		def where(r):
+			return {A[int(a)][0]: int(a) for a in aas[r][2] + aas[r][3]}
 		raw = 0.0
-		sd_sq = float(self.Parameters['ProClose']['planar_sd']) ** 2
-		PC = self.Parameters.get('ProClose') or {}
-		trans_mean = math.radians(float(PC['trans_chi4_mean']))
-		trans_sd = math.radians(float(PC['trans_chi4_sd']))
-		cis_mean = math.radians(float(PC['cis_chi4_mean']))
-		cis_sd = math.radians(float(PC['cis_chi4_sd']))
-		n_term_set = set()
-		if aas:
-			chains = {}
-			for ri, info in aas.items():
-				ch = info[1] if len(info) > 1 else ''
-				chains.setdefault(ch, []).append(int(ri))
-			for ch, ris in chains.items():
-				ris.sort()
-				if ris: n_term_set.add(ris[0])
-		ri_sorted = sorted(int(r) for r in aas.keys())
-		ri_to_prev = {}
-		for i, r in enumerate(ri_sorted):
-			if i > 0: ri_to_prev[r] = ri_sorted[i - 1]
-		for ri, info in aas.items():
-			tri = info[5] if len(info) >= 6 else None
-			tri = self.D_TO_L.get(tri, tri)
-			if tri not in self.FUSED: continue
-			name_to_idx = {atoms[int(a)][0]: int(a)
-				for a in info[2] + info[3]}
-			needed = ('N', 'CA', 'CG', 'CD')
-			if not all(nm in name_to_idx for nm in needed): continue
-			n = coords[name_to_idx['N']]
-			ca = coords[name_to_idx['CA']]
-			cg = coords[name_to_idx['CG']]
-			cd = coords[name_to_idx['CD']]
-			nv = self.place(cd, cg, n, float(PC['nv_d']),
-				math.radians(float(PC['nv_theta'])), 0.0)
-			d2_n_nv = float(np.sum((nv - n) ** 2))
-			raw += d2_n_nv / sd_sq
-			if int(ri) in n_term_set:
-				cav = self.place(nv, cd, ca, float(PC['cav_d']),
-					math.radians(float(PC['cav_theta'])), 0.0)
-				d2_ca_cav = float(np.sum((cav - ca) ** 2))
-				raw += d2_ca_cav / sd_sq
-			prev = ri_to_prev.get(int(ri))
-			if prev is None: continue
-			prev_info = aas.get(prev)
-			if prev_info is None: continue
-			prev_atoms = {atoms[int(a)][0]: int(a)
-				for a in prev_info[2] + prev_info[3]}
-			if 'C' not in prev_atoms or 'O' not in prev_atoms: continue
-			c_prev = coords[prev_atoms['C']]
-			o_prev = coords[prev_atoms['O']]
-			chi4 = self.dihedralradians(coords[name_to_idx['CD']], n,
-				c_prev, o_prev)
-			if str(info[0]).islower(): chi4 = -chi4
-			if chi4 < -math.pi / 2: chi4 += 2 * math.pi
-			if chi4 > math.pi / 2:
-				diff = chi4 - trans_mean
-				raw += diff * diff / (trans_sd * trans_sd)
-			else:
-				diff = chi4 - cis_mean
-				raw += diff * diff / (cis_sd * cis_sd)
+		for r, info in aas.items():
+			aa = info[5] if len(info) >= 6 else None
+			if self.D_TO_L.get(aa, aa) not in self.FUSED: continue
+			at = where(r)
+			if any(k not in at for k in ('N', 'CA', 'CG', 'CD')): continue
+			n, ca, cg, cd = (X[at[k]] for k in ('N', 'CA', 'CG', 'CD'))
+			nv = self.place(cd, cg, n, float(P['nv_d']),
+				math.radians(float(P['nv_theta'])), 0.0)
+			raw += float(np.sum((nv - n) ** 2)) / var
+			q = before.get(int(r))
+			if cache['_grad'] is not None:
+				nb = where(q) if q in aas else {}
+				self.localforce(cache, pose, [x for x in (q, int(r))
+					if x in aas], [at[k] for k in ('N', 'CA', 'CG', 'CD')]
+					+ [nb[k] for k in ('C', 'O') if k in nb],
+					lambda: weight * self.ProClosePotential(pose, cache)['raw'])
+			nb = where(q) if q in aas else {}
+			if 'C' not in nb or 'O' not in nb: continue
+			t = self.dihedralradians(cd, n, X[nb['C']], X[nb['O']])
+			t = -t if str(info[0]).islower() else t
+			t = t + 2 * math.pi if t < -math.pi / 2 else t
+			mean, sd = trans if t > math.pi / 2 else cis
+			raw += ((t - mean) / sd) ** 2
 		return {'inter_raw': 0.0, 'intra_raw': raw,
 			'inter_weighted': 0.0, 'intra_weighted': raw * weight,
 			'raw': raw}
+	def splinegrad(self, f, fp, fs):
+		'''
+		Central-difference derivative of a 2D spline lookup
+		Arguments:
+		----------
+			f:  callable - (fp, fs) -> value
+			fp: float - fractional phi index
+			fs: float - fractional psi index
+		Returns:
+		--------
+			tuple: (df/dfp, df/dfs)
+		'''
+		return ((f(fp + 1e-6, fs) - f(fp - 1e-6, fs)) / 2e-6,
+			(f(fp, fs + 1e-6) - f(fp, fs - 1e-6)) / 2e-6)
+	def memograd(self, cache, ri, fn):
+		'''
+		Derivative of a residue energy with respect to each of the
+		residue's memoised dihedrals, by central difference
+		Arguments:
+		----------
+			cache: dict - cache returned by ScoreMatch()
+			ri:    int - residue index
+			fn:    callable - () -> energy, reading dihedrals by cdih
+		Returns:
+		--------
+			dict: (dtype, chi_type) -> energy derivative per degree
+		'''
+		m = cache['_dihedral_memo']; out = {}
+		for k in [k for k in m if k[0] == int(ri)]:
+			v = m[k]
+			if isinstance(v, BaseException) or v != v: continue
+			m[k] = v + 1e-6; e = fn(); m[k] = v - 1e-6
+			out[k[1:]] = (e - fn()) / 2e-6; m[k] = v
+		return out
+	def torsionforce(self, cache, pose, ri, dE):
+		'''
+		Add the gradient of an energy that depends on dihedral angles to
+		cache['_grad'], from its derivative with respect to each angle
+		Arguments:
+		----------
+			cache: dict - cache returned by ScoreMatch()
+			pose:  Pose - structure being scored
+			ri:    int - residue index
+			dE:    dict - (dtype, chi_type) of residue ri, or four atom
+				indices, -> energy derivative per degree
+		Returns:
+		--------
+			None: cache['_grad'] is updated in place
+		'''
+		G = cache['_grad']
+		if G is None: return
+		aas = pose.data['Amino Acids']; A = pose.data['Atoms']
+		p, q = pose._prevres(ri), pose._nextres(ri)
+		for k, v in dE.items():
+			if v == 0 or v != v: continue
+			if len(k) == 2:
+				m = cache['_dihedral_memo'].get((int(ri),) + k)
+				if not isinstance(m, float) or m != m: continue
+				at = {'PHI': ((p, 'C'), (ri, 'N'), (ri, 'CA'), (ri, 'C')),
+					'PSI': ((ri, 'N'), (ri, 'CA'), (ri, 'C'), (q, 'N')),
+					'OMEGA': ((ri, 'CA'), (ri, 'C'), (q, 'N'), (q, 'CA'))
+					}.get(k[0]) or [(ri, n) for n in pose.aminoacids[
+					aas[ri][0].upper()]['Chi Angle Atoms'][k[1] - 1]]
+				k = [next(a for a in aas[r][2] + aas[r][3]
+					if A[a][0] == n) for r, n in at]
+			x = cache['coords'][list(k)]
+			f, g, h = x[0] - x[1], x[1] - x[2], x[3] - x[2]
+			a, b = np.cross(f, g), np.cross(h, g)
+			L = np.sqrt(g @ g); a = a / (a @ a); b = b / (b @ b)
+			t = (f @ g) / L * a - (h @ g) / L * b
+			for i, d in zip(k, (-L * a, L * a + t, -L * b - t, L * b)):
+				G[i] += v * 180 / math.pi * d
+	def localforce(self, cache, pose, res, idx, fn):
+		'''
+		Add the gradient of a term with respect to a few atoms to
+		cache['_grad'] by central differences, the term re-scored over
+		the residues res alone
+		Arguments:
+		----------
+			cache: dict - cache returned by ScoreMatch()
+			pose:  Pose - structure being scored
+			res:   list - residue indices the term is re-scored over
+			idx:   list - atom indices to differentiate by
+			fn:    callable - () -> weighted term energy
+		Returns:
+		--------
+			None: cache['_grad'] is updated in place
+		'''
+		G = cache['_grad']
+		if G is None: return
+		aas = pose.data['Amino Acids']; X = pose.data['Coordinates']
+		pose.data['Amino Acids'] = {r: aas[r] for r in res}
+		cache['_grad'] = None
+		try:
+			for i in idx:
+				for k in range(3):
+					v = X[i, k]; X[i, k] = v + 1e-6; e = fn()
+					X[i, k] = v - 1e-6; G[i, k] += (e - fn()) / 2e-6
+					X[i, k] = v
+		finally:
+			pose.data['Amino Acids'] = aas; cache['_grad'] = G
 	def dihedralradians(self, a, b, c, d):
 		'''
 		Dihedral angle of four points in degrees
@@ -3011,6 +3188,8 @@ class Score():
 	def DslfFa13Potential(self, pose, cache, ligand=None, **kw):
 		'''
 		Dslf_fa13 - disulfide geometry potential, per the
+		Source: Alford et al. 2017 (J. Chem. Theory Comput.
+		13:3031), eq 23, SI eqs S8-11
 		Arguments:
 		----------
 			pose:   Pose or Molecule - receptor structure being scored
@@ -3022,88 +3201,51 @@ class Score():
 			dict: per-term contribution with inter and intra raw and
 				weighted values, plus 'raw' where the term decomposes
 		'''
-		weight = float(self.Parameters['DslfFa13']['weight'])
-		aas = pose.data.get('Amino Acids') or {}
-		atoms = pose.data['Atoms']
-		coords = np.asarray(pose.data['Coordinates'])
-		raw = 0.0
-		shift = 2.0
-		mest = math.exp(float(
-			self.Parameters['DslfFa13']['mest_log']))
-		DS = self.Parameters['DslfFa13']
-		wt_len = float(DS['wt_len']); wt_ang = float(DS['wt_ang'])
-		wt_dihSS = float(DS['wt_dihSS'])
-		wt_dihCS = float(DS['wt_dihCS'])
-		d_location = DS['d_location']; d_scale = DS['d_scale']
-		d_shape = DS['d_shape']
-		a_logA = DS['a_logA']; a_kappa = DS['a_kappa']; a_mu = DS['a_mu']
-		dss_logA1 = DS['dss_logA1']; dss_kappa1 = DS['dss_kappa1']
-		dss_mu1 = DS['dss_mu1']
-		dss_logA2 = DS['dss_logA2']; dss_kappa2 = DS['dss_kappa2']
-		dss_mu2 = DS['dss_mu2']
-		dcs_logA1 = DS['dcs_logA1']; dcs_mu1 = DS['dcs_mu1']
-		dcs_kappa1 = DS['dcs_kappa1']
-		dcs_logA2 = DS['dcs_logA2']; dcs_mu2 = DS['dcs_mu2']
-		dcs_kappa2 = DS['dcs_kappa2']
-		dcs_logA3 = DS['dcs_logA3']; dcs_mu3 = DS['dcs_mu3']
-		dcs_kappa3 = DS['dcs_kappa3']
+		P = self.Parameters['DslfFa13']
+		def g(k): return float(P[k])
+		weight, floor = g('weight'), math.exp(g('mest_log'))
+		def bump(x, a, k, m):
+			return math.exp(g(a)) * math.exp(g(k) * math.cos(
+				math.radians(x - g(m))))
+		def mix(x, comps):
+			return -math.log(sum(bump(x, *c) for c in comps) + floor)
+		ss = [('dss_logA%d' % i, 'dss_kappa%d' % i, 'dss_mu%d' % i)
+			for i in (1, 2)]
+		cs = [('dcs_logA%d' % i, 'dcs_kappa%d' % i, 'dcs_mu%d' % i)
+			for i in (1, 2, 3)]
+		aas = pose.data.get('Amino Acids') or {}; A = pose.data['Atoms']
+		X = np.asarray(pose.data['Coordinates'])
 		cys = []
-		for ri, info in aas.items():
-			tri = info[5] if len(info) >= 6 else None
-			tri = self.D_TO_L.get(tri, tri)
-			if tri != 'CYS': continue
-			name_to_idx = {atoms[int(a)][0]: int(a)
-				for a in info[2] + info[3]}
-			if all(nm in name_to_idx
-					for nm in ('SG', 'CB', 'CA')):
-				cys.append((name_to_idx['SG'], name_to_idx['CB'],
-					name_to_idx['CA'], str(info[0]).islower()))
-		PI = math.pi
-		for i in range(len(cys)):
-			for j in range(i + 1, len(cys)):
-				sg1, cb1, ca1, d1 = cys[i]
-				sg2, cb2, ca2, d2 = cys[j]
-				ssdist = float(np.linalg.norm(
-					coords[sg1] - coords[sg2]))
-				if ssdist > 3.0: continue
-				score = -shift
-				z = (ssdist - d_location) / d_scale
-				score_d = (z * z / 2.0
-					- math.log(math.erfc(-d_shape * z / math.sqrt(2.0))
-						+ mest))
-				score += wt_len * score_d
-				csang1 = self.angle(coords[cb1], coords[sg1], coords[sg2])
-				csang2 = self.angle(coords[cb2], coords[sg2], coords[sg1])
-				score += wt_ang * (-a_logA - a_kappa
-					* math.cos(PI / 180 * (csang1 - a_mu)))
-				score += wt_ang * (-a_logA - a_kappa
-					* math.cos(PI / 180 * (csang2 - a_mu)))
-				ss_dih = self.dihedraldegrees(coords[cb1], coords[sg1],
-					coords[sg2], coords[cb2])
-				if d1: ss_dih = -ss_dih
-				e1 = (math.exp(dss_logA1) * math.exp(dss_kappa1
-					* math.cos(PI/180 * (ss_dih - dss_mu1))))
-				e2 = (math.exp(dss_logA2) * math.exp(dss_kappa2
-					* math.cos(PI/180 * (ss_dih - dss_mu2))))
-				score += wt_dihSS * (-math.log(e1 + e2 + mest))
-				for ca_, cb_, sg_, sgo_, d_ in (
-						(ca1, cb1, sg1, sg2, d1),
-						(ca2, cb2, sg2, sg1, d2)):
-					ang = self.dihedraldegrees(coords[ca_], coords[cb_],
-						coords[sg_], coords[sgo_])
-					if d_: ang = -ang
-					e1 = (math.exp(dcs_logA1) * math.exp(
-						dcs_kappa1 * math.cos(
-							PI/180 * (ang - dcs_mu1))))
-					e2 = (math.exp(dcs_logA2) * math.exp(
-						dcs_kappa2 * math.cos(
-							PI/180 * (ang - dcs_mu2))))
-					e3 = (math.exp(dcs_logA3) * math.exp(
-						dcs_kappa3 * math.cos(
-							PI/180 * (ang - dcs_mu3))))
-					score += wt_dihCS * (-math.log(
-						e1 + e2 + e3 + mest))
-				raw += score
+		for r, info in aas.items():
+			aa = info[5] if len(info) >= 6 else None
+			if self.D_TO_L.get(aa, aa) != 'CYS': continue
+			at = {A[int(a)][0]: int(a) for a in info[2] + info[3]}
+			if all(k in at for k in ('SG', 'CB', 'CA')):
+				cys.append((at['SG'], at['CB'], at['CA'],
+					-1.0 if str(info[0]).islower() else 1.0))
+		raw = 0.0
+		for u in range(len(cys)):
+			for v in range(u + 1, len(cys)):
+				s1, b1, a1, m1 = cys[u]; s2, b2, a2, m2 = cys[v]
+				d = float(np.linalg.norm(X[s1] - X[s2]))
+				if d > g('disulf_ssdist_cutoff'): continue
+				z = (d - g('d_location')) / g('d_scale')
+				e = g('wt_len') * (z * z / 2.0 - math.log(math.erfc(
+					-g('d_shape') * z / math.sqrt(2.0)) + floor))
+				for b, s, o in ((b1, s1, s2), (b2, s2, s1)):
+					e -= g('wt_ang') * (g('a_logA') + g('a_kappa') * math.cos(
+						math.radians(self.angle(X[b], X[s], X[o]) - g('a_mu'))))
+				e += g('wt_dihSS') * mix(m1 * self.dihedraldegrees(X[b1],
+					X[s1], X[s2], X[b2]), ss)
+				for a, b, s, o, m in ((a1, b1, s1, s2, m1), (a2, b2, s2, s1,
+						m2)):
+					e += g('wt_dihCS') * mix(m * self.dihedraldegrees(X[a],
+						X[b], X[s], X[o]), cs)
+				raw += e - g('shift')
+				self.localforce(cache, pose, [r for r in aas if {s1, s2}
+					& set(aas[r][2] + aas[r][3])],
+					[s1, b1, a1, s2, b2, a2],
+					lambda: weight * self.DslfFa13Potential(pose, cache)['raw'])
 		return {'inter_raw': 0.0, 'intra_raw': raw,
 			'inter_weighted': 0.0, 'intra_weighted': raw * weight,
 			'raw': raw}
@@ -3148,6 +3290,7 @@ class Score():
 	def YhhPlanarityPotential(self, pose, cache, ligand=None, **kw):
 		'''
 		yhh_planarity - Tyr hydroxyl planarity, 0.5*(cos(pi-2*chi3)+1)
+		Source: Alford et al. 2017 (J. Chem. Theory Comput. 13:3031), eq 32
 		Arguments:
 		----------
 			pose:   Pose or Molecule - receptor structure being scored
@@ -3180,12 +3323,15 @@ class Score():
 			y = float(np.dot(m1, n2))
 			chi3 = np.arctan2(y, x)
 			raw += 0.5 * (np.cos(np.pi - 2 * chi3) + 1.0)
+			self.torsionforce(cache, pose, ri, {tuple(name_to_idx[nm]
+				for nm in needed): -weight * math.pi / 180 * np.sin(2 * chi3)})
 		return {'inter_raw': 0.0, 'intra_raw': raw,
 			'inter_weighted': 0.0, 'intra_weighted': raw * weight,
 			'raw': raw}
 	def RefPotential(self, pose, cache, ligand=None, **kw):
 		'''
 		Ref - per-amino-acid unfolded reference energy
+		Source: Alford et al. 2017 (J. Chem. Theory Comput. 13:3031), eq 36
 		Arguments:
 		----------
 			pose:   Pose or Molecule - receptor structure being scored
@@ -3218,6 +3364,7 @@ class Score():
 	def HBondSrBbPotential(self, pose, cache, ligand=None, **kw):
 		'''
 		Hbond_sr_bb: short-range bb-bb hbonds
+		Source: Alford et al. 2017 (J. Chem. Theory Comput. 13:3031), eqs 21-22
 		Arguments:
 		----------
 			pose:   Pose or Molecule - receptor structure being scored
@@ -3231,12 +3378,15 @@ class Score():
 		'''
 		raw = cache['fullatomhbond'](pose, cache)['SR_BB']
 		w = float(self.Parameters['HBondSrBb']['weight'])
+		g = cache['fullatomhbond'](pose, cache).get('grad')
+		if g: cache['_grad'] += w * g['SR_BB']
 		return {'inter_raw': 0.0, 'intra_raw': raw,
 			'inter_weighted': 0.0, 'intra_weighted': raw * w,
 			'raw': raw}
 	def HBondLrBbPotential(self, pose, cache, ligand=None, **kw):
 		'''
 		Hbond_lr_bb: long-range bb-bb hbonds
+		Source: Alford et al. 2017 (J. Chem. Theory Comput. 13:3031), eqs 21-22
 		Arguments:
 		----------
 			pose:   Pose or Molecule - receptor structure being scored
@@ -3250,12 +3400,15 @@ class Score():
 		'''
 		raw = cache['fullatomhbond'](pose, cache)['LR_BB']
 		w = float(self.Parameters['HBondLrBb']['weight'])
+		g = cache['fullatomhbond'](pose, cache).get('grad')
+		if g: cache['_grad'] += w * g['LR_BB']
 		return {'inter_raw': 0.0, 'intra_raw': raw,
 			'inter_weighted': 0.0, 'intra_weighted': raw * w,
 			'raw': raw}
 	def HBondBbScPotential(self, pose, cache, ligand=None, **kw):
 		'''
 		Hbond_bb_sc: backbone-sidechain hbonds
+		Source: Alford et al. 2017 (J. Chem. Theory Comput. 13:3031), eqs 21-22
 		Arguments:
 		----------
 			pose:   Pose or Molecule - receptor structure being scored
@@ -3269,12 +3422,15 @@ class Score():
 		'''
 		raw = cache['fullatomhbond'](pose, cache)['BB_SC']
 		w = float(self.Parameters['HBondBbSc']['weight'])
+		g = cache['fullatomhbond'](pose, cache).get('grad')
+		if g: cache['_grad'] += w * g['BB_SC']
 		return {'inter_raw': 0.0, 'intra_raw': raw,
 			'inter_weighted': 0.0, 'intra_weighted': raw * w,
 			'raw': raw}
 	def HBondScPotential(self, pose, cache, ligand=None, **kw):
 		'''
 		Hbond_sc: sidechain-sidechain hbonds
+		Source: Alford et al. 2017 (J. Chem. Theory Comput. 13:3031), eqs 21-22
 		Arguments:
 		----------
 			pose:   Pose or Molecule - receptor structure being scored
@@ -3288,6 +3444,8 @@ class Score():
 		'''
 		raw = cache['fullatomhbond'](pose, cache)['SC']
 		w = float(self.Parameters['HBondSc']['weight'])
+		g = cache['fullatomhbond'](pose, cache).get('grad')
+		if g: cache['_grad'] += w * g['SC']
 		return {'inter_raw': 0.0, 'intra_raw': raw,
 			'inter_weighted': 0.0, 'intra_weighted': raw * w,
 			'raw': raw}

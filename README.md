@@ -355,7 +355,7 @@ The `Score()` class evaluates an empirical scoring function on a `Pose`, or a sm
 | Method                                                       | Description |
 |--------------------------------------------------------------|-------------|
 | `sf = Score(name='Default', strict=False)`                   | Build a scoring function. `name` is any key in `database.json['Score Parameters']`, case-insensitive: `Default` ships, `Port()` adds `REF15` and `AutoDock Vina`. `strict` is accepted but currently unread |
-| `S = sf(pose, ligand=None)`                                  | Total score in the set's native unit — REU for `REF15`, kcal/mol for `AutoDock Vina`, dimensionless for `Default`. `ligand=None` scores the pose alone; a `Molecule` adds receptor-ligand and intra-ligand pairs, which `REF15` ignores |
+| `S, F = sf(pose, ligand=None, grad=True)`                    | Total score in the set's native unit — REU for `REF15`, kcal/mol for `AutoDock Vina`, dimensionless for `Default`. `ligand=None` scores the pose alone; a `Molecule` adds receptor-ligand and intra-ligand pairs, which `REF15` ignores. `grad=True` returns the gradient |
 | `S, per_term = sf(pose, ligand=None, decompose=True)`        | `decompose=False` returns the total alone, `decompose=True` also returns a per-method dict of `inter_raw`, `intra_raw`, `inter_weighted`, `intra_weighted` and `raw`, plus a `_summary` entry |
 | `S = sf(pose, ligand, xs_override=None, nrot_override=None)` | Validation hooks, both `None` in normal use. `xs_override` maps a combined receptor+ligand atom index to an XS type name, bypassing derived typing; `nrot_override` forces the ligand rotatable-bond count |
 | `sf.Gauss1Potential(pose, cache, ligand=None)`               | Steric Gaussian at surface contact, `exp(−(d/0.5)²)` with `d = r − (Rᵢ + Rⱼ)`. Zero unless `ligand` is a `Molecule` |
@@ -529,7 +529,7 @@ This information resides in `database['Nucleotides'][NUCEOTIDE_TRICODE]`
 
 ### Description of the Rotamer Library in database.json:
 
-This information resides in `database['Rotamer Library']`. The 18 canonical side-chain libraries are derived from the Dunbrack BBDEP2010 rotamer library, 5% step-down variant `StpDwn_5-5-5` (Shapovalov & Dunbrack 2011, CC BY 4.0). Of the six non-canonical entries, `MSE`, `SEC` and `FT6` are exact copies of their canonical parents `MET`, `CYS` and `TRP` — no backbone-dependent rotamer library exists for these residues in any published source — while `ORN`, `PTR` and `TPO` were computed independently. See [Third-Party Attribution](#third-party-attribution).
+This information resides in `database['Rotamer Library']`. The 18 canonical side-chain libraries are derived from the Dunbrack BBDEP2010 rotamer library (Shapovalov & Dunbrack 2011, CC BY 4.0). Of the six non-canonical entries, `MSE`, `SEC` and `FT6` are exact copies of their canonical parents `MET`, `CYS` and `TRP` — no backbone-dependent rotamer library exists for these residues in any published source — while `ORN`, `PTR` and `TPO` were computed independently. See [Third-Party Attribution](#third-party-attribution).
 
 **Top-level shape:**
 
@@ -594,7 +594,7 @@ D-amino acid handling: the library is keyed on the L-form 3-letter code only. Co
 
 | Sub-key              | Value Type | Description |
 |----------------------|------------|-------------|
-| `Constants`          | Dict       | Cutoffs (`fa_max_dis`, `fa_elec_max_dis`, `fa_elec_min_dis`, `fa_atr_short`, `fa_atr_long`, `cutoff`), the dielectric model (`eps_core`, `eps_solvent`, `sigmoidal_D`, `sigmoidal_D0`, `sigmoidal_S`), `coulomb_C0`, `lj_hbond_OH`, `connectivity_weight` and the output scaling. `scale` converts the internally-kJ sum to the native unit — 1/4.184 for `REF15` and `AutoDock Vina`, 1.0 for `Default`; `nrot_w` is the rotatable-bond coefficient. Distances in Å |
+| `Constants`          | Dict       | Cutoffs (`fa_max_dis`, `fa_elec_max_dis`, `fa_elec_min_dis`, `fa_atr_short`, `fa_atr_long`, `cutoff`), the fa_elec smoothing windows (`fa_elec_low_width`, `fa_elec_high_width`), the dielectric model (`eps_core`, `eps_solvent`, `sigmoidal_D`, `sigmoidal_D0`, `sigmoidal_S`), `coulomb_C0`, `lj_hbond_OH`, `connectivity_weight` and the output scaling. `scale` converts the internally-kJ sum to the native unit — 1/4.184 for `REF15` and `AutoDock Vina`, 0.798 for `Default`; `nrot_w` is the rotatable-bond coefficient. Distances in Å |
 | `Atom_types`         | Dict       | Full-atom types keyed by code — 154 in `REF15`, 14 generic ones in `Default`. Each carries `element`, `LJ_RADIUS` (Å), `LJ_WDEPTH` (kcal/mol), `LK_DGFREE` (kcal/mol), `LK_LAMBDA` (Å), `LK_VOLUME` (Å³) and boolean `acceptor`/`donor`/`polar_h` flags |
 | `XS_atom_types`      | Dict       | Small-molecule types keyed by code — 31 in `AutoDock Vina`, 17 in `Default`. Each carries `radius` (Å) and boolean `hydrophobic`/`acceptor`/`donor`. The names are hardcoded in `tools.patternsearchsmall()`, so a set must use them verbatim |
 | `Residue_types`      | Dict       | Amino-acid templates keyed by 3-letter code — 26 in `Default` (one per supported letter), 27 in `REF15` (20 canonical + `HIS_D` + the six non-canonicals). Each carries `{name, aa, atoms: {N: {type, mm_type, charge}, …}, bonds, aliases}`. Resolves pose atom names to full-atom types and partial charges; `aliases` absorbs PDBv2/v3 naming differences |
@@ -602,7 +602,7 @@ D-amino acid handling: the library is keyed on the L-form 3-letter code only. Co
 | `EtablePairParams`   | Dict       | `{atom_types, n_types, pairs}`; `pairs` is a flat `n_types²` list of 31-field cells (`close_start`, `close_poly`, `lj_r12_coeff`, `ljatr_cubic_poly`, …) driving FaAtr/FaRep/FaSol/LkBall. **Required**. An atom whose type is absent gets `at_e_idx = -1` and silently contributes nothing |
 | `LkBallWtd.atom_weights` | Dict   | Per-type `[iso, ball]` weights. **Required** |
 | `CountPair`          | Dict       | `{half}` — the 1-4 connectivity weight (0.2) |
-| `LkBall`             | Dict       | Virtual-water geometry: `opt_dist`, `ramp_w2`, `far_offset`, `max_dis`, `far_lo`, `h2o_radius`, `lk_lambda_default` |
+| `LkBall`             | Dict       | Virtual-water geometry: `opt_dist`, `ramp_w2`, `far_offset`, `max_dis`, `far_lo`, `h2o_radius`, `lk_lambda_default`, and `water_fade`, the soft-minimum width over water sites |
 | `HBondSp2`           | Dict       | sp2 acceptor correction and the final energy fade: `BAH180_rise`, `outer_width`, `fade_slope`, `max_penalty`, `fade_c0..c2`, `fade_lo`, `fade_hi`, plus a `burial` sub-dict. Candidates scoring above `fade_hi` are rejected outright |
 | `HBond_data`         | Dict       | `polynomials`, `fade_intervals`, `eval_table`, `donor_strengths`, `acceptor_strengths`, `acc_hybridization`. `eval_table` rows are keyed `(don, acc, sep)` and name the polynomial and fade for each geometric dimension, plus the `hbw_*` weight label that assigns the bond to one of the four HBond terms |
 | `Rama_data`          | Dict       | `all` and `prepro`, each a 36×36 φ/ψ grid per amino acid |
@@ -621,12 +621,12 @@ D-amino acid handling: the library is keyed on the L-form 3-letter code only. Co
 | `LkBallIso`          | Dict       | `{weight}`. Isotropic Lazaridis-Karplus solvation (declared; folded into `LkBallWtd` at runtime). **`REF15` only, weight 0, not dispatched — absent from `Default`** |
 | `LkBallWtd`          | Dict       | `{weight, atom_weights}`. Anisotropic LK solvation reweighted by virtual water overlap; `atom_weights` gives per-type `[iso, ball]` and is **required** |
 | `LkBallBridge`       | Dict       | `{weight}`. Bridging-water adjustment (declared; folded into `LkBallWtd` at runtime). **`REF15` only, weight 0, not dispatched — absent from `Default`** |
-| `FaDun`              | Dict       | `{weight}`. Backbone-dependent rotamer score, `−ln P(rot\|φ,ψ) + ½·Σ((χ − μ)/σ)²` |
+| `FaDun`              | Dict       | `{weight, neutral_phi, neutral_psi, prob_floor}`. Backbone-dependent rotamer score, `−ln P(rot\|φ,ψ) + ½·Σ((χ − μ)/σ)²`; `neutral_phi`/`neutral_psi` are used where φ/ψ is undefined, `prob_floor` caps `−ln P` |
 | `RamaPreProTerm`     | Dict       | `{weight}`. Ramachandran propensity, `−ln P(φ,ψ)`, with a separate pre-proline map |
-| `PAaPp`              | Dict       | `{weight}`. Amino-acid propensity given the backbone torsions, `−ln P(aa\|φ,ψ)` |
-| `Omega`              | Dict       | `{weight, tether_k, undefined_torsion}`. Peptide-bond ω tether, `K_ω·(ω − ω₀)²` around 180° (0° for cis) |
+| `PAaPp`              | Dict       | `{weight, prob_floor}`. Amino-acid propensity given the backbone torsions, `−ln P(aa\|φ,ψ)`; `prob_floor` caps `−ln P` |
+| `Omega`              | Dict       | `{weight, tether_k, sigma_ref, undefined_torsion}`. Peptide-bond ω tether, `K_ω·(ω − ω₀)²` around 180° (0° for cis); `sigma_ref` is the reference width of the trans term |
 | `ProClose`           | Dict       | `{weight}` plus the ring geometry (`nv_theta`, `nv_d`, `cav_theta`, `cav_d`, `planar_sd`, χ4 means and sds). Proline ring-closure penalty |
-| `DslfFa13`           | Dict       | `{weight}` plus the disulfide distributions (`d_*`, `a_*`, `dss_*`, `dcs_*`, `mest_log`, `wt_*`). Geometry over the S-S distance, dihedrals and angles |
+| `DslfFa13`           | Dict       | `{weight, shift, disulf_ssdist_cutoff}` plus the disulfide distributions (`d_*`, `a_*`, `dss_*`, `dcs_*`, `mest_log`, `wt_*`). Geometry over the S-S distance, dihedrals and angles; `shift` is the per-disulfide offset, `disulf_ssdist_cutoff` the S-S distance that counts as bonded |
 | `YhhPlanarity`       | Dict       | `{weight}`. Tyrosine hydroxyl planarity, `½·(cos(π − 2·χ₃) + 1)` |
 | `Ref`                | Dict       | `{weight}`. Multiplier on the per-residue baseline in `METHOD_WEIGHTS_ref`, `Σ ref[aa]` |
 | `HBondSrBb`          | Dict       | `{weight}`. Short-range (helix) backbone-backbone hydrogen bond |
@@ -682,7 +682,7 @@ The CC-BY-4.0 material below is provided by its licensors as-is and without warr
 
 **OpenFF NAGL `openff-gnn-am1bcc-1.0.0`** — graph-neural-network weights for AM1-BCC charge prediction under `['Energy Parameters']['OpenFF']['AM1BCC']`. Copyright (c) 2023, Open Forcefield Group. Licensed under [CC-BY-4.0](https://creativecommons.org/licenses/by/4.0/). Source: [openff-nagl-models](https://github.com/openforcefield/openff-nagl-models). *Modifications:* tensors are extracted from the PyTorch checkpoint and stored as base64 float32; inference is reimplemented in NumPy in `pose.energy.ForceField.NAGLCharges`, with output equivalent to upstream float32 inference.
 
-**Dunbrack backbone-dependent rotamer library (BBDEP2010)** — under `['Rotamer Library']`. Contains information from the 2010 Backbone-Dependent Rotamer Library (https://dunbrack.fccc.edu/bbdep2010), made available under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). Cite: Shapovalov, M. V. & Dunbrack, R. L., Jr. (2011) *Structure* 19:844-858. *Modifications:* the 5% step-down variant (`StpDwn_5-5-5`, the Dunbrack default) reformatted from the `.lib` column layout to JSON, with the redundant +180 deg wrap bins dropped (36x36 rather than 37x37).
+**Dunbrack backbone-dependent rotamer library (BBDEP2010)** — under `['Rotamer Library']`. Contains information from the 2010 Backbone-Dependent Rotamer Library (https://dunbrack.fccc.edu/bbdep2010), made available under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). Cite: Shapovalov, M. V. & Dunbrack, R. L., Jr. (2011) *Structure* 19:844-858.
 
 #### Downloaded at runtime by `Port()`, never redistributed
 

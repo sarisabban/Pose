@@ -2547,6 +2547,33 @@ def Rotamers(index, pose):
 		else:
 			pose.RotateDihedral(index, float(-mu if flip else mu), 'CHI', ci+1)
 
+def _protonchi(pose, res):
+	'''
+	The hydroxyl or thiol proton torsion Rosetta packs, of an O or S with
+	one heavy neighbour and a hydrogen
+	Arguments:
+	----------
+		pose: Protein pose holding the residue
+		res:  Residue index
+	Returns:
+	--------
+		tuple or None: (reference, base, O or S, H) atom indices and the
+		sampled angles in degrees, 0 and 180 on an aromatic carbon, 60,
+		-60 and 180 otherwise
+	'''
+	A = pose.data['Atoms']; B = pose.data['Bonds']
+	def nb(i, h): return [j for j in B.get(i, ()) if (A[j][1] == 'H') == h]
+	for x in pose.data['Amino Acids'][res][3]:
+		if A[x][1] not in 'OS' or len(nb(x, False)) != 1 or not nb(x, True):
+			continue
+		y = nb(x, False)[0]
+		ref = sorted(set(nb(y, False)) - {x}, key=lambda j: (A[j][0] != 'CA',
+			j))
+		flat = len(nb(y, False)) == 3 and not nb(y, True)
+		return (ref[0], y, x, nb(x, True)[0]), ((0.0, 180.0) if flat else
+			(60.0, -60.0, 180.0))
+	return None
+
 def _apply(pose, res, chis, n_chi, fused):
 	"""
 	Set the side chain of one residue, routing fused rings through the ring
@@ -2566,6 +2593,12 @@ def _apply(pose, res, chis, n_chi, fused):
 		return _ringpuck(pose, res, float(chis[0]), 1, ideal=True)
 	for ci in range(n_chi):
 		pose.RotateDihedral(res, float(chis[ci]), 'CHI', ci + 1)
+	if len(chis) > n_chi:
+		(a, b, c, h), _ = _protonchi(pose, res); X = pose.data['Coordinates']
+		d = math.radians(chis[n_chi]) - Score.dihedralradians(None, *X[[a, b,
+			c, h]])
+		X[h] = (X[h] - X[c]) @ pose._rotmat(-math.degrees(d), (X[c] - X[b])
+			/ np.linalg.norm(X[c] - X[b])) + X[c]
 	return True
 
 def _packtable(pose, ff, res_ids, candidates, fused, start, verbose=False):
@@ -2632,6 +2665,8 @@ def _packtable(pose, ff, res_ids, candidates, fused, start, verbose=False):
 	EC0 = float(C['coulomb_C0']); ED = float(C['sigmoidal_D'])
 	ED0 = float(C['sigmoidal_D0']); ES = float(C['sigmoidal_S'])
 	e_lo = float(C['fa_elec_min_dis']); e_hi = float(C['fa_elec_max_dis'])
+	e_lw = float(C['fa_elec_low_width'])
+	e_hw = float(C['fa_elec_high_width'])
 	atoms = pose.data['Atoms']
 	aas = pose.data['Amino Acids']
 	n = len(atoms)
@@ -2787,7 +2822,7 @@ def _packtable(pose, ff, res_ids, candidates, fused, start, verbose=False):
 			out[em] += w_elec * ff.elecpairsum(None, None, r[em],
 				1.0 if uni else w_e[em],
 				EC0, ED, ED0, ES, e_hi, e_lo, e_hi,
-				e_hi - 1.0, e_lo + 0.25, e_lo - 0.25, q, per_pair=True,
+				e_hi - e_hw, e_lo + e_lw, e_lo - e_lw, q, per_pair=True,
 				qq=pm['qq'][mk[em]])
 		if not w_lkb: return out
 		lm = np.flatnonzero(pm['lk'][mk])
@@ -3241,8 +3276,8 @@ def _packtable(pose, ff, res_ids, candidates, fused, start, verbose=False):
 			out['phases'][1], out['phases'][2], out['phases'][3]))
 	return out
 
-def Pack(pose, ff=None, n_steps=2000, T_start=10.0, T_end=0.1,
-		patience=400, seed=None, ex=1, table=False):
+def Pack(pose, ff=None, n_steps=None, T_start=10.0, T_end=0.1,
+		patience=400, seed=None, ex=1, table=True):
 	'''
 	Repack side chains by simulated annealing over the rotamer ensemble
 	available to each residue at its current backbone phi and psi
@@ -3250,11 +3285,14 @@ def Pack(pose, ff=None, n_steps=2000, T_start=10.0, T_end=0.1,
 	----------
 		pose:     Protein pose carrying an Amino Acids table
 		ff:       Score() or ForceField() to minimise, ForceField() if None
-		n_steps:  Maximum number of annealing proposals
+		n_steps:  Maximum number of annealing proposals, None for 20000
+			on the rotamer table and 2000 without it
 		T_start:  Initial temperature in the units of the function supplied
 		T_end:    Final temperature, reached by geometric cooling
 		patience: Stop early after this many consecutive rejections
 		seed:     Seed for the random generator, None for unseeded
+		table:    True anneals on precomputed rotamer energies when ff
+			is a full-atom Score(), False rescores every step
 	Returns:
 	--------
 		float: Score of the best configuration found, rescored after it
@@ -3298,6 +3336,10 @@ def Pack(pose, ff=None, n_steps=2000, T_start=10.0, T_end=0.1,
 			for mu, sd in zip(mus, sds) for g in grid], dtype=np.float64)
 		probs = np.repeat(probs, len(grid)) / len(grid)
 		probs = probs / probs.sum()
+		pc = _protonchi(pose, r)
+		if pc:
+			mus = np.array([list(m) + [p] for m in mus for p in pc[1]])
+			probs = np.repeat(probs, len(pc[1])) / len(pc[1])
 		candidates[r] = (-mus if flip else mus, np.cumsum(probs), n_chi)
 	if not candidates:
 		E0 = float(ff(pose))
@@ -3313,16 +3355,22 @@ def Pack(pose, ff=None, n_steps=2000, T_start=10.0, T_end=0.1,
 	E_best = E_curr
 	start = {q: tuple(pose.GetDihedral(q, 'CHI', chi_type=ci+1)
 		for ci in range(candidates[q][2])) for q in res_ids}
+	X = pose.data['Coordinates']
+	for q in res_ids:
+		if len(candidates[q][0][0]) > candidates[q][2]:
+			start[q] += (math.degrees(Score.dihedralradians(None, *X[list(
+				_protonchi(pose, q)[0])])),)
 	held = {q: -1 for q in res_ids}
 	best_state = dict(held)
-	N = max(1, int(n_steps))
+	use = table and hasattr(ff, 'elecpairsum') \
+		and 'at_e_idx' in (getattr(ff, '_cache', None) or {})
+	N = max(1, int((20000 if use else 2000) if n_steps is None else n_steps))
 	energies = np.empty(N, dtype=np.float64)
 	temperatures = np.empty(N, dtype=np.float64)
 	accepts = np.empty(N, dtype=bool)
 	last_accept = step = stall = 0
 	tab = None
-	if table and hasattr(ff, 'elecpairsum') \
-			and 'at_e_idx' in (getattr(ff, '_cache', None) or {}):
+	if use:
 		tab = _packtable(pose, ff, res_ids, candidates, fused, start)
 	if tab is not None:
 		E1, E2 = tab['E1'], tab['E2']
@@ -3335,8 +3383,9 @@ def Pack(pose, ff=None, n_steps=2000, T_start=10.0, T_end=0.1,
 			T = T_start * (T_end / T_start) ** (step / max(1, N - 1))
 			r = res_ids[int(rng.integers(0, len(res_ids)))]
 			mus, cum, n_chi = candidates[r]
-			k = int(np.searchsorted(cum, rng.random()))
-			k = min(k, len(cum) - 1)
+			u = rng.random() * (len(cum) + 1) / len(cum)
+			k = Kst[r] if u >= 1.0 else min(int(np.searchsorted(cum, u)),
+				len(cum) - 1)
 			energies[step] = E_run
 			temperatures[step] = T
 			was = state[r]
@@ -3382,8 +3431,9 @@ def Pack(pose, ff=None, n_steps=2000, T_start=10.0, T_end=0.1,
 		T = T_start * (T_end / T_start) ** (step / max(1, N - 1))
 		r = res_ids[int(rng.integers(0, len(res_ids)))]
 		mus, cum, n_chi = candidates[r]
-		k = int(np.searchsorted(cum, rng.random()))
-		k = min(k, len(cum) - 1)
+		u = rng.random() * (len(cum) + 1) / len(cum)
+		k = -1 if u >= 1.0 else min(int(np.searchsorted(cum, u)),
+			len(cum) - 1)
 		energies[step] = E_curr
 		temperatures[step] = T
 		if k == held[r]:
@@ -3391,7 +3441,7 @@ def Pack(pose, ff=None, n_steps=2000, T_start=10.0, T_end=0.1,
 			continue
 		was = held[r]
 		snap = start[r] if was < 0 else None
-		if not _apply(pose, r, mus[k], n_chi, fused):
+		if not _apply(pose, r, mus[k] if k >= 0 else start[r], n_chi, fused):
 			accepts[step] = False
 			continue
 		E_trial = float(ff(pose))
@@ -4796,11 +4846,45 @@ def SMIRKSMatch(pose, params):
 
 _PCS_M_GLOBAL = {}
 _FADUN_GRID_GLOBAL = {}
-_FADUN_ENT_GLOBAL = {}
 _RAMA_SPLINE_GLOBAL = {}
 _FROZEN_ADJ_GLOBAL = {}
 _PCS_Y_GLOBAL = {}
 
+def _sub3(a, b):
+	'''
+	Difference of two 3-vectors held as Python floats
+	Arguments:
+	----------
+		a, b: sequence of 3 floats
+	Returns:
+	--------
+		list: a - b
+	'''
+	return [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+def _dot3(a, b):
+	'''
+	Dot product of two 3-vectors held as Python floats
+	Arguments:
+	----------
+		a, b: sequence of 3 floats
+	Returns:
+	--------
+		float: a . b
+	'''
+	return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+def _cross3(a, b):
+	'''
+	Cross product of two 3-vectors held as Python floats, without the
+	overhead np.cross carries for single vectors
+	Arguments:
+	----------
+		a, b: sequence of 3 floats
+	Returns:
+	--------
+		list: a x b
+	'''
+	return [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2],
+		a[0] * b[1] - a[1] * b[0]]
 def ScoreMatch(pose, params, ligand=None, xs_override=None, nrot_override=None):
 	'''
 	Build the per-pose support cache used by every Score energy term
@@ -4819,7 +4903,6 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None, nrot_override=None):
 			callable nested helpers (e.g. 'evalpairs', 'fullatomhbond')
 	'''
 	_FADUN_GRID_CACHE = _FADUN_GRID_GLOBAL
-	_FADUN_ENT_CACHE = _FADUN_ENT_GLOBAL
 	_RAMA_SPLINE_CACHE = _RAMA_SPLINE_GLOBAL
 	_PCS_M = _PCS_M_GLOBAL
 	_PCS_Y = _PCS_Y_GLOBAL
@@ -5322,8 +5405,8 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None, nrot_override=None):
 		if TQ is None or TT is None:
 			raise ValueError(
 				"ScoreMatch: ['TerminalCharges'] or ['TerminalTypes'] is "
-				"missing from the score parameters. Run "
-				"tools.Port('ref15') to install it.")
+				"missing from the score parameters. Run tools.Port('ref15') "
+				"to install it. Must accept Rosetta licence.")
 		D_TO_L = {v['Tricode'][1]: v['Tricode'][0]
 			for v in DBLoad()['Amino Acids'].values()
 			if len(v.get('Tricode') or []) >= 2}
@@ -5587,7 +5670,6 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None, nrot_override=None):
 		is_accep = np.zeros(n, dtype=bool)
 		is_polar_h = np.zeros(n, dtype=bool)
 		is_H = np.zeros(n, dtype=bool)
-		is_oh_donor = np.zeros(n, dtype=bool)
 		has_score = np.zeros(n, dtype=bool)
 		for i in range(n):
 			t = ros_types[i]
@@ -5602,8 +5684,6 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None, nrot_override=None):
 			is_accep[i]   = bool(info.get('acceptor', False))
 			is_polar_h[i] = bool(info.get('polar_h', False))
 			is_H[i]       = info.get('element') in ('H',) or t == 'HOH'
-			is_oh_donor[i] = is_donor[i] and (t.startswith('OH')
-				or t.startswith('OW') or t == 'Oet3')
 			has_score[i] = True
 		if aas:
 			n_term_res = patchtermini(aas, atom_types_db, atoms, coords,
@@ -5733,7 +5813,8 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None, nrot_override=None):
 			raise ValueError(
 				'ScoreMatch: lk_ball is weighted but '
 				"['LkBallWtd']['atom_weights'] is missing from the score "
-				"parameters. Run tools.Port('ref15') to install it.")
+				"parameters. Run tools.Port('ref15') to install it. "
+				"Must accept Rosetta licence.")
 		LKB = params.get('LkBall') or {}
 		LK_RAMP_W2 = float(LKB['ramp_w2'])
 		H2O_R = float(LKB['h2o_radius'])
@@ -5752,7 +5833,8 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None, nrot_override=None):
 		if etb is None:
 			raise ValueError(
 				"ScoreMatch: ['EtablePairParams'] is missing from the score "
-				"parameters. Run tools.Port('ref15') to install it.")
+				"parameters. Run tools.Port('ref15') to install it. "
+				"Must accept Rosetta licence.")
 		if etb is not None:
 			et_names = list(etb['atom_types'])
 			NT = int(etb['n_types'])
@@ -5783,12 +5865,6 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None, nrot_override=None):
 			et_ljatr_final_weight    = np.ones((NT, NT), dtype=np.float64)
 			et_ljrep_linear_ramp_d2  = np.zeros((NT, NT), dtype=np.float64)
 			et_ljrep_from_negcrossing = np.zeros((NT, NT), dtype=bool)
-			et_hydrogen_interaction  = np.zeros((NT, NT), dtype=bool)
-			et_ljrep_xr_xlo   = np.zeros((NT, NT), dtype=np.float64)
-			et_ljrep_xr_xhi   = np.zeros((NT, NT), dtype=np.float64)
-			et_ljrep_xr_slope = np.zeros((NT, NT), dtype=np.float64)
-			et_ljrep_xr_extrap_slope = np.zeros((NT, NT), dtype=np.float64)
-			et_ljrep_xr_ylo   = np.zeros((NT, NT), dtype=np.float64)
 			et_has         = np.zeros((NT, NT), dtype=bool)
 			for _k in range(NT * NT):
 				is_, io_ = divmod(_k, NT)
@@ -5823,14 +5899,6 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None, nrot_override=None):
 						c['ljrep_linear_ramp_d2_cutoff'])
 					et_ljrep_from_negcrossing[is_, io_] = (
 						c['ljrep_from_negcrossing'])
-					et_hydrogen_interaction[is_, io_] = (
-						c['hydrogen_interaction'])
-					et_ljrep_xr_xlo[is_, io_]   = c['ljrep_xr_xlo']
-					et_ljrep_xr_xhi[is_, io_]   = c['ljrep_xr_xhi']
-					et_ljrep_xr_slope[is_, io_] = c['ljrep_xr_slope']
-					et_ljrep_xr_extrap_slope[is_, io_] = (
-						c['ljrep_xr_extrapolated_slope'])
-					et_ljrep_xr_ylo[is_, io_]   = c['ljrep_xr_ylo']
 				et_has[is_, io_] = True
 			at_e_idx = np.full(n, -1, dtype=np.int64)
 			for i in range(n):
@@ -5849,6 +5917,7 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None, nrot_override=None):
 		dih_sp2 = tuple(math.radians(float(v)) for v in LKB['dih_sp2'])
 		dih_sp3 = tuple(math.radians(float(v)) for v in LKB['dih_sp3'])
 		wat_idx = [i for i in range(n) if ros_types[i] in LKB_WTS]
+		wat_set = set(wat_idx)
 		lkb_hlen = {}; lkb_ring = {}
 		for i, pn in pnames.items():
 			ic = (pres.get(i) or {}).get('icoor') or {}
@@ -5895,7 +5964,7 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None, nrot_override=None):
 			water_off = np.full(n, -1, dtype=np.int64)
 			water_cnt = np.zeros(n, dtype=np.int64)
 			todo = wat_idx if only is None else [
-				i for i in wat_idx if i in only]
+				i for i in sorted(only) if i in wat_set]
 			for i in todo:
 				atomwaters(i, X, water_atom, water_cnt, water_off, water_xyz,
 					LKB_WTS, adj, ang_sp2, ang_sp3, atom_res, atom_types_db,
@@ -5921,7 +5990,6 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None, nrot_override=None):
 			'is_accep':  is_accep,
 			'is_polar_h':is_polar_h,
 			'is_H':      is_H,
-			'is_oh_donor': is_oh_donor,
 			'coords':    X,
 			'atom_res':  atom_res,
 			'pairs_i':   pairs_i,
@@ -5965,12 +6033,6 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None, nrot_override=None):
 			'et_ljatr_final_weight':  et_ljatr_final_weight,
 			'et_ljrep_linear_ramp_d2': et_ljrep_linear_ramp_d2,
 			'et_ljrep_from_negcrossing': et_ljrep_from_negcrossing,
-			'et_hydrogen_interaction': et_hydrogen_interaction,
-			'et_ljrep_xr_xlo':   et_ljrep_xr_xlo,
-			'et_ljrep_xr_xhi':   et_ljrep_xr_xhi,
-			'et_ljrep_xr_slope': et_ljrep_xr_slope,
-			'et_ljrep_xr_extrap_slope': et_ljrep_xr_extrap_slope,
-			'et_ljrep_xr_ylo':   et_ljrep_xr_ylo,
 			'et_has':        et_has,
 			'adj':       adj}
 	def bfswithin(adj, start, depth):
@@ -6413,26 +6475,43 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None, nrot_override=None):
 			cache['pair_d'][sel], w[sel])
 		memo[key] = out
 		return out
+	def etflat(cache):
+		'''
+		Flattened views of the per-type-pair etable arrays, built once
+		per cache so a pair's parameters are read with one flat index
+		Arguments:
+		----------
+			cache: dict - ScoreMatch cache
+		Returns:
+		--------
+			dict: etable array name to its 1-D view
+		'''
+		if '_et_flat' not in cache:
+			cache['_et_flat'] = {k: v.reshape(-1) for k, v in cache.items()
+				if k.startswith('et_') and isinstance(v, np.ndarray)}
+		return cache['_et_flat']
+	def cubic(c, f, x):
+		'''
+		Horner evaluation of the cubics stored four coefficients per pair
+		Arguments:
+		----------
+			c: np.ndarray - flat coefficients, constant term first
+			f: np.ndarray - flat etable index of each pair
+			x: np.ndarray - per-pair distances
+		Returns:
+		--------
+			np.ndarray: cubic value of each pair
+		'''
+		return ((c[4 * f + 3] * x + c[4 * f + 2]) * x + c[4 * f + 1]) * x \
+			+ c[4 * f]
 	def ljpair(cache, pi, pj, r, ids=None):
 		'''
-		Per-pair LJ (atr, rep) using the analytic etable-evaluation
-		formula and the per-atom-type-pair LJ params:
-			dis2 < ljrep_linear_ramp_d2_cutoff:
-				ljE = lj_switch_slope * dis + lj_switch_intercept
-			ljrep_linear_ramp_d2_cutoff <= dis < ljatr_cubic_poly_xlo:
-				ljE = lj_r12_coeff / dis^12 + lj_r6_coeff / dis^6
-			ljatr_cubic_poly_xlo <= dis < ljatr_cubic_poly_xhi (4.5 -> 6.0):
-				ljE = eval(ljatr_cubic_poly, dis)
-			dis >= ljatr_cubic_poly_xhi (= 6.0): ljE = 0
-		Split into atr/rep:
-			ljrep_from_negcrossing (REPLS/HREPS):
-				atrE = ljE if ljE < 0 else 0; repE = ljE if ljE >= 0 else 0
-			else if dis < lj_minimum:
-				atrE = lj_val_at_minimum; repE = ljE - lj_val_at_minimum
-			else:
-				atrE = ljE; repE = 0
-		Plus per-pair ExtraQuadraticRepulsion adds to repE if dis < xhi.
-		Final: atrE *= ljatr_final_weight.
+		Per-pair Lennard-Jones attraction and repulsion (Alford et al.
+		2017, eqs 2-5): a 12-6 potential, linear below a short-range
+		cutoff and faded to zero by a cubic over the last 1.5 A, split
+		at its minimum into an attractive part, flat at the well depth
+		inside the minimum, and a repulsive remainder; pairs flagged
+		to split at the zero crossing instead are divided by sign
 		Arguments:
 		----------
 			cache: per-pose cache from _fullatomcache
@@ -6455,55 +6534,33 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None, nrot_override=None):
 			ai = np.where(valid, ai, 0); aj = np.where(valid, aj, 0)
 		else:
 			valid, ai, aj = ids
-		a_lo_s = np.minimum(ai, aj)
-		a_hi_s = np.maximum(ai, aj)
-		fl = cache.get('_et_flat')
-		if fl is None:
-			fl = {k: v.reshape(-1) for k, v in cache.items()
-				if k.startswith('et_')
-				and isinstance(v, np.ndarray)}
-			cache['_et_flat'] = fl
-		fi = a_lo_s * cache['et_lj_r12_coeff'].shape[1] + a_hi_s
+		fl = etflat(cache)
+		fi = (np.minimum(ai, aj) * cache['et_lj_r12_coeff'].shape[1]
+			+ np.maximum(ai, aj))
 		cn = cache.get('_et_lj_flat_cut')
 		if cn is None:
 			xl = cache['et_ljatr_cp_xlo']; xh = cache['et_ljatr_cp_xhi']
 			cn = (float(xl.flat[0]) if xl.min() == xl.max() else None,
 				float(xh.flat[0]) if xh.min() == xh.max() else None)
 			cache['_et_lj_flat_cut'] = cn
-		d = r
-		d2 = d * d
-		m_ramp = d2 < fl['et_ljrep_linear_ramp_d2'][fi]
-		below = d < (cn[0] if cn[0] is not None
-			else fl['et_ljatr_cp_xlo'][fi])
-		m_gen = below & (~m_ramp)
-		ljE = np.zeros(n_pairs, dtype=np.float64)
-		k = np.flatnonzero(m_ramp)
-		if len(k):
-			ljE[k] = (fl['et_lj_switch_slope'][fi[k]] * d[k]
-				+ fl['et_lj_switch_intercept'][fi[k]])
-		k = np.flatnonzero(m_gen)
-		if len(k):
-			inv_d2 = 1.0 / np.maximum(d2[k], 1e-12)
-			inv_d6 = inv_d2 ** 3
-			inv_d12 = inv_d6 ** 2
-			ljE[k] = (fl['et_lj_r12_coeff'][fi[k]] * inv_d12
-				+ fl['et_lj_r6_coeff'][fi[k]] * inv_d6)
-		k = np.flatnonzero((~below) & (d < (cn[1] if cn[1] is not None
-			else fl['et_ljatr_cp_xhi'][fi])))
-		if len(k):
-			cpf = fl['et_ljatr_cubic_poly']; f4 = fi[k] * 4; dk = d[k]
-			ljE[k] = ((cpf[f4 + 3] * dk + cpf[f4 + 2]) * dk
-				+ cpf[f4 + 1]) * dk + cpf[f4]
-		lj_min = fl['et_lj_minimum'][fi]
-		lj_val_at_min = fl['et_lj_val_at_minimum'][fi]
-		rep_neg = fl['et_ljrep_from_negcrossing'][fi]
-		near = d < lj_min
-		atrE = np.where(rep_neg,
-			np.where(ljE < 0, ljE, 0.0),
-			np.where(near, lj_val_at_min, ljE))
-		repE = np.where(rep_neg,
-			np.where(ljE >= 0, ljE, 0.0),
-			np.where(near, ljE - lj_val_at_min, 0.0))
+		lo, hi = (fl[x][fi] if c is None else c for x, c in
+			zip(('et_ljatr_cp_xlo', 'et_ljatr_cp_xhi'), cn))
+		zone = np.where(r * r < fl['et_ljrep_linear_ramp_d2'][fi], 0,
+			np.where(r < lo, 1, np.where(r < hi, 2, 3)))
+		lj = np.zeros(n_pairs, dtype=np.float64)
+		k = np.flatnonzero(zone == 0)
+		lj[k] = (fl['et_lj_switch_slope'][fi[k]] * r[k]
+			+ fl['et_lj_switch_intercept'][fi[k]])
+		k = np.flatnonzero(zone == 1)
+		s6 = (1.0 / np.maximum(r[k] * r[k], 1e-12)) ** 3
+		lj[k] = (fl['et_lj_r12_coeff'][fi[k]] * s6
+			+ fl['et_lj_r6_coeff'][fi[k]]) * s6
+		k = np.flatnonzero(zone == 2)
+		lj[k] = cubic(fl['et_ljatr_cubic_poly'], fi[k], r[k])
+		atrE = np.where(fl['et_ljrep_from_negcrossing'][fi],
+			np.minimum(lj, 0.0), np.where(r < fl['et_lj_minimum'][fi],
+			fl['et_lj_val_at_minimum'][fi], lj))
+		repE = lj - atrE
 		atrE = atrE * fl['et_ljatr_final_weight'][fi]
 		if valid is not None and not valid.all():
 			atrE = np.where(valid, atrE, 0.0)
@@ -6534,6 +6591,36 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None, nrot_override=None):
 	_lkb = params.get('LkBall') or {}
 	lk_max = float(_lkb.get('max_dis', 0.0))
 	lk_far_lo = float(_lkb.get('far_lo', 0.0))
+	def lkpiece(fl, fa, d, tag, core):
+		'''
+		Piecewise Lazaridis-Karplus profile shared by the one-sided and
+		the pair-summed solvation: flat below close_start, a cubic to
+		close_end, the Gaussian core divided by d^2 out to far_lo, a
+		cubic fade to max_dis, and zero beyond
+		Source: Alford et al. 2017 (J. Chem. Theory Comput. 13:3031), eqs 11-12
+		Arguments:
+		----------
+			fl: dict - flattened etable arrays
+			fa: np.ndarray - flat etable index of each pair
+			d: np.ndarray - per-pair distances
+			tag: str - '' for the one-sided tables, '_comb' for pair sums
+			core: callable - Gaussian numerator for a subset of pairs
+		Returns:
+		--------
+			np.ndarray: per-pair energy before the final weight
+		'''
+		zone = np.where(d >= lk_far_lo, np.where(d < lk_max, 3, 4),
+			np.where(d < fl['et_close_start'][fa], 0,
+			np.where(d < fl['et_close_end'][fa], 1, 2)))
+		e = np.zeros(len(d), dtype=np.float64)
+		k = np.flatnonzero(zone == 0)
+		e[k] = fl['et_close_flat' + tag][fa[k]]
+		for z, name in ((1, 'et_close_poly'), (3, 'et_far_poly')):
+			k = np.flatnonzero(zone == z)
+			e[k] = cubic(fl[name + tag], fa[k], d[k])
+		k = np.flatnonzero(zone == 2)
+		e[k] = core(k) / np.maximum(d[k] * d[k], 1e-12)
+		return e
 	def _eval(io_first, io_second, cache, r):
 		'''
 		Evaluate analytic etable lk_iso for direction (self=first).
@@ -6547,40 +6634,12 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None, nrot_override=None):
 		--------
 			np.float64 array (npair,) of one-sided lk_iso values
 		'''
-		fl = cache.get('_et_flat')
-		if fl is None:
-			fl = {k: v.reshape(-1) for k, v in cache.items()
-				if k.startswith('et_')
-				and isinstance(v, np.ndarray)}
-			cache['_et_flat'] = fl
-		nc = cache['et_close_start'].shape[1]
-		fa = io_first * nc + io_second
-		cs = fl['et_close_start'][fa]
-		ce = fl['et_close_end'][fa]
-		d = r
-		e = np.zeros(len(r), dtype=np.float64)
-		lo = d < lk_far_lo
-		m_flat = lo & (d < cs)
-		m_close = lo & (~m_flat) & (d < ce)
-		k = np.flatnonzero(m_flat)
-		if len(k): e[k] = fl['et_close_flat'][fa[k]]
-		k = np.flatnonzero(m_close)
-		if len(k):
-			cpf = fl['et_close_poly']; f4 = fa[k] * 4; dk = d[k]
-			e[k] = (cpf[f4] + cpf[f4 + 1] * dk + cpf[f4 + 2] * dk * dk
-				+ cpf[f4 + 3] * dk * dk * dk)
-		k = np.flatnonzero(lo & (~m_flat) & (~m_close))
-		if len(k):
-			fk = fa[k]; dk = d[k]
-			ex = (dk - fl['et_R_self'][fk]) / fl['et_lambda_self'][fk]
-			e[k] = fl['et_lk_coeff'][fk] * np.exp(-ex * ex) \
-				/ np.maximum(dk * dk, 1e-12)
-		k = np.flatnonzero((d >= lk_far_lo) & (d < lk_max))
-		if len(k):
-			fpf = fl['et_far_poly']; f4 = fa[k] * 4; dk = d[k]
-			e[k] = (fpf[f4] + fpf[f4 + 1] * dk + fpf[f4 + 2] * dk * dk
-				+ fpf[f4 + 3] * dk * dk * dk)
-		return e * fl['et_final_w'][fa]
+		fl = etflat(cache)
+		fa = io_first * cache['et_close_start'].shape[1] + io_second
+		def core(k):
+			x = (r[k] - fl['et_R_self'][fa[k]]) / fl['et_lambda_self'][fa[k]]
+			return fl['et_lk_coeff'][fa[k]] * np.exp(-x * x)
+		return lkpiece(fl, fa, r, '', core) * fl['et_final_w'][fa]
 	def lkisopair(cache, pi, pj, r, ids=None):
 		'''
 		Return per-direction analytic fa_sol/lk_iso values (one-sided
@@ -6626,17 +6685,11 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None, nrot_override=None):
 		return lki, lkj
 	def solpair(cache, pi, pj, r, ids=None):
 		'''
-		Combined fa_sol per-pair value matching the
-		analytic LK-evaluation algorithm (used by FaSol /
-		FaIntraSolXover4). Uses the per-atom-pair COMBINED close/far
-		cubic polynomials (`fasol_cubic_poly_close` / `_far`), which
-		differ from poly1+poly2 because the combined poly is fit to a
-		spline
-		whose boundary derivatives come from the discrete-etable
-		interpolator (not the analytical formula). The exponential
-		region uses lk_coeff1*exp(-x1) + lk_coeff2*exp(-x2) per the
-		analytic LK evaluation. Returns per-pair combined fa_sol
-		energies (length len(pi)).
+		Lazaridis-Karplus desolvation of a pair, both directions summed
+		(Lazaridis & Karplus 1999; Alford et al. 2017, eqs 11-13): the
+		Gaussian-exclusion form, held flat at short range, joined to it
+		by a cubic, and faded to zero by a cubic at long range, the
+		cubics fitted to the pair as a whole
 		Arguments:
 		----------
 			cache: per-pose cache
@@ -6659,47 +6712,14 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None, nrot_override=None):
 			ai = np.where(valid, ai, 0); aj = np.where(valid, aj, 0)
 		else:
 			valid, ai, aj = ids
-		a_lo_safe = np.minimum(ai, aj)
-		a_hi_safe = np.maximum(ai, aj)
-		fl = cache.get('_et_flat')
-		if fl is None:
-			fl = {k: v.reshape(-1) for k, v in cache.items()
-				if k.startswith('et_')
-				and isinstance(v, np.ndarray)}
-			cache['_et_flat'] = fl
-		nc = cache['et_close_start'].shape[1]
-		fa = a_lo_safe * nc + a_hi_safe
-		fb = a_hi_safe * nc + a_lo_safe
-		cs = fl['et_close_start'][fa]
-		ce = fl['et_close_end'][fa]
-		d = r
-		e = np.zeros(n_pairs, dtype=np.float64)
-		lo = d < lk_far_lo
-		m_flat = lo & (d < cs)
-		m_close = lo & (~m_flat) & (d < ce)
-		k = np.flatnonzero(m_flat)
-		if len(k): e[k] = fl['et_close_flat_comb'][fa[k]]
-		k = np.flatnonzero(m_close)
-		if len(k):
-			cpf = fl['et_close_poly_comb']; f4 = fa[k] * 4; dk = d[k]
-			e[k] = ((cpf[f4 + 3] * dk + cpf[f4 + 2]) * dk
-				+ cpf[f4 + 1]) * dk + cpf[f4]
-		k = np.flatnonzero(lo & (~m_flat) & (~m_close))
-		if len(k):
-			fk = fa[k]; gk = fb[k]; dk = d[k]
-			x1 = ((dk - fl['et_R_self'][fk])
-				/ fl['et_lambda_self'][fk]) ** 2
-			x2 = ((dk - fl['et_R_self'][gk])
-				/ fl['et_lambda_self'][gk]) ** 2
-			e[k] = (fl['et_lk_coeff'][fk] * np.exp(-x1)
-				+ fl['et_lk_coeff'][gk] * np.exp(-x2)) \
-				/ np.maximum(dk * dk, 1e-12)
-		k = np.flatnonzero((d >= lk_far_lo) & (d < lk_max))
-		if len(k):
-			fpf = fl['et_far_poly_comb']; f4 = fa[k] * 4; dk = d[k]
-			e[k] = ((fpf[f4 + 3] * dk + fpf[f4 + 2]) * dk
-				+ fpf[f4 + 1]) * dk + fpf[f4]
-		e *= fl['et_final_w'][fa]
+		fl = etflat(cache); nc = cache['et_close_start'].shape[1]
+		fa = np.minimum(ai, aj) * nc + np.maximum(ai, aj)
+		fb = np.maximum(ai, aj) * nc + np.minimum(ai, aj)
+		def core(k):
+			return sum(fl['et_lk_coeff'][f] * np.exp(-((r[k]
+				- fl['et_R_self'][f]) / fl['et_lambda_self'][f]) ** 2)
+				for f in (fa[k], fb[k]))
+		e = lkpiece(fl, fa, r, '_comb', core) * fl['et_final_w'][fa]
 		if valid is not None and not valid.all():
 			e = np.where(valid, e, 0.0)
 		return e
@@ -6753,7 +6773,8 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None, nrot_override=None):
 			dict: rot_idx -> dict with 'neglogP', 'mu', 'sd', plus
 				cached 'ypp_psi' for each quantity (built lazily).
 		'''
-		key = aa
+		MAXE = -math.log(float(params['FaDun']['prob_floor']))
+		key = (aa, MAXE)
 		if key in _FADUN_GRID_CACHE:
 			return _FADUN_GRID_CACHE[key]
 		entry = residues_db.get(aa)
@@ -6763,7 +6784,6 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None, nrot_override=None):
 		rot = entry['rotamers']
 		offs = rot['bin_offsets']
 		tbl = rot['table']
-		MAXE = -math.log(1e-6)
 		all_rotwells = set()
 		for r2 in tbl:
 			all_rotwells.add(r2[0])
@@ -6809,42 +6829,6 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None, nrot_override=None):
 				for i in range(36)]) for ci in range(n_chi)]
 		_FADUN_GRID_CACHE[key] = grids
 		return grids
-	def fadun_entropy_grid(aa, residues_db):
-		'''
-		Build the FaDun entropy-correction grid for one AA
-		Arguments:
-		----------
-			aa: str - 3-letter amino acid code
-		Returns:
-		--------
-			np.ndarray: entropy grid indexed by (phi_bin, psi_bin)
-		'''
-		if aa in _FADUN_ENT_CACHE:
-			return _FADUN_ENT_CACHE[aa]
-		entry = residues_db.get(aa)
-		if entry is None:
-			_FADUN_ENT_CACHE[aa] = (np.zeros((36, 36)), np.zeros((36, 36)))
-			return _FADUN_ENT_CACHE[aa]
-		rot = entry['rotamers']
-		offs = rot['bin_offsets']
-		tbl = rot['table']
-		ent = np.zeros((36, 36))
-		for bidx in range(36 * 36):
-			i_phi, i_psi = divmod(bidx, 36)
-			if bidx + 1 >= len(offs): continue
-			rows = tbl[offs[bidx]:offs[bidx+1]]
-			groups = {}
-			for r2 in rows:
-				if r2[1] > 0.0:
-					groups.setdefault(r2[0], 0.0)
-					groups[r2[0]] += r2[1]
-			e = 0.0
-			for Pg in groups.values():
-				if Pg > 0.0: e += Pg * math.log(Pg)
-			ent[i_phi, i_psi] = e
-		ypp_psi = np.array([ periodic_cubic_spline(ent[i]) for i in range(36)])
-		_FADUN_ENT_CACHE[aa] = (ent, ypp_psi)
-		return _FADUN_ENT_CACHE[aa]
 	def fadun_spline_eval(grid_2d, ypp_psi_grid, fp, fs):
 		'''
 		Evaluate periodic 2D natural cubic spline at (fp, fs) using
@@ -6913,7 +6897,7 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None, nrot_override=None):
 			'chi_last_n':    chi_last_n,
 			'n_disc_chi':    n_disc_chi,
 			'per_rot':       {}}
-		MAXE = 13.815510557964274
+		MAXE = -math.log(float(params['FaDun']['prob_floor']))
 		for rk_str, rot_dat in aa_entry['per_rot'].items():
 			rot_tuple = tuple(int(x) for x in rk_str.split(','))
 			P_rot = np.asarray(rot_dat['P_rot'],
@@ -7287,20 +7271,6 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None, nrot_override=None):
 			return t * t * (3.0 - 2.0 * t)
 		t = (mx2 - x) / max(mx2 - mx1, 1e-12)
 		return t * t * (3.0 - 2.0 * t)
-	def burial_w(n):
-		'''
-		Heavy-neighbour burial weight used by LkBallWtd
-		Arguments:
-		----------
-			gi: int - atom index
-		Returns:
-		--------
-			float: burial weight
-		'''
-		BU = (params.get('HBondSp2') or {})['burial']
-		if n < BU['nb_lo']: return BU['w_lo']
-		if n > BU['nb_hi']: return BU['w_hi']
-		return (n - BU['shift']) * BU['slope']
 	def ahd_arg(poly, AHD_rad, xD):
 		'''
 		Acceptor-hydrogen-donor angle argument used by HBond polynomials
@@ -7327,6 +7297,13 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None, nrot_override=None):
 		the earlier distance-and-angle-only form. The polynomials, fade
 		intervals and the sp2/sp3 scalars are all read from the downloaded
 		HBond_data tables; only the functional form is expressed here.
+		Source: Alford et al. 2017 (J. Chem. Theory Comput.
+		13:3031), eqs 21-22, SI eqs S1-7. The eq 22 fade is used with
+		its quadratic as -0.025 + x/2 - 2.5x^2: the printed +2.5x^2 is
+		a sign typo, as only -2.5x^2 joins continuously at x = -0.1
+		and x = 0.1, which the paper requires
+		Source: O'Meara et al. 2015 (J. Chem. Theory Comput. 11:609),
+		SI eqs 5-8
 		Arguments:
 		----------
 			ix: int - index into the donors list
@@ -7350,17 +7327,8 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None, nrot_override=None):
 		d = donors[ix]; a = acceptors[iy]
 		if d['D'] == a['A']: return
 		if d['ri'] == a['ri']: return
-		diff = a['ri'] - d['ri']
-		if abs(diff) > 4 or diff == 0:
-			sep = 'seq_sep_other'
-		elif diff == -4: sep = 'seq_sep_M4'
-		elif diff == -3: sep = 'seq_sep_M3'
-		elif diff == -2: sep = 'seq_sep_M2'
-		elif abs(diff) == 1: sep = 'seq_sep_PM1'
-		elif diff == 2: sep = 'seq_sep_P2'
-		elif diff == 3: sep = 'seq_sep_P3'
-		elif diff == 4: sep = 'seq_sep_P4'
-		else: sep = 'seq_sep_other'
+		sep = 'seq_sep_' + {-4: 'M4', -3: 'M3', -2: 'M2', -1: 'PM1',
+			1: 'PM1', 2: 'P2', 3: 'P3', 4: 'P4'}.get(a['ri'] - d['ri'], 'other')
 		mkey = (d['chem'], a['chem'], sep)
 		got = hbmemo.get(mkey)
 		if got is None:
@@ -7383,147 +7351,77 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None, nrot_override=None):
 		if got is False: return
 		(entry, poly_d, poly_bah_short, poly_ahd_short, fade_d,
 			fbah_l, fahd_s, acc_hyb, s) = got
-		D_xyz = coords[d['D']]; H_xyz = coords[d['H']]
-		A_xyz = coords[a['A']]; B_xyz = coords[a['B']]
+		D_xyz = coords[d['D']].tolist(); H_xyz = coords[d['H']].tolist()
+		A_xyz = coords[a['A']].tolist(); B_xyz = coords[a['B']].tolist()
 		b2i = a.get('B2')
 		if acc_hyb == 'RING_HYBRID' and b2i is not None:
-			B_xyz = 0.5 * (B_xyz + coords[b2i])
+			B_xyz = [0.5 * (u + v) for u, v in zip(B_xyz,
+				coords[b2i].tolist())]
 		AH = float(dHA[ix, iy])
-		vDH = D_xyz - H_xyz; vAH = A_xyz - H_xyz
-		nAH = math.sqrt(vAH.dot(vAH))
-		cosAHD = float(np.dot(vDH, vAH) /
-			max(math.sqrt(vDH.dot(vDH)) * nAH, 1e-12))
-		vBA = B_xyz - A_xyz
-		cosBAH = -float(np.dot(vBA, vAH) /
-			max(math.sqrt(vBA.dot(vBA)) * nAH, 1e-12))
+		vDH = _sub3(D_xyz, H_xyz); vAH = _sub3(A_xyz, H_xyz)
+		nAH = math.sqrt(_dot3(vAH, vAH))
+		cosAHD = _dot3(vDH, vAH) / max(math.sqrt(_dot3(vDH, vDH)) * nAH,
+			1e-12)
+		vBA = _sub3(B_xyz, A_xyz)
+		cosBAH = -(_dot3(vBA, vAH) / max(math.sqrt(_dot3(vBA, vBA)) * nAH,
+			1e-12))
 		xH = -cosBAH
 		xD = -cosAHD
 		AHD_rad = math.acos(max(-1.0, min(1.0, cosAHD)))
 		Pr = hbond_poly_eval(poly_d, AH)
 		PSxH = hbond_poly_eval(poly_bah_short, xH)
-		PLxH = 0.0
 		PSxD = hbond_poly_eval(
 			poly_ahd_short, ahd_arg(poly_ahd_short, AHD_rad, xD))
-		PLxD = 0.0
 		FSr = hbond_fade(fade_d, AH)
-		FLr = 0.0
 		FxH = hbond_fade(fbah_l, xH)
 		FxD = hbond_fade(fahd_s, xD)
-		e = (Pr * FxD * FxH
-			+ FSr * (PSxD * FxH + FxD * PSxH)
-			+ FLr * (PLxD * FxH + FxD * PLxH))
+		e = Pr * FxD * FxH + FSr * (PSxD * FxH + FxD * PSxH)
 		e *= s
-		if acc_hyb == 'SP2_HYBRID' and b2i is not None:
-			B2_xyz = coords[b2i]
-			b1 = B_xyz - B2_xyz
-			b2 = A_xyz - B_xyz
-			b3 = H_xyz - A_xyz
-			g1x, g1y, g1z = b1.tolist()
-			g2x, g2y, g2z = b2.tolist()
-			g3x, g3y, g3z = b3.tolist()
-			n1x = g1y*g2z - g1z*g2y
-			n1y = g1z*g2x - g1x*g2z
-			n1z = g1x*g2y - g1y*g2x
-			n2x = g2y*g3z - g2z*g3y
-			n2y = g2z*g3x - g2x*g3z
-			n2z = g2x*g3y - g2y*g3x
-			n1 = np.array([n1x, n1y, n1z])
-			n2 = np.array([n2x, n2y, n2z])
-			n1n = math.sqrt(n1.dot(n1)); n2n = math.sqrt(n2.dot(n2))
-			if n1n > 1e-9 and n2n > 1e-9:
-				m1 = n1 / n1n; m2 = n2 / n2n
-				cos_chi = float(np.dot(m1, m2))
-				u1 = m1.tolist(); u2 = m2.tolist()
-				mc = np.array([u1[1]*u2[2] - u1[2]*u2[1],
-					u1[2]*u2[0] - u1[0]*u2[2],
-					u1[0]*u2[1] - u1[1]*u2[0]])
-				sin_chi_sign = float(np.dot(mc,
-					b2 / max(math.sqrt(b2.dot(b2)), 1e-12)))
-				chi = math.atan2(sin_chi_sign, cos_chi)
-				d_p = float(HS['BAH180_rise'])
-				m_p = float(HS['fade_slope'])
-				l_p = float(HS['outer_width'])
-				PI = math.pi
-				PI_minus_BAH = math.acos( max(-1.0, min(1.0, xH)))
-				BAH = PI - PI_minus_BAH
-				H_chi = (math.cos(2 * chi) + 1) * 0.5
-				if BAH >= PI * 2.0 / 3.0:
-					F_p = d_p * 0.5 * math.cos(3 * PI_minus_BAH) \
-						+ d_p * 0.5 - 0.5
-					G_p = d_p - 0.5
-				elif BAH >= PI * (2.0 / 3.0 - l_p):
-					outer = math.cos( PI - (PI * 2.0 / 3.0 - BAH) / l_p)
-					F_p = m_p * 0.5 * outer + m_p * 0.5 - 0.5
-					G_p = (m_p - d_p) * 0.5 * outer \
-						+ (m_p - d_p) * 0.5 + d_p - 0.5
+		c = None
+		if b2i is not None and (acc_hyb == 'SP2_HYBRID' or (acc_hyb ==
+				'SP3_HYBRID' and a['chem'] in ('hbacc_HXL', 'hbacc_AHX'))):
+			u = _sub3(A_xyz, B_xyz)
+			p = _cross3(_sub3(B_xyz, coords[b2i].tolist()), u)
+			q = _cross3(u, _sub3(H_xyz, A_xyz))
+			pn, qn = math.sqrt(_dot3(p, p)), math.sqrt(_dot3(q, q))
+			if pn > 1e-9 and qn > 1e-9:
+				c = max(-1.0, min(1.0, _dot3(p, q) / (pn * qn)))
+		if c is not None:
+			bah = math.pi - math.acos(max(-1.0, min(1.0, xH)))
+			edge = 2 * math.pi / 3
+			if acc_hyb == 'SP2_HYBRID':
+				rise, top = float(HS['BAH180_rise']), float(HS['fade_slope'])
+				if bah >= edge:
+					f, g = rise * (1 - math.cos(3 * bah)) / 2, rise
 				else:
-					F_p = m_p - 0.5; G_p = m_p - 0.5
-				e += s * (H_chi * F_p + (1 - H_chi) * G_p)
-		elif acc_hyb == 'SP3_HYBRID' and a['chem'] in (
-				'hbacc_HXL', 'hbacc_AHX') and b2i is not None:
-			B2_xyz = coords[b2i]
-			b1 = H_xyz - A_xyz
-			b2 = A_xyz - B_xyz
-			b3 = B_xyz - B2_xyz
-			g1x, g1y, g1z = b1.tolist()
-			g2x, g2y, g2z = b2.tolist()
-			g3x, g3y, g3z = b3.tolist()
-			n1x = g1y*g2z - g1z*g2y
-			n1y = g1z*g2x - g1x*g2z
-			n1z = g1x*g2y - g1y*g2x
-			n2x = g2y*g3z - g2z*g3y
-			n2y = g2z*g3x - g2x*g3z
-			n2z = g2x*g3y - g2y*g3x
-			n1 = np.array([n1x, n1y, n1z])
-			n2 = np.array([n2x, n2y, n2z])
-			n1n = math.sqrt(n1.dot(n1)); n2n = math.sqrt(n2.dot(n2))
-			if n1n > 1e-9 and n2n > 1e-9:
-				m1 = n1 / n1n; m2 = n2 / n2n
-				cos_chi = float(np.dot(m1, m2))
-				u1 = m1.tolist(); u2 = m2.tolist()
-				mc = np.array([u1[1]*u2[2] - u1[2]*u2[1],
-					u1[2]*u2[0] - u1[0]*u2[2],
-					u1[0]*u2[1] - u1[1]*u2[0]])
-				sin_chi_sign = float(np.dot(mc,
-					b2 / max(math.sqrt(b2.dot(b2)), 1e-12)))
-				chi = math.atan2(sin_chi_sign, cos_chi)
-				PI = math.pi
-				max_penalty = float(HS['max_penalty'])
-				PI_minus_BAH = math.acos( max(-1.0, min(1.0, xH)))
-				BAH = PI - PI_minus_BAH
-				chi_scale = 0.0
-				if ((chi > PI/3 and chi < PI/2) or
-						(chi < -PI/3 and chi > -PI/2) or
-						(chi > 3*PI/2 and chi < 5*PI/3)):
-					chi_scale = (-math.cos(6 * chi) + 1) / 2
-				elif ((chi > PI/2 and chi < 3*PI/2) or
-						(chi < -PI/2 and chi > -3*PI/2)):
-					chi_scale = 1.0
-				BAH_bonus = -1.0
-				if BAH > 2 * PI / 3:
-					BAH_bonus = -math.cos(3 * BAH) / 2 - 0.5
-				sp3_acc_penalty = (s * max_penalty
-					* (1 + BAH_bonus * chi_scale))
-				e += sp3_acc_penalty
-		input_e = e
-		if input_e > HS['fade_hi']:
-			return
-		if input_e > HS['fade_lo']:
-			e = (HS['fade_c0'] + HS['fade_c1'] * input_e
-				+ HS['fade_c2'] * input_e * input_e)
+					r = (1 - math.cos(min((edge - bah)
+						/ float(HS['outer_width']), math.pi))) / 2
+					f, g = top * r, rise + (top - rise) * r
+				e += s * (c * c * f + (1 - c * c) * g - 0.5)
+			else:
+				ac = math.acos(c)
+				w_chi = (1.0 if ac > math.pi / 2 else (1 - math.cos(6 * ac))
+					/ 2 if ac > math.pi / 3 else 0.0)
+				w_bah = -math.cos(3 * bah) / 2 - 0.5 if bah > edge else -1.0
+				e += s * float(HS['max_penalty']) * (1 + w_bah * w_chi)
+		if e > HS['fade_hi']: return
+		if e > HS['fade_lo']:
+			e = HS['fade_c0'] + e * (HS['fade_c1'] + e * HS['fade_c2'])
 		w = entry['weight']
 		don_is_bb = atoms[d['D']][0] == 'N'
 		acc_is_bb = atoms[a['A']][0] in ('O', 'OXT', 'OT1', 'OT2')
 		all_hbonds.append({
 			'ri_d': d['ri'], 'd_atom': atoms[d['H']][0],
 			'ri_a': a['ri'], 'a_atom': atoms[a['A']][0],
-			'e': e, 'w': w,
+			'e': e, 'w': w, 'ix': ix, 'iy': iy,
 			'don_is_bb': don_is_bb,
 			'acc_is_bb': acc_is_bb,
 			'AH': AH, 'cosBAH': cosBAH, 'cosAHD': cosAHD})
 	def fullatomhbond(pose, cache, per_hb=None):
 		'''
 		Compute the hydrogen-bond energy with the four categories partitioned
+		Source: Alford et al. 2017 (J. Chem. Theory Comput.
+		13:3031), Hydrogen bonding section (backbone-group exclusion)
 		Arguments:
 		----------
 			cache: dict - ScoreMatch cache
@@ -7627,23 +7525,6 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None, nrot_override=None):
 		(donor_map, acceptor_map, base_map, eval_key, polys, fades,
 			don_str_tab, acc_str_tab, atom_to_res, res_atom,
 			donors, acceptors, H_idx, A_idx) = topo
-		nb_count = {}
-		nb_xyz = {}
-		for ri, info in aas.items():
-			tri = info[5] if len(info) >= 6 else None
-			nb_atom = 'CA' if tri == 'GLY' else 'CB'
-			ai = res_atom.get((int(ri), nb_atom))
-			if ai is None:
-				ai = res_atom.get((int(ri), 'CA'))
-			if ai is not None:
-				nb_xyz[int(ri)] = coords[ai]
-		ri_list = list(nb_xyz.keys())
-		nb_arr = np.stack([nb_xyz[r] for r in ri_list], axis=0)
-		dd = np.linalg.norm(nb_arr[:, None, :] - nb_arr[None, :, :], axis=2)
-		within = (dd < 10.0)
-		counts = within.sum(axis=1)
-		for k, r in enumerate(ri_list):
-			nb_count[r] = int(counts[k])
 		cat_totals = {'SR_BB': 0.0, 'LR_BB': 0.0, 'BB_SC': 0.0, 'SC': 0.0}
 		if not donors or not acceptors: return cat_totals
 		all_hbonds = []
@@ -7653,27 +7534,44 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None, nrot_override=None):
 		for ix, iy in zip(*within):
 			hbondpair(ix, iy, HS, acc_str_tab, acceptors, all_hbonds, atoms,
 				coords, dHA, don_str_tab, donors, eval_key, fades, polys)
-		don_bbg = set()
-		acc_bbg = set()
+		def pairenergy(ix, iy, X):
+			'''
+			Energy of one donor/acceptor pair at coordinates X
+			Arguments:
+			----------
+				ix: int - index into the donors list
+				iy: int - index into the acceptors list
+				X:  np.ndarray - (N, 3) coordinates
+			Returns:
+			--------
+				float: the pair's faded energy, 0 when it is rejected
+			'''
+			out = []
+			hbondpair(ix, iy, HS, acc_str_tab, acceptors, out, atoms, X,
+				{(ix, iy): np.linalg.norm(X[donors[ix]['H']]
+				- X[acceptors[iy]['A']])}, don_str_tab, donors, eval_key,
+				fades, polys)
+			return out[0]['e'] if out else 0.0
+		G = cache.get('_grad')
+		if G is not None:
+			cat_totals['grad'] = {c: np.zeros_like(G) for c in cat_totals}
+		busy = {k for h in all_hbonds if h['don_is_bb'] and h['acc_is_bb']
+			for k in (('D', h['ri_d']), ('A', h['ri_a']))}
+		cats = {'hbw_SR_BB': 'SR_BB', 'hbw_LR_BB': 'LR_BB', 'hbw_SC': 'SC',
+			'hbw_SR_BB_SC': 'BB_SC', 'hbw_LR_BB_SC': 'BB_SC'}
 		for h in all_hbonds:
-			if h['don_is_bb'] and h['acc_is_bb']:
-				don_bbg.add(h['ri_d'])
-				acc_bbg.add(h['ri_a'])
-		for h in all_hbonds:
-			if h['don_is_bb'] and not h['acc_is_bb']:
-				if h['ri_d'] in don_bbg: continue
-			elif not h['don_is_bb'] and h['acc_is_bb']:
-				if h['ri_a'] in acc_bbg: continue
-			e = h['e']; w = h['w']
-			cat = None
-			if w == 'hbw_SR_BB':
-				cat_totals['SR_BB'] += e; cat = 'SR_BB'
-			elif w == 'hbw_LR_BB':
-				cat_totals['LR_BB'] += e; cat = 'LR_BB'
-			elif w in ('hbw_SR_BB_SC', 'hbw_LR_BB_SC'):
-				cat_totals['BB_SC'] += e; cat = 'BB_SC'
-			elif w == 'hbw_SC':
-				cat_totals['SC'] += e; cat = 'SC'
+			if h['don_is_bb'] != h['acc_is_bb'] and ((('D', h['ri_d'])
+				if h['don_is_bb'] else ('A', h['ri_a'])) in busy): continue
+			e = h['e']; cat = cats.get(h['w'])
+			if cat is not None: cat_totals[cat] += e
+			if G is not None and cat is not None:
+				d = donors[h['ix']]; a = acceptors[h['iy']]; X = coords.copy()
+				for i in {d['D'], d['H'], a['A'], a['B'], a['B2']} - {None}:
+					for k in range(3):
+						X[i, k] += 1e-6; ep = pairenergy(h['ix'], h['iy'], X)
+						X[i, k] -= 2e-6; em = pairenergy(h['ix'], h['iy'], X)
+						X[i, k] = coords[i, k]
+						cat_totals['grad'][cat][i, k] += (ep - em) / 2e-6
 			if per_hb is not None and cat is not None:
 				per_hb.append((h['ri_d'], h['d_atom'], h['ri_a'],
 					h['a_atom'], e, cat, h['AH'], h['cosBAH'],
@@ -7707,7 +7605,6 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None, nrot_override=None):
 	cache['fullatomsolraw'] = fullatomsolraw
 	cache['fullatomstubterm'] = fullatomstubterm
 	cache['fadun_rotwell_grid'] = fadun_rotwell_grid
-	cache['fadun_entropy_grid'] = fadun_entropy_grid
 	cache['fadun_spline_eval'] = fadun_spline_eval
 	cache['fadun_nrchi_data'] = fadun_nrchi_data
 	cache['fadun_ypp_psi_grid'] = fadun_ypp_psi_grid
@@ -7850,17 +7747,135 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None, nrot_override=None):
 	cache['fullatomhbond'] = fullatomhbond_memo
 	return cache
 
-def Minimise(pose, ff=None, max_steps=500, ftol=1.0, alg='lbfgs', dt_fs=0.5,
+def _relax(pose, ff, max_steps, repeats, seed):
+	'''
+	Rosetta's FastRelax (Tyka et al. 2011, J Mol Biol 405:607)
+	Arguments:
+	----------
+		pose:      Protein pose to relax in place
+		ff:        Full-atom Score()
+		max_steps: Iterations allowed to each minimisation
+		repeats:   Rounds of the script
+		seed:      Seed for the repacking, None for unseeded
+	Returns:
+	--------
+		float: Score of the structure left in the pose
+		dict: Log holding 'energies', the full-weight score after each
+		round, 'stages', one (fa_rep scale, score, iterations) per
+		minimisation, and 'n_evals'
+	'''
+	AA = pose.data['Amino Acids']; B = pose.data['Bonds']
+	ix = pose.GetAtomIdx; tors = []
+	def add(a, b, m):
+		if m and b in B.get(a, ()): tors.append((a, b, np.array(sorted(m))))
+	for r in sorted(AA, reverse=True):
+		q, p = pose._nextres(r), pose._prevres(r)
+		db = pose.aminoacids.get(AA[r][0].upper(), {}); pc = _protonchi(pose, r)
+		if q is not None:
+			add(ix(r, 'C'), ix(q, 'N'), pose._downstreamatoms(r, 'C', q, 'N'))
+			add(ix(r, 'CA'), ix(r, 'C'), pose._downstreamatoms(r, 'CA', r, 'C'))
+		if pc: add(*pc[0][1:3], pose._downstreamsidechain(r, *pc[0][1:3]))
+		for c in (db.get('Chi Angle Atoms') or [])[::-1]:
+			a, b = ix(r, c[1]), ix(r, c[2])
+			add(a, b, pose._downstreamsidechain(r, a, b) if db.get('Fused')
+				else pose._downstreamatoms(r, c[1], r, c[2]))
+		if p is not None and ix(r, 'N') in B.get(ix(p, 'C'), ()):
+			add(ix(r, 'N'), ix(r, 'CA'), pose._downstreamatoms(r, 'N', r, 'CA'))
+	X = np.array(pose.data['Coordinates'], dtype=np.float64); n_evals = 0
+	def fg(th):
+		'''
+		Score and torsion gradient with each torsion turned by th
+		Arguments:
+		----------
+			th: (n_torsions,) radians from the structure in X
+		Returns:
+		--------
+			tuple: (score, gradient), the turned structure left in pose
+		'''
+		nonlocal n_evals
+		Y = X.copy()
+		for (a, b, m), d in zip(tors, th):
+			u = (Y[b] - Y[a]) / np.linalg.norm(Y[b] - Y[a])
+			Y[m] = (Y[m] - Y[b]) @ pose._rotmat(-math.degrees(d), u) + Y[b]
+		pose.data['Coordinates'] = Y
+		E, F = ff(pose, grad=True); n_evals += 1
+		return float(E), np.array([-((Y[b] - Y[a]) / np.linalg.norm(Y[b]
+			- Y[a])) @ np.cross(Y[m] - Y[b], F[m]).sum(0) for a, b, m in tors])
+	def minimise(tol):
+		'''
+		Limited-memory BFGS in torsion space with a backtracking Armijo
+		line search (Nocedal & Wright 2006, Numerical Optimization, 2nd
+		ed., Algorithms 7.4, 7.5 and 3.1); it stops when the score has
+		fallen by less than tol, relative to its size, on two successive
+		iterations, or when no step lowers it
+		Arguments:
+		----------
+			tol: float - relative decrease below which an iteration stalls
+		Returns:
+		--------
+			tuple: (score, iterations)
+		'''
+		th = np.zeros(len(tors)); E, g = fg(th); S_, Y_ = [], []
+		stall = 0
+		for it in range(int(max_steps)):
+			d = -g.copy(); al = []
+			for s_, y_ in zip(S_[::-1], Y_[::-1]):
+				al.append((s_ @ d) / (y_ @ s_)); d -= al[-1] * y_
+			if Y_: d *= (S_[-1] @ Y_[-1]) / (Y_[-1] @ Y_[-1])
+			for s_, y_, a in zip(S_, Y_, al[::-1]):
+				d += s_ * (a - (y_ @ d) / (y_ @ s_))
+			slope = d @ g
+			if slope >= 0: d, slope, S_, Y_ = -g, -(g @ g), [], []
+			t = min(1.0, 0.5 / max(np.abs(d).max(), 1e-12))
+			E2, g2 = fg(th + t * d)
+			while E2 > E + 1e-4 * t * slope and t > 1e-12:
+				t *= 0.5; E2, g2 = fg(th + t * d)
+			if E2 >= E: break
+			s_, y_ = t * d, g2 - g
+			if y_ @ s_ > 1e-10:
+				S_, Y_ = (S_ + [s_])[-50:], (Y_ + [y_])[-50:]
+			stall = stall + 1 if E - E2 <= tol * max(1.0, abs(E2)) else 0
+			th, E, g = th + s_, E2, g2
+			if stall >= 2: break
+		return fg(th)[0], it + 1
+	if 'Relax' not in ff.Parameters:
+		raise ValueError("Minimise: score set %r has no 'Relax' script"
+			% ff.name)
+	rng = np.random.default_rng(seed)
+	W = ff.Parameters['FaRep']; w0 = float(W['weight'])
+	energies, stages = [], []; best_E, best_X = float(ff(pose)), X.copy()
+	try:
+		for _ in range(int(repeats)):
+			for w_pack, w_min, tol in ff.Parameters['Relax']:
+				W['weight'] = w0 * w_pack; pose.data['Coordinates'] = X
+				Pack(pose, ff=ff, seed=int(rng.integers(2 ** 31)))
+				X = np.array(pose.data['Coordinates'], dtype=np.float64)
+				W['weight'] = w0 * w_min; E, it = minimise(tol)
+				X = np.array(pose.data['Coordinates'], dtype=np.float64)
+				stages.append((w_min, E, it))
+			W['weight'] = w0; energies.append(float(ff(pose)))
+			if energies[-1] < best_E: best_E, best_X = energies[-1], X.copy()
+	finally:
+		W['weight'] = w0
+	pose.data['Coordinates'] = best_X
+	return float(ff(pose)), {'energies': energies, 'stages': stages,
+		'n_evals': n_evals}
+
+def Minimise(pose, ff=None, max_steps=None, ftol=1.0, alg='lbfgs', dt_fs=0.5,
 		dt_max_fs=1.0, step_max=0.2, etol=1e-6, stall_k=10,
 		reject_k=20, rise_k=2.0, sd_steps=500, sd_max=1e3, mem=10,
-		c1=1e-4, box=None):
+		c1=1e-4, box=None, repeats=5, seed=None):
 	'''
-	Relax pose coordinates by staged descent
+	Relax pose coordinates by staged descent, or with a Score() by
+	Rosetta's FastRelax
 	Arguments:
 	----------
 		pose:      Protein, DNA, RNA, or Molecule pose to relax in place
-		ff:        ForceField to evaluate, created when None
-		max_steps: Maximum number of damped dynamics iterations
+		ff:        ForceField to evaluate, created when None, or a
+		           full-atom Score(), which runs Rosetta's FastRelax and
+		           returns its own log
+		max_steps: Maximum number of damped dynamics iterations, None
+		           for 500 with ForceField(), or None for 2000 with a Score()
 		ftol:      Convergence threshold on max|force| in kJ/mol/A
 		alg:       'fire' for damped dynamics, 'lbfgs' for limited memory
 		           BFGS. The remaining dt arguments apply to 'fire' only,
@@ -7890,6 +7905,8 @@ def Minimise(pose, ff=None, max_steps=500, ftol=1.0, alg='lbfgs', dt_fs=0.5,
 		           search. A step is taken only when it lowers the energy by
 		           at least this fraction of what its own slope predicts
 		box:       None for no PBC, (3,) orthorhombic, (3, 3) triclinic
+		repeats:   Score() only, rounds of repacking and minimisation
+		seed:      Score() only, seed for the repacking
 	Returns:
 	--------
 		float: Energy in kJ/mol of the lowest energy frame visited, which
@@ -7906,8 +7923,8 @@ def Minimise(pose, ff=None, max_steps=500, ftol=1.0, alg='lbfgs', dt_fs=0.5,
 	'''
 	if ff is None: ff = ForceField()
 	if not hasattr(ff, '_prepare'):
-		raise ValueError("Minimise needs a ForceField() for its forces, "
-			"pass a Score() to Anneal(alg='mc') instead")
+		return _relax(pose, ff, max_steps or 2000, repeats, seed)
+	if max_steps is None: max_steps = 500
 	if alg not in ('fire', 'lbfgs'):
 		raise ValueError("Minimise: unknown alg=%r "
 			"(allowed: 'fire', 'lbfgs')" % (alg,))
@@ -8845,42 +8862,9 @@ def _dockworker(task):
 		if not np.isfinite(e_cur):
 			x = np.zeros(6); e_cur = fobj(x)
 		X_start = place(x)
-		T = P['T']; n_steps = P['n_steps']
-		sig = np.array([0.25, np.radians(1.5)])
-		lo_s = np.array([0.05, np.radians(0.2)])
-		hi_s = np.array([0.5, np.radians(2.0)])
-		cnt = np.zeros(2); acc_n = np.zeros(2)
-		e_best, x_best = e_cur, x.copy()
-		energies = np.empty(n_steps); accepted = np.zeros(n_steps, dtype=bool)
-		best_step = 0
-		for s in range(n_steps):
-			grp = int(rng.integers(0, 2))
-			x_new = x.copy()
-			if grp == 0:
-				x_new[:3] += rng.normal(size=3) * sig[0]
-			else:
-				u = rng.normal(size=3); u /= np.linalg.norm(u)
-				R = rotmat(u * rng.normal() * sig[1]) @ rotmat(x[3:6])
-				x_new[3:6] = rotvec(R)
-			e_new = fobj(x_new)
-			if not np.isfinite(e_new): acc = False
-			elif e_new <= e_cur: acc = True
-			elif T <= 0.0: acc = False
-			else: acc = bool(rng.random() < np.exp(-(e_new - e_cur) / T))
-			energies[s] = e_new if np.isfinite(e_new) else float('nan')
-			accepted[s] = acc
-			cnt[grp] += 1; acc_n[grp] += int(acc)
-			if acc:
-				x, e_cur = x_new, e_new
-				if e_cur < e_best:
-					e_best, x_best, best_step = e_cur, x.copy(), s
-			if cnt[grp] >= 50:
-				sig[grp] *= math.exp(0.5 * (acc_n[grp] / cnt[grp] - 0.3))
-				sig[grp] = min(hi_s[grp], max(lo_s[grp], sig[grp]))
-				cnt[grp] = acc_n[grp] = 0
 		scale = np.array([1.0] * 3 + [0.3] * 3)
 		hstep = np.array([0.02] * 3 + [np.radians(0.5)] * 3)
-		def repackinterface(rng_r, cut=8.0, n_steps=2000):
+		def repackinterface(rng_r, cut=8.0, n_steps=20000, trials=False):
 			'''
 			Repack the side chains that line the contact, by simulated
 			annealing over the backbone-dependent rotamer library, in the
@@ -8894,6 +8878,9 @@ def _dockworker(task):
 				cut:     Distance in angstroms within which a residue of
 					one side counts as lining the other
 				n_steps: Annealing proposals
+				trials:  True runs Rosetta's rotamer trials instead, one
+					pass in random order giving each residue its best
+					rotamer with the others held
 			Returns:
 			--------
 				int: Residues repacked, 0 when none line the contact
@@ -8946,12 +8933,17 @@ def _dockworker(task):
 				nbrs, okf, Kst = tab['nbrs'], tab['ok'], tab['K']
 				state = {q: Kst[q] for q in ids}
 				E_run = 0.0; E_top = 0.0; top = dict(state)
-				for st in range(N):
+				for q in (rng_r.permutation(ids) if trials else []):
+					row = E1[q] + sum(tbl[:, state[j]] for j, tbl in nbrs[q])
+					top[q] = state[q] = int(np.argmin(np.where(okf[q], row,
+						np.inf)))
+				for st in range(N * (not trials)):
 					T = T0 * (T1 / T0) ** (st / max(1, N - 1))
 					q = ids[int(rng_r.integers(0, len(ids)))]
 					cum = cand[q][1]
-					k = min(int(np.searchsorted(cum, rng_r.random())),
-						len(cum) - 1)
+					u = rng_r.random() * (len(cum) + 1) / len(cum)
+					k = Kst[q] if u >= 1.0 else min(int(np.searchsorted(cum,
+						u)), len(cum) - 1)
 					was = state[q]
 					if k == was or not okf[q][k]: continue
 					row = E1[q]
@@ -8968,16 +8960,26 @@ def _dockworker(task):
 				return len(ids)
 			E_cur = energy(); held = {q: -1 for q in ids}
 			E_top, top = E_cur, dict(held)
-			for st in range(N):
+			for q in (rng_r.permutation(ids) if trials else []):
+				for k in range(len(cand[q][1])):
+					if not _apply(cpx, q, cand[q][0][k], cand[q][2], fused):
+						continue
+					E_try = energy()
+					if E_try < E_top: E_top = E_try; top[q] = held[q] = k
+				_apply(cpx, q, cand[q][0][held[q]] if held[q] >= 0
+					else start[q], cand[q][2], fused)
+			for st in range(N * (not trials)):
 				T = T0 * (T1 / T0) ** (st / max(1, N - 1))
 				q = ids[int(rng_r.integers(0, len(ids)))]
 				mus, cum, n_chi = cand[q]
-				k = min(int(np.searchsorted(cum, rng_r.random())),
+				u = rng_r.random() * (len(cum) + 1) / len(cum)
+				k = -1 if u >= 1.0 else min(int(np.searchsorted(cum, u)),
 					len(cum) - 1)
 				if k == held[q]: continue
 				was = held[q]
 				snap = start[q] if was < 0 else None
-				if not _apply(cpx, q, mus[k], n_chi, fused): continue
+				if not _apply(cpx, q, mus[k] if k >= 0 else start[q], n_chi,
+					fused): continue
 				E_try = energy()
 				dE = E_try - E_cur
 				if dE <= 0.0 or rng_r.random() < math.exp(-dE / max(T, 1e-12)):
@@ -8990,24 +8992,48 @@ def _dockworker(task):
 				_apply(cpx, q, cand[q][0][k] if k >= 0 else start[q],
 					cand[q][2], fused)
 			return len(ids)
-		n_repack = 0
-		x_ref, e_ref = x_best, e_best
-		for cyc in range(int(P.get('repack', 0))):
-			cpx.data['Coordinates'] = place(x_ref)
-			n_repack = repackinterface(rng)
-			if not n_repack: break
-			X0 = cpx.data['Coordinates'].copy()
-			c0 = X0[mov].mean(0)
-			x_ref = np.zeros(6)
-			e_ref = fobj(x_ref)
-			x_ref, e_ref, _ = lbfgs(fobj, x_ref, scale, hstep,
-				P['max_iter'], central=True)
-		if not int(P.get('repack', 0)):
-			x_ref, e_ref, _ = lbfgs(fobj, x_best, scale, hstep,
-				P['max_iter'], central=True)
-			if not np.isfinite(e_ref) or e_ref > e_best:
-				x_ref, e_ref = x_best, e_best
-		X_final = place(x_ref)
+		def rebase():
+			nonlocal X0, c0
+			X0 = cpx.data['Coordinates'].copy(); c0 = X0[mov].mean(0)
+		def pack(trials):
+			if P['repack'] and repackinterface(rng, trials=trials): rebase()
+			return fobj(np.zeros(6))
+		def minimise():
+			y, e, _ = lbfgs(fobj, np.zeros(6), scale, hstep, P['max_iter'])
+			cpx.data['Coordinates'] = place(y); rebase()
+			return e
+		cpx.data['Coordinates'] = X_start; rebase()
+		pack(False); e_cur = minimise()
+		X_cur = cpx.data['Coordinates'].copy()
+		T = P['T']; n_steps = P['n_steps']
+		e_best, X_best, best_step = e_cur, X_cur.copy(), 0
+		energies = np.empty(n_steps); accepted = np.zeros(n_steps, dtype=bool)
+		for s in range(n_steps):
+			for k in range(1 + (bool(P['repack']) and s % 8 == 7)):
+				u = rng.normal(size=3); u /= np.linalg.norm(u)
+				y = np.r_[rng.normal(size=3) * 0.1,
+					u * rng.normal() * np.radians(5.0)]
+				e_new = fobj(y) if k == 0 else pack(False)
+				if k == 0 and np.isfinite(e_new):
+					cpx.data['Coordinates'] = place(y); rebase()
+					e_new = pack(True)
+					if e_new < e_best + 15.0: e_new = minimise()
+				acc = np.isfinite(e_new) and (e_new <= e_cur or T > 0.0
+					and rng.random() < np.exp(-(e_new - e_cur) / T))
+				if acc:
+					X_cur = cpx.data['Coordinates'].copy(); e_cur = e_new
+					if e_cur < e_best:
+						e_best, X_best, best_step = e_cur, X_cur.copy(), s
+				else:
+					cpx.data['Coordinates'] = X_cur.copy(); rebase()
+			energies[s] = e_new if np.isfinite(e_new) else float('nan')
+			accepted[s] = acc
+		cpx.data['Coordinates'] = X_best; rebase()
+		e_ref = minimise()
+		X_final = cpx.data['Coordinates'].copy()
+		if not np.isfinite(e_ref) or e_ref > e_best:
+			e_ref, X_final = e_best, X_best
+		x_ref = np.zeros(6)
 		cpx.data['Coordinates'] = X0
 		return {'index': P['index'], 'x': x_ref, 'objective': float(e_ref),
 			'coordinates': X_final,
@@ -9031,11 +9057,14 @@ def Dock(pose1, pose2=None, ff=None, centre=None, size=25.0, spacing=0.5,
 	searches with local optimisation after every move run on the maps, and
 	the minima found are rescored, refined and clustered with the exact
 	Score() function, so every reported number is a Score() value.
-	Protein/protein docking is a local rigid-body Monte Carlo refinement of
-	the moving chain about its starting placement, scored by the full
-	energy of the complex, with an optional side-chain repack, in the
-	manner of Rosetta's high-resolution docking (Gray et al. 2003, J Mol
-	Biol 331:281). Blind protein/protein docking is not attempted
+	Protein/protein docking is Rosetta's high-resolution docking (Gray et
+	al. 2003, J Mol Biol 331:281; DockMCMProtocol): Monte Carlo plus
+	minimisation of the moving chain about its starting placement, each
+	0.1 A, 5 degree move followed by rotamer trials and a rigid-body
+	minimisation, scored by the full energy of the complex; the move
+	sizes, cycle counts, minimisation threshold and temperature are
+	Rosetta's DockMCMProtocol defaults. Blind protein/protein docking
+	is not attempted
 	Arguments:
 	----------
 		pose1:        Receptor Pose. Protein or nucleic acid for a ligand,
@@ -9065,7 +9094,8 @@ def Dock(pose1, pose2=None, ff=None, centre=None, size=25.0, spacing=0.5,
 		              many distinct pockets of the box are examined
 		n_steps:      Monte Carlo steps per search. None uses Vina's count
 		              for a ligand, 70*3*(50 + heavy atoms + 10*(6 +
-		              torsions))/2, and 300 for a protein
+		              torsions))/2, and 392 for a protein, Rosetta's 49
+		              cycles of eight
 		n_poses:      Poses returned at most
 		T:            Metropolis temperature in the score's own unit. None
 		              is 1.2 for a ligand and 0.8 for a protein
@@ -9082,12 +9112,10 @@ def Dock(pose1, pose2=None, ff=None, centre=None, size=25.0, spacing=0.5,
 		perturb:      Protein only, (angstroms, degrees) of the random
 		              rigid-body perturbation each run starts from. None
 		              starts every run at the given placement
-		repack:       Protein only. True alternates three rounds of
-		              repacking the side chains that line the interface
-		              with rigid-body minimisation, which is the cycle
-		              Rosetta's high-resolution docking runs; an integer
-		              sets how many rounds; False or 0 keeps the whole
-		              structure rigid apart from the placement
+		repack:       Protein only. True packs the side chains that line
+		              the interface as Rosetta's docking does, rotamer
+		              trials after every move and a full repack every
+		              eighth; False keeps them as given
 		cpu:          Worker processes for the maps, the searches and the
 		              refinements. 1 runs in this process. The result does
 		              not depend on cpu. Workers are started afresh on macOS
@@ -9529,7 +9557,7 @@ def Dock(pose1, pose2=None, ff=None, centre=None, size=25.0, spacing=0.5,
 	try: E_sep = separated(cpx)
 	finally: sys.stdout, sys.stderr = out_, err_
 	T_v = 0.8 if T is None else float(T)
-	n_steps_v = 300 if n_steps is None else int(n_steps)
+	n_steps_v = 392 if n_steps is None else int(n_steps)
 	children = ss.spawn(2 * int(n_runs))
 	n_cycles = 3 if repack is True else int(repack or 0)
 	base = {'complex': cpx, 'ff_kind': ff_kind, 'ff_name': ff.name,
@@ -10166,7 +10194,7 @@ def Port(name='openff', accept_rosetta_license=False):
 		return out
 	def _parsehbonddata(raw):
 		'''
-		Parse the bundled Rosetta hbond CSVs into a compact JSON-friendly
+		Parse the downloaded Rosetta hbond CSVs into a compact JSON-friendly
 		dict for use by Score('REF15')'s HBond* term methods
 		Arguments:
 		----------
@@ -10326,8 +10354,9 @@ def Port(name='openff', accept_rosetta_license=False):
 		return (y2_lo, y2_hi)
 	def _cubicfromspline(xlo, xhi, ylo, yhi, y2lo, y2hi):
 		'''
-		Convert spline (yvals, second-derivs) to cubic polynomial c0..c3
-		matching Rosetta's `cubic_polynomial_from_spline`.
+		Monomial coefficients of one cubic-spline segment, given its end
+		values and second derivatives (Press et al., Numerical Recipes,
+		eq 3.3.3)
 		Arguments:
 		----------
 			xlo, xhi: x-range
@@ -10338,26 +10367,20 @@ def Port(name='openff', accept_rosetta_license=False):
 			list [c0, c1, c2, c3] of the cubic polynomial evaluated as
 			c3*x^3 + c2*x^2 + c1*x + c0
 		'''
-		a, b = xlo, xhi
-		c, d = yhi, ylo
-		e, f = y2hi, y2lo
-		c0 = (((b*b*b*f - a*a*a*e)/(b-a) + (a*e - b*f)*(b-a)) / 6
-			+ (b*d - a*c) / (b-a))
-		c1 = ((3*a*a*e/(b-a) - e*(b-a) + f*(b-a) - 3*b*b*f/(b-a)) / 6
-			+ (c - d) / (b-a))
-		c2 = (3*b*f - 3*a*e) / (6*(b-a))
-		c3 = (e - f) / (6*(b-a))
-		return [c0, c1, c2, c3]
+		h = xhi - xlo; A = np.polynomial.Polynomial([xhi / h, -1 / h])
+		y = (A * ylo + (1 - A) * yhi + ((A ** 3 - A) * y2lo
+			+ ((1 - A) ** 3 - (1 - A)) * y2hi) * h * h / 6)
+		return [float(c) for c in np.pad(y.coef, (0, 4 - len(y.coef)))]
 	def _etableonepair(at1, at2, self_idx, other_idx, sigma_pair,
 			LJ_R, LJ_W, LK_DG, LK_L, LK_V, lj_r6, lj_r12, lj_si, lj_ss,
 			lk_coeff, far_lo, max_dis, bpa2, sol_lo, sol_hi, sol_cap,
-			carb_dis, lk_d2s, ljrep_d2):
+			carb_dis, lk_d2s, ljrep_d2, carbs):
 		'''
-		Analytic energy-table fields for one atom pair, following the
-		published definition of the Rosetta all-atom energy function
-		(Alford et al. 2017, J. Chem. Theory Comput. 13:3031, eqs 2-5
-		and 11-13) with Lazaridis-Karplus implicit solvation (Lazaridis
-		& Karplus 1999, Proteins 35:133)
+		Analytic energy-table fields for one atom pair, reproducing the
+		energy tables of Rosetta's REF15 (Alford et al. 2017, J. Chem.
+		Theory Comput. 13:3031, eqs 2-5 and 11-13; Leaver-Fay et al.
+		2013) with Lazaridis-Karplus implicit solvation (Lazaridis &
+		Karplus 1999, Proteins 35:133)
 		Arguments:
 		----------
 			at1, at2:        Atom type indices of the pair
@@ -10375,131 +10398,70 @@ def Port(name='openff', accept_rosetta_license=False):
 			                 sigma
 			ljrep_d2:        Squared distance below which the repulsive
 			                 term is linear
+			carbs:           Carbon types whose solvation is held flat
+			                 at short range, read from the port
 		Returns:
 		--------
 			dict: the analytic fields for this pair, in the schema
 			ScoreMatch reads back out of ['EtablePairParams']['pairs']
 		'''
-		sig = sigma_pair
-		sig_lk = lk_d2s * sig
-		r12 = lj_r12[at1][at2]
-		r6 = lj_r6[at1][at2]
-		def _lj(d):
-			d6 = d ** 6
-			return r12 / (d6 * d6) + r6 / d6
-		def _dlj(d):
-			d6 = d ** 6
-			return -12.0 * r12 / (d6 * d6 * d) - 6.0 * r6 / (d6 * d)
-		ylo = _lj(far_lo)
-		y2lo, y2hi = _splineddy2(far_lo, ylo, _dlj(far_lo),
-			max_dis, 0.0, 0.0)
-		ljatr_cp = _cubicfromspline(far_lo, max_dis, ylo, 0.0,
-			y2lo, y2hi)
-		CARBS = ('CH1', 'CH2', 'CH3', 'aroC')
-		iscarb = (_ETABLE_ATOM_TYPES[at1] in CARBS
-			and _ETABLE_ATOM_TYPES[at2] in CARBS)
-		ibin = int(carb_dis * carb_dis * bpa2 + 1.0)
-		flat_d = math.sqrt((ibin - 1) / bpa2) if iscarb else sig_lk
-		swtch = (ibin + 1) if iscarb \
-			else int(sig_lk * sig_lk * bpa2 + 1.0) + 1
-		sol_lo_d = math.sqrt((max(1, swtch - sol_lo) - 1) / bpa2)
-		sol_hi_d = math.sqrt((min(swtch + sol_hi, sol_cap) - 1) / bpa2)
-		def _fdslope(fn, x, back):
-			y = math.sqrt(x * x - 1.0 / bpa2) if back \
-				else math.sqrt(x * x + 1.0 / bpa2)
-			return (fn(x) - fn(y)) / (x - y)
-		def _solv(a_self, a_other):
-			'''
-			Solvation curve pieces for one direction of the pair
-			Arguments:
-			----------
-				a_self:  Atom type index being desolvated
-				a_other: Atom type index doing the desolvating
-			Returns:
-			--------
-				tuple: the flat close value, the close cubic, the far
-				cubic and the pair prefactor
-			'''
-			lam = LK_L[a_self]
-			pre = lk_coeff[a_self][a_other]
+		def ring(k):
+			return math.sqrt((k - 1) / bpa2)
+		def binof(d):
+			return int(d * d * bpa2 + 1.0)
+		def fit(x0, y0, s0, x1, y1, s1):
+			return _cubicfromspline(x0, x1, y0, y1,
+				*_splineddy2(x0, y0, s0, x1, y1, s1))
+		def secant(f, x, step):
+			y = math.sqrt(x * x + step / bpa2)
+			return (f(x) - f(y)) / (x - y)
+		a6, a12 = lj_r6[at1][at2], lj_r12[at1][at2]
+		def lj(d):
+			return (a12 / d ** 6 + a6) / d ** 6
+		def dlj(d):
+			return -(12.0 * a12 / d ** 6 + 6.0 * a6) / d ** 7
+		carb = {_ETABLE_ATOM_TYPES[at1], _ETABLE_ATOM_TYPES[at2]} <= set(carbs)
+		reach = carb_dis if carb else lk_d2s * sigma_pair
+		hold = ring(binof(reach)) if carb else reach
+		sw = binof(reach) + 1
+		lo, hi = ring(max(1, sw - sol_lo)), ring(min(sw + sol_hi, sol_cap))
+		def side(a, b):
 			def f(d):
-				x = (d - LJ_R[a_self]) / lam
-				return pre * math.exp(-x * x) / (d * d)
+				return lk_coeff[a][b] * math.exp(-((d - LJ_R[a]) / LK_L[a])
+					** 2) / (d * d)
 			def df(d):
-				x = (d - LJ_R[a_self]) / lam
-				g = math.exp(-x * x)
-				return pre * g * (-2.0 * x / (lam * d * d)
-					- 2.0 / (d * d * d))
-			lo, hi = sol_lo_d, sol_hi_d
-			flat = f(flat_d)
-			a2, b2 = _splineddy2(lo, flat, 0.0, hi, f(hi), df(hi))
-			ccp = _cubicfromspline(lo, hi, flat, f(hi), a2, b2)
-			a3, b3 = _splineddy2(far_lo, f(far_lo), df(far_lo),
-				max_dis, 0.0, 0.0)
-			fcp = _cubicfromspline(far_lo, max_dis, f(far_lo), 0.0,
-				a3, b3)
-			a2f, b2f = _splineddy2(lo, flat, 0.0, hi, f(hi),
-				_fdslope(f, hi, False))
-			ccpf = _cubicfromspline(lo, hi, flat, f(hi), a2f, b2f)
-			a3f, b3f = _splineddy2(far_lo, f(far_lo),
-				_fdslope(f, far_lo, True), max_dis, 0.0, 0.0)
-			fcpf = _cubicfromspline(far_lo, max_dis, f(far_lo), 0.0,
-				a3f, b3f)
-			return flat, ccp, fcp, lam, ccpf, fcpf
-		f_s, cp_s, fp_s, lam_s, cpf_s, fpf_s = _solv(self_idx, other_idx)
-		f_o, cp_o, fp_o, _, cpf_o, fpf_o = _solv(other_idx, self_idx)
+				return f(d) * (-2.0 * (d - LJ_R[a]) / LK_L[a] ** 2 - 2.0 / d)
+			y0, y1, yf = f(hold), f(hi), f(far_lo)
+			return (y0, fit(lo, y0, 0.0, hi, y1, df(hi)),
+				fit(far_lo, yf, df(far_lo), max_dis, 0.0, 0.0),
+				fit(lo, y0, 0.0, hi, y1, secant(f, hi, 1.0)),
+				fit(far_lo, yf, secant(f, far_lo, -1.0), max_dis, 0.0, 0.0))
+		s, o = side(self_idx, other_idx), side(other_idx, self_idx)
 		return {
-			'close_start': sol_lo_d,
-			'close_end':   sol_hi_d,
-			'close_flat':  f_s,
-			'close_poly':  list(cp_s),
-			'far_poly':    list(fp_s),
-			'lk_coeff':    lk_coeff[self_idx][other_idx],
-			'lambda_self': lam_s,
-			'R_self':      LJ_R[self_idx],
-			'final_weight': 1.0,
-			'close_flat_comb':  f_s + f_o,
-			'close_poly_comb':  [x + y for x, y in zip(cpf_s, cpf_o)],
-			'far_poly_comb':    [x + y for x, y in zip(fpf_s, fpf_o)],
-			'lj_minimum':         sig,
-			'lj_r12_coeff':       r12,
-			'lj_r6_coeff':        r6,
+			'close_start': lo, 'close_end': hi, 'close_flat': s[0],
+			'close_poly': s[1], 'far_poly': s[2],
+			'lk_coeff': lk_coeff[self_idx][other_idx],
+			'lambda_self': LK_L[self_idx], 'R_self': LJ_R[self_idx],
+			'final_weight': 1.0, 'close_flat_comb': s[0] + o[0],
+			'close_poly_comb': [x + y for x, y in zip(s[3], o[3])],
+			'far_poly_comb': [x + y for x, y in zip(s[4], o[4])],
+			'lj_minimum': sigma_pair, 'lj_r12_coeff': a12, 'lj_r6_coeff': a6,
 			'lj_switch_intercept': lj_si[at1][at2],
-			'lj_switch_slope':    lj_ss[at1][at2],
-			'lj_val_at_minimum':  -math.sqrt(LJ_W[at1] * LJ_W[at2]),
-			'lj_min_dis2sigma_value': 0.0,
-			'ljatr_cubic_poly':      list(ljatr_cp),
-			'ljatr_cubic_poly_xhi':  max_dis,
-			'ljatr_cubic_poly_xlo':  far_lo,
-			'ljatr_final_weight':    1.0,
+			'lj_switch_slope': lj_ss[at1][at2],
+			'lj_val_at_minimum': -math.sqrt(LJ_W[at1] * LJ_W[at2]),
+			'ljatr_cubic_poly': fit(far_lo, lj(far_lo), dlj(far_lo), max_dis,
+				0.0, 0.0),
+			'ljatr_cubic_poly_xhi': max_dis, 'ljatr_cubic_poly_xlo': far_lo,
+			'ljatr_final_weight': 1.0,
 			'ljrep_linear_ramp_d2_cutoff': ljrep_d2,
-			'ljrep_from_negcrossing': False,
-			'hydrogen_interaction':   False,
-			'ljrep_xr_xlo':    0.0,
-			'ljrep_xr_xhi':    0.0,
-			'ljrep_xr_slope':  0.0,
-			'ljrep_xr_extrapolated_slope': 0.0,
-			'ljrep_xr_ylo':    0.0}
+			'ljrep_from_negcrossing': False}
 	def _etableparams(atom_types, etopt):
 		'''
 		Analytic pair parameters for the van der Waals and solvation
-		terms, following the published definition of the Rosetta all-atom
-		energy function (Alford et al. 2017, J. Chem. Theory Comput.
-		13:3031, eqs 2-5 and 11-13) with Lazaridis-Karplus implicit
-		solvation (Lazaridis & Karplus 1999, Proteins 35:133)
-		Algorithm:
-		1) Pair sigma is the sum of the two atomic radii, epsilon the
-		   geometric mean of the two well depths.
-		2) The repulsive term is linear below 0.6 sigma, fitted for value
-		   and slope continuity, Lennard-Jones between 0.6 sigma and
-		   sigma, and zero beyond.
-		3) The attractive term is constant at -epsilon below sigma,
-		   Lennard-Jones out to far_lo, then a cubic matched in value and
-		   slope that reaches zero with zero slope at max_dis.
-		4) Solvation is a Gaussian in the distance from sigma, held
-		   constant below sigma - c0, joined by a cubic across
-		   sigma - c0 to sigma + c1, and taken to zero by a second cubic
-		   between far_lo and max_dis.
+		terms, reproducing the energy tables of Rosetta's REF15 (Alford
+		et al. 2017, J. Chem. Theory Comput. 13:3031, eqs 2-5 and 11-13;
+		Leaver-Fay et al. 2013) with Lazaridis-Karplus implicit solvation
+		(Lazaridis & Karplus 1999, Proteins 35:133)
 		Arguments:
 		----------
 			atom_types: Per atom-name dict parsed from atom_properties,
@@ -10511,68 +10473,35 @@ def Port(name='openff', accept_rosetta_license=False):
 			dict: stored at ['Score Parameters']['REF15']
 			['EtablePairParams'] as {atom_types, n_types, pairs}
 		'''
-		MAX_DIS         = etopt['MAX_DIS']
-		LJ_SWITCH_D2S   = etopt['LJ_SWITCH_D2S']
-		NTYPES          = len(_ETABLE_ATOM_TYPES)
-		LJ_R = [atom_types[n]['LJ_RADIUS'] for n in _ETABLE_ATOM_TYPES]
-		LJ_W = [atom_types[n]['LJ_WDEPTH'] for n in _ETABLE_ATOM_TYPES]
-		LK_DG = [atom_types[n]['LK_DGFREE'] for n in _ETABLE_ATOM_TYPES]
-		LK_L  = [atom_types[n]['LK_LAMBDA'] for n in _ETABLE_ATOM_TYPES]
-		LK_V  = [atom_types[n]['LK_VOLUME'] for n in _ETABLE_ATOM_TYPES]
-		LJ_S2D = 1.0 / LJ_SWITCH_D2S
-		LJ_V2W = LJ_S2D**12 - 2.0 * LJ_S2D**6
-		LJ_S2W = -12.0 * (LJ_S2D**13 - LJ_S2D**7)
-		sigma = [[max(LJ_R[i] + LJ_R[j], 1e-9) for j in range(NTYPES)]
-			for i in range(NTYPES)]
-		ACC = [bool(atom_types[n].get('acceptor')) for n in _ETABLE_ATOM_TYPES]
-		DON = [bool(atom_types[n].get('donor')) for n in _ETABLE_ATOM_TYPES]
-		POL = [bool(atom_types[n].get('polar_h')) for n in _ETABLE_ATOM_TYPES]
-		OHD = [n[:2] in ('OH', 'OW') or n == 'Oet3'
-			for n in _ETABLE_ATOM_TYPES]
-		for i in range(NTYPES):
-			for j in range(NTYPES):
-				if (ACC[i] and DON[j]) or (DON[i] and ACC[j]):
-					sigma[i][j] = (etopt['LJ_HB_OH']
-						if (DON[i] and OHD[i]) or (DON[j] and OHD[j])
-						else etopt['LJ_HB_DIS'])
-				elif (ACC[i] and POL[j]) or (POL[i] and ACC[j]):
-					sigma[i][j] = etopt['LJ_HB_HDIS']
-		inv_neg2_pi_sqrt_pi = -1.0 / (2.0 * math.pi * math.sqrt(math.pi))
-		lk_coeff_tmp = [inv_neg2_pi_sqrt_pi * LK_DG[i] / LK_L[i]
-			for i in range(NTYPES)]
-		lj_r6  = [[0.0]*NTYPES for _ in range(NTYPES)]
-		lj_r12 = [[0.0]*NTYPES for _ in range(NTYPES)]
-		lj_si  = [[0.0]*NTYPES for _ in range(NTYPES)]
-		lj_ss  = [[0.0]*NTYPES for _ in range(NTYPES)]
-		lk_coeff = [[0.0]*NTYPES for _ in range(NTYPES)]
-		for i in range(NTYPES):
-			for j in range(NTYPES):
-				s = sigma[i][j]
-				s6 = s**6
-				s12 = s6 * s6
-				wd = math.sqrt(LJ_W[i] * LJ_W[j])
-				lj_r6[i][j]  = -2.0 * wd * s6
-				lj_r12[i][j] = wd * s12
-				lj_ss[i][j] = (wd / s) * LJ_S2W
-				lj_si[i][j] = wd * LJ_V2W - lj_ss[i][j] * s * LJ_SWITCH_D2S
-				lk_coeff[i][j] = lk_coeff_tmp[i] * LK_V[j]
-		pairs = [None] * (NTYPES * NTYPES)
-		for is_ in range(NTYPES):
-			for io_ in range(NTYPES):
-				i = min(is_, io_); j = max(is_, io_)
-				s_ij = sigma[i][j]
-				pair = _etableonepair(
-					i, j, is_, io_, s_ij,
-					LJ_R, LJ_W, LK_DG, LK_L, LK_V,
-					lj_r6, lj_r12, lj_si, lj_ss, lk_coeff,
-					etopt['FAR_LO'], MAX_DIS,
-					etopt['BPA2'], etopt['SOL_LO'], etopt['SOL_HI'],
-					etopt['SOL_CAP'], etopt['CARB_DIS'],
-					etopt['LK_MIN_D2S'],
-					(LJ_SWITCH_D2S * s_ij) ** 2)
-				pairs[is_ * NTYPES + io_] = pair
-		return {'atom_types': list(_ETABLE_ATOM_TYPES),
-			'n_types': NTYPES, 'pairs': pairs}
+		names = list(_ETABLE_ATOM_TYPES); n = len(names)
+		def col(key):
+			return np.array([float(atom_types[t][key]) for t in names])
+		def flag(key):
+			return np.array([bool(atom_types[t].get(key)) for t in names])
+		def either(u, v):
+			return (u[:, None] & v[None, :]) | (v[:, None] & u[None, :])
+		rad, eps, lam = col('LJ_RADIUS'), col('LJ_WDEPTH'), col('LK_LAMBDA')
+		acc, don, hpol = flag('acceptor'), flag('donor'), flag('polar_h')
+		ohd = don & np.array([t == 'OH' for t in names])
+		sig = np.where(either(acc, don), np.where(ohd[:, None] | ohd[None, :],
+			etopt['LJ_HB_OH'], etopt['LJ_HB_DIS']), np.where(either(acc, hpol),
+			etopt['LJ_HB_HDIS'], np.maximum(rad[:, None] + rad[None, :], 1e-9)))
+		well = np.sqrt(np.outer(eps, eps)); s6 = sig ** 6
+		r6, r12 = -2.0 * well * s6, well * s6 * s6
+		ds = etopt['LJ_SWITCH_D2S'] * sig
+		slope = -(12.0 * r12 / ds ** 12 + 6.0 * r6 / ds ** 6) / ds
+		icpt = r12 / ds ** 12 + r6 / ds ** 6 - slope * ds
+		lkc = np.outer(-col('LK_DGFREE') / (2 * math.pi ** 1.5 * lam),
+			col('LK_VOLUME'))
+		M = [x.tolist() for x in (r6, r12, icpt, slope, lkc)]
+		V = [x.tolist() for x in (rad, eps, col('LK_DGFREE'), lam,
+			col('LK_VOLUME'))]
+		pairs = [_etableonepair(min(a, b), max(a, b), a, b, float(sig[a, b]),
+			*V, *M, etopt['FAR_LO'], etopt['MAX_DIS'], etopt['BPA2'],
+			etopt['SOL_LO'], etopt['SOL_HI'], etopt['SOL_CAP'],
+			etopt['CARB_DIS'], etopt['LK_MIN_D2S'], float(ds[a, b]) ** 2,
+			etopt['CARBS']) for a in range(n) for b in range(n)]
+		return {'atom_types': names, 'n_types': n, 'pairs': pairs}
 	def _r15fetch(path):
 		'''
 		Download one repository file as a UTF-8 string
@@ -10585,6 +10514,23 @@ def Port(name='openff', accept_rosetta_license=False):
 		'''
 		with urllib.request.urlopen(_REF15_REPO + path, timeout=120) as r:
 			return r.read().decode('utf-8')
+	def _r15srcnum(path, pattern):
+		'''
+		Download one Rosetta source file and read one number out of it
+		Arguments:
+		----------
+			path: str - path under the source/src/ root
+			pattern: str - regular expression whose first group is the number
+		Returns:
+		--------
+			float: the matched number
+		'''
+		url = _REF15_REPO.replace('/database/', '/source/src/') + path
+		with urllib.request.urlopen(url, timeout=120) as r:
+			m = re.search(pattern, r.read().decode('utf-8'), re.S)
+		if m is None:
+			raise RuntimeError('port: %s not found in %s' % (pattern, url))
+		return float(m.group(1))
 	def _r15fetchgz(path):
 		'''
 		Download one repository .gz file and return decompressed text
@@ -10792,7 +10738,7 @@ def Port(name='openff', accept_rosetta_license=False):
 			{'1HD': 'HD1', '2HD': 'HD2', '1HE': 'HE1', '2HE': 'HE2'},
 			res, fetch(PATCH + 'tyr_phosphorylated.txt'))
 		return out
-	def _parsenrchi(txt, n_chi, n_disc_chi):
+	def _parsenrchi(txt, n_chi, n_disc_chi, floor):
 		'''
 		Parse one non-rotameric chi density library
 		Arguments:
@@ -10800,6 +10746,7 @@ def Port(name='openff', accept_rosetta_license=False):
 			txt: Text of a bbdep.densities.lib file
 			n_chi: Number of chi angles the residue has
 			n_disc_chi: Number of those chi angles that are rotameric
+			floor: Probability given to backbone bins with no data
 		Returns:
 		--------
 			dict: per backbone bin and rotamer well, the sampled density of
@@ -10846,7 +10793,7 @@ def Port(name='openff', accept_rosetta_license=False):
 			rows_by_rot.setdefault(tuple(rot_idx), []).append(
 				(phi, psi, P_rot, negP_rot, chi_means,
 					chi_sigmas, densities))
-		MAXE = 13.815510557964274
+		MAXE = -math.log(floor)
 		per_rot = {}
 		for rot_key, rows in rows_by_rot.items():
 			P_rot_grid = [0.0] * (36 * 36)
@@ -11559,27 +11506,6 @@ def Port(name='openff', accept_rosetta_license=False):
 		hb_sp2['fade_c0'] = float(m.group(1))
 		hb_sp2['fade_c1'] = float(m.group(2))
 		hb_sp2['fade_c2'] = -float(m.group(3))
-		hbc_url = (_REF15_REPO.replace('/database/', '/source/src/')
-			+ 'core/scoring/hbonds/hbonds.cc')
-		with urllib.request.urlopen(hbc_url, timeout=120) as resp:
-			hbc_txt = resp.read().decode('utf-8')
-		m = re.search(r'burial_weight\(int const nb\)\s*\{(.*?)\n\}',
-			hbc_txt, re.S)
-		if m is None:
-			raise RuntimeError('port: burial_weight not found in %s'
-				% hbc_url)
-		body = m.group(1)
-		lo = re.search(r'nb\s*<\s*(\d+)\s*\)\s*return\s+([\d.]+)', body)
-		hi = re.search(r'nb\s*>\s*(\d+)\s*\)\s*return\s+([\d.]+)', body)
-		mid = re.search(r'\(nb\s*-\s*([\d.]+)\s*\)\s*\*\s*\(([\d.]+)\s*/\s*'
-			r'([\d.]+)\s*\)', body)
-		if not (lo and hi and mid):
-			raise RuntimeError('port: burial_weight body unparsed')
-		hb_burial = {'nb_lo': int(lo.group(1)), 'w_lo': float(lo.group(2)),
-			'nb_hi': int(hi.group(1)), 'w_hi': float(hi.group(2)),
-			'shift': float(mid.group(1)),
-			'slope': float(mid.group(2)) / float(mid.group(3))}
-		hb_sp2['burial'] = hb_burial
 		lki_url = (_REF15_REPO.replace('/database/', '/source/src/')
 			+ 'core/scoring/lkball/LK_BallInfo.cc')
 		with urllib.request.urlopen(lki_url, timeout=120) as resp:
@@ -11594,6 +11520,12 @@ def Port(name='openff', accept_rosetta_license=False):
 			raise RuntimeError('port: lk_ball_ramp_width_A2 default not '
 				'found in %s' % opt_url)
 		lkball['ramp_w2'] = float(m.group(1))
+		m = re.search(r"lk_ball_water_fade'.*?default\s*=\s*[\"']?([\d.]+)",
+			opt_txt, re.S)
+		if m is None:
+			raise RuntimeError('port: lk_ball_water_fade default not '
+				'found in %s' % opt_url)
+		lkball['water_fade'] = float(m.group(1))
 		etb_url = (_REF15_REPO.replace('/database/', '/source/src/')
 			+ 'core/scoring/etable/Etable.cc')
 		with urllib.request.urlopen(etb_url, timeout=120) as resp:
@@ -11602,7 +11534,8 @@ def Port(name='openff', accept_rosetta_license=False):
 			+ 'core/scoring/etable/EtableOptions.cc')
 		with urllib.request.urlopen(eto_url, timeout=120) as resp:
 			eto_txt = resp.read().decode('utf-8')
-		etopt = {'LJ_SWITCH_D2S': 0.6,
+		etopt = {'LJ_SWITCH_D2S': float(re.search(
+			r'lj_switch_dis2sigma\(\s*([\d.]+)\s*\)', eto_txt).group(1)),
 			'BPA2': float(re.search(
 			r'bins_per_A2\s*\(\s*([\d.]+)\s*\)', eto_txt).group(1)),
 			'SOL_LO': int(re.search(
@@ -11621,7 +11554,9 @@ def Port(name='openff', accept_rosetta_license=False):
 			r"'lj_hbond_OH_donor_dis'.*?default\s*=\s*'([\d.]+)'",
 			opt_txt).group(1)),
 			'LK_MIN_D2S': float(re.search(
-			r'lk_min_dis2sigma_\s*\(\s*([\d.]+)\s*\)', etb_txt).group(1))}
+			r'lk_min_dis2sigma_\s*\(\s*([\d.]+)\s*\)', etb_txt).group(1)),
+			'CARBS': re.findall(r'carbon_types_\.push_back\(\s*atom_set->'
+			r'atom_type_index\(\s*"(\w+)"', etb_txt)}
 		m = re.search(r'\(\s*max_dis_\s*-\s*([\d.]+)\s*\)\s*\*\s*10\.0',
 			etb_txt)
 		if m is None:
@@ -11664,7 +11599,8 @@ def Port(name='openff', accept_rosetta_license=False):
 		if m is None:
 			raise RuntimeError('port: mest_ not found in %s' % dslc_url)
 		dslf['mest_log'] = float(m.group(1))
-		for nm in ('wt_dihSS', 'wt_dihCS', 'wt_ang', 'wt_len'):
+		for nm in ('wt_dihSS', 'wt_dihCS', 'wt_ang', 'wt_len', 'shift',
+				'disulf_ssdist_cutoff'):
 			m = re.search(nm + r'_\(\s*([\d.]+)\s*\)', dslc_txt)
 			if m is None:
 				raise RuntimeError('port: %s_ not found in %s'
@@ -11678,6 +11614,10 @@ def Port(name='openff', accept_rosetta_license=False):
 		if m is None:
 			raise RuntimeError('port: omega weight not found in %s' % omg_url)
 		omega_k = float(m.group(1))
+		m = re.search(r'log\(\s*1\s*/\s*\(\s*([\d.]+)\s*\*\s*sqrt', omg_txt)
+		if m is None:
+			raise RuntimeError('port: omega sigma not found in %s' % omg_url)
+		omega_sig = float(m.group(1))
 		cpf_url = (_REF15_REPO.replace('/database/', '/source/src/')
 			+ 'core/scoring/etable/count_pair/CountPairFunction.cc')
 		with urllib.request.urlopen(cpf_url, timeout=120) as resp:
@@ -11797,12 +11737,23 @@ def Port(name='openff', accept_rosetta_license=False):
 		NRCHI_AA = [
 			('ASN', 2, 1), ('ASP', 2, 1), ('GLN', 3, 2), ('GLU', 3, 2),
 			('HIS', 2, 1), ('PHE', 2, 1), ('TRP', 2, 1), ('TYR', 2, 1)]
+		dun = 'core/pack/dunbrack/'
+		fadun = {'prob_floor': _r15srcnum(dun
+			+ 'RotamericSingleResidueDunbrackLibrary.tmpl.hh',
+			r'rotprob\[\s*sri\s*\]\s*<=\s*([\d.e-]+)')}
+		for nm in ('phi', 'psi'):
+			fadun['neutral_' + nm] = _r15srcnum(dun
+				+ 'SingleResidueDunbrackLibrary.cc', r'PEPTIDE_NEUTRAL_'
+				+ nm.upper() + r'\s*=\s*(-?[\d.]+)')
+		paa_floor = _r15srcnum('core/scoring/P_AA.cc',
+			r'probability\s*=\s*([\d.]*e-\d+)\s*;')
 		nrchi_db = {}
 		for aa3, n_chi, n_disc_chi in NRCHI_AA:
 			gz_path = ('rotamer/shapovalov/StpDwn_0-0-0/'
 				+ aa3.lower() + '.bbdep.densities.lib.gz')
 			txt = _r15fetchgz(gz_path)
-			nrchi_db[aa3] = _parsenrchi(txt, n_chi, n_disc_chi)
+			nrchi_db[aa3] = _parsenrchi(txt, n_chi, n_disc_chi,
+				fadun['prob_floor'])
 		prop_txt = _r15fetch('scoring/score_functions/P_AA_pp/shapovalov/'
 			'10deg/kappa131/a20.prop')
 		p_aa_pp = {}
@@ -11830,6 +11781,11 @@ def Port(name='openff', accept_rosetta_license=False):
 		if m is None:
 			raise RuntimeError('port: C0_ not found in %s' % cou_url)
 		coulomb_c0 = float(m.group(1))
+		m = re.search(r'min_dis_\s*-\s*([\d.]+)', cou_txt)
+		m2 = re.search(r'max_dis_\s*-\s*([\d.]+)', cou_txt)
+		if m is None or m2 is None:
+			raise RuntimeError('port: elec smoothing not found in %s' % cou_url)
+		elec_w = (float(m.group(1)), float(m2.group(1)))
 		elec = {}
 		for nm, key in (('elec_max_dis', 'fa_elec_max_dis'),
 				('elec_min_dis', 'fa_elec_min_dis'),
@@ -11851,7 +11807,9 @@ def Port(name='openff', accept_rosetta_license=False):
 				'coulomb_C0':      coulomb_c0,
 				'sigmoidal_D':     elec['sigmoidal_D'],
 				'sigmoidal_D0':    elec['sigmoidal_D0'],
-				'sigmoidal_S':     elec['sigmoidal_S']},
+				'sigmoidal_S':     elec['sigmoidal_S'],
+				'fa_elec_low_width':  elec_w[0],
+				'fa_elec_high_width': elec_w[1]},
 			'TerminalCharges': term_q,
 			'TerminalTypes':   term_t,
 			'TerminalHLength': term_hlen,
@@ -11885,10 +11843,11 @@ def Port(name='openff', accept_rosetta_license=False):
 			'DslfFa13':       dict(dslf,
 				weight=_wkcal(weights, 'dslf_fa13')),
 			'Omega':          {'weight': _wkcal(weights, 'omega'),
-				'tether_k': omega_k,
+				'tether_k': omega_k, 'sigma_ref': omega_sig,
 				'undefined_torsion': 0.0},
-			'FaDun':          {'weight': _wkcal(weights, 'fa_dun')},
-			'PAaPp':          {'weight': _wkcal(weights, 'p_aa_pp')},
+			'FaDun':          dict(fadun, weight=_wkcal(weights, 'fa_dun')),
+			'PAaPp':          {'weight': _wkcal(weights, 'p_aa_pp'),
+				'prob_floor': paa_floor},
 			'YhhPlanarity':   {'weight': _wkcal(weights,
 				'yhh_planarity')},
 			'Ref':            {'weight': _wkcal(weights, 'ref')},
@@ -11920,6 +11879,14 @@ def Port(name='openff', accept_rosetta_license=False):
 				['YhhPlanarityPotential',         {}],
 				['RefPotential',                  {}]]}
 		sp['REF15'] = block
+		sp['REF15']['Relax'] = []
+		for s in _r15fetch('sampling/relax_scripts/MonomerRelax2019.txt'
+				).splitlines():
+			t = s.split() or ['']
+			if t[0] == 'scale:fa_rep': w = float(t[1])
+			elif t[0] == 'repack': w_pack = w
+			elif t[0] == 'min':
+				sp['REF15']['Relax'].append([w_pack, w, float(t[1])])
 		sp['REF15']['FaDunNrchiDensities'] = nrchi_db
 		sp['REF15']['EtablePairParams'] = _etableparams(atom_types, etopt)
 	dispatch = {'OPENFF': _openff, 'FF19SB': _ff19sb,
