@@ -9673,6 +9673,19 @@ def Port(name='openff', accept_rosetta_license=False):
 		bool: True when the set was written, False otherwise, in which
 		case the reason has already been printed
 	'''
+	class _Retry(urllib.request.HTTPSHandler):
+		'''
+		HTTPS handler that retries a dropped connection up to five
+		times, two seconds apart, so one lost download does not stop
+		the whole port
+		'''
+		def https_open(self, req):
+			for n in range(5):
+				try: return super().https_open(req)
+				except urllib.error.URLError:
+					if n == 4: raise
+					time.sleep(2)
+	urllib.request.install_opener(urllib.request.build_opener(_Retry))
 	_KCAL_TO_KJ = 4.184
 	_VINA_BASE = ('https://raw.githubusercontent.com/'
 		'ccsb-scripps/AutoDock-Vina/'
