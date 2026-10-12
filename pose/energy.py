@@ -3008,7 +3008,8 @@ class Score():
 		cis = [math.radians(float(P[k])) for k in ('cis_chi4_mean',
 			'cis_chi4_sd')]
 		order = sorted(int(r) for r in aas)
-		before = dict(zip(order[1:], order[:-1]))
+		chain = lambda r: aas[r][1] if len(aas[r]) > 1 else ''
+		before = {b: a for a, b in zip(order,order[1:]) if chain(a) == chain(b)}
 		def where(r):
 			return {A[int(a)][0]: int(a) for a in aas[r][2] + aas[r][3]}
 		raw = 0.0
