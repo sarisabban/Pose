@@ -6103,7 +6103,7 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None, nrot_override=None):
 		return False
 	def amide(c_idx, n_idx, atoms, bonds, orders):
 		'''
-		True iff atom c_idx is an amide carbonyl C bonded to n_idx
+		True iff atom c_idx is a rigid amide or thioamide C bonded to n_idx
 		Arguments:
 		----------
 			c_idx: int - candidate carbonyl-carbon atom index
@@ -6119,9 +6119,12 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None, nrot_override=None):
 		if atoms[n_idx][1] != 'N': return False
 		for k in bonds.get(c_idx, []):
 			if inring(c_idx, k, bonds): return False
+		sub = [sorted(atoms[j][1] for j in bonds[k]) for k in bonds[n_idx]
+			if k != c_idx and atoms[k][1] != 'H']
+		if len(sub) == 2 and sub[0] != sub[1]: return False
 		for k in bonds.get(c_idx, []):
 			if k == n_idx: continue
-			if atoms[k][1] not in ('O', 'N'): continue
+			if atoms[k][1] not in ('O', 'N', 'S'): continue
 			if bondorder(c_idx, k, bonds, orders) >= 2: return True
 		return False
 	def isamide(a, b, atoms, bonds, orders):
@@ -6210,7 +6213,10 @@ def ScoreMatch(pose, params, ligand=None, xs_override=None, nrot_override=None):
 				if (i, j) in seen: continue
 				seen.add((i, j))
 				if atoms[i][1] == 'H' or atoms[j][1] == 'H': continue
-				if bondorder(i, j, bonds, orders) != 1: continue
+				o = bondorder(i, j, bonds, orders)
+				if o not in (1, 3): continue
+				if o == 1 and any(bondorder(a, k, bonds, orders) == 3
+					for a in (i, j) for k in bonds[a]): continue
 				if inring(i, j, bonds): continue
 				hvi = [k for k in bonds[i] if atoms[k][1] != 'H' and k != j]
 				hvj = [k for k in bonds[j] if atoms[k][1] != 'H' and k != i]
