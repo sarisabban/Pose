@@ -12246,3 +12246,115 @@ def Gates(target, binder, hotspots, ff, ff_relax,
 		except Exception as e:
 			failed.append(f'{name}: could not be measured ({e})')
 	return len(failed) == 0, failed
+
+def LDDT(pose1, pose2):
+	'''
+	All-atom Local Distance Difference Test (Mariani et al. 2013) of a
+	model against a reference, residues paired by Needleman-Wunsch
+	Arguments:
+	----------
+		pose1: Reference protein pose
+		pose2: Model protein pose, its sequence may differ from pose1
+	Returns:
+	--------
+		float: LDDT score over all reference heavy atom pairs closer than
+		15 A from different residues, averaged over the 0.5, 1, 2 and 4 A
+		thresholds (0 to 1), rounded to 5 decimals
+	'''
+	A1, A2 = pose1.data['Amino Acids'], pose2.data['Amino Acids']
+	At1, At2 = pose1.data['Atoms'], pose2.data['Atoms']
+	X1, X2 = pose1.data['Coordinates'], pose2.data['Coordinates']
+	r1, r2 = sorted(A1), sorted(A2)
+	s1, s2 = [A1[k][0].upper() for k in r1], [A2[k][0].upper() for k in r2]
+	m, n = len(s1), len(s2)
+	dp = np.zeros((m + 1, n + 1))
+	dp[:, 0], dp[0] = -np.arange(m + 1), -np.arange(n + 1)
+	for i in range(1, m + 1):
+		for j in range(1, n + 1):
+			dp[i, j] = max(dp[i-1, j-1] + _blosum(s1[i-1], s2[j-1]),
+				dp[i-1, j] - 1, dp[i, j-1] - 1)
+	pair, i, j = {}, m, n
+	while i and j:
+		if dp[i, j] == dp[i-1, j-1] + _blosum(s1[i-1], s2[j-1]):
+			pair[r1[i-1]] = r2[j-1]; i -= 1; j -= 1
+		elif dp[i, j] == dp[i-1, j] - 1: i -= 1
+		else: j -= 1
+	res, names, P, Q = [], [], [], []
+	for k in r1:
+		mod = {At2[a][0]: X2[a] for a in A2[pair[k]][2] + A2[pair[k]][3]
+			} if k in pair else {}
+		for a in A1[k][2] + A1[k][3]:
+			if At1[a][1] == 'H': continue
+			res.append(k); names.append(At1[a][0]); P.append(X1[a])
+			Q.append(mod.get(At1[a][0], [np.nan] * 3))
+	res, names = np.array(res), np.array(names)
+	P, Q = np.array(P, dtype=float), np.array(Q, dtype=float)
+	D1 = np.linalg.norm(P[:, None] - P[None], axis=-1)
+	M = (D1 < 15.0) & (res[:, None] != res[None])
+	sym = {'D': [('OD1', 'OD2')], 'E': [('OE1', 'OE2')],
+		'F': [('CD1', 'CD2'), ('CE1', 'CE2')], 'R': [('NH1', 'NH2')],
+		'Y': [('CD1', 'CD2'), ('CE1', 'CE2')], 'L': [('CD1', 'CD2')],
+		'V': [('CG1', 'CG2')]}
+	for k in r1:
+		i, S = np.where(res == k)[0], Q.copy()
+		for a, b in sym.get(A1[k][0].upper(), []):
+			x, y = i[names[i] == a], i[names[i] == b]
+			if len(x) and len(y): S[[x[0], y[0]]] = S[[y[0], x[0]]]
+		f = [sum(((abs(D1[i] - np.linalg.norm(R[i][:, None] - R[None],
+			axis=-1)) < t) & M[i]).sum() for t in (0.5, 1, 2, 4))
+			for R in (Q, S)] if len(i) and k in pair else [0, 0]
+		if f[1] > f[0]: Q = S
+	E = np.abs(D1 - np.linalg.norm(Q[:, None] - Q[None], axis=-1))[M]
+	return round(float(np.mean([(E < t).mean() for t in (0.5, 1, 2, 4)])), 5)
+
+def TM(pose1, pose2):
+	'''
+	Template Modeling score (Zhang & Skolnick 2004) of a model against a
+	reference over CA atoms, residues paired by Needleman-Wunsch and the
+	superposition searched as in the TMscore program
+	Arguments:
+	----------
+		pose1: Reference protein pose, its length normalises the score
+		pose2: Model protein pose, its sequence may differ from pose1
+	Returns:
+	--------
+		float: TM-score (0 to 1), rounded to 5 decimals
+	'''
+	A1, A2 = pose1.data['Amino Acids'], pose2.data['Amino Acids']
+	At1, At2 = pose1.data['Atoms'], pose2.data['Atoms']
+	X1, X2 = pose1.data['Coordinates'], pose2.data['Coordinates']
+	r1, r2 = sorted(A1), sorted(A2)
+	s1, s2 = [A1[k][0].upper() for k in r1], [A2[k][0].upper() for k in r2]
+	m, n = len(s1), len(s2)
+	dp = np.zeros((m + 1, n + 1))
+	dp[:, 0], dp[0] = -np.arange(m + 1), -np.arange(n + 1)
+	for i in range(1, m + 1):
+		for j in range(1, n + 1):
+			dp[i, j] = max(dp[i-1, j-1] + _blosum(s1[i-1], s2[j-1]),
+				dp[i-1, j] - 1, dp[i, j-1] - 1)
+	X, Y, i, j = [], [], m, n
+	while i and j:
+		if dp[i, j] == dp[i-1, j-1] + _blosum(s1[i-1], s2[j-1]):
+			X.append(next(X1[a] for a in A1[r1[i-1]][2] if At1[a][0] == 'CA'))
+			Y.append(next(X2[a] for a in A2[r2[j-1]][2] if At2[a][0] == 'CA'))
+			i -= 1; j -= 1
+		elif dp[i, j] == dp[i-1, j] - 1: i -= 1
+		else: j -= 1
+	X, Y, n = np.array(X, dtype=float), np.array(Y, dtype=float), len(X)
+	d0 = max(0.5, 1.24 * np.cbrt(m - 15) - 1.8)
+	ds, low, best = min(max(d0, 4.5), 8.0), min(4, n), 0.0
+	for f in {max(n >> s, low) for s in range(5)} | {low}:
+		for i in range(n - f + 1):
+			sel, cut = np.arange(i, i + f), ds - 1
+			for it in range(21):
+				x, y = X[sel].mean(0), Y[sel].mean(0)
+				U, _, Vt = np.linalg.svd((Y[sel] - y).T @ (X[sel] - x))
+				R = U @ np.diag([1, 1, np.sign(np.linalg.det(U @ Vt))]) @ Vt
+				d = np.linalg.norm((Y - y) @ R + x - X, axis=1)
+				best = max(best, np.sum(1 / (1 + (d / d0) ** 2)) / m)
+				new, c = np.where(d < cut)[0], cut
+				while len(new) < 3 and n > 3:
+					c += 0.5; new = np.where(d < c)[0]
+				if it and np.array_equal(new, sel): break
+				sel, cut = new, ds + 1
+	return round(float(best), 5)
