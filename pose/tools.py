@@ -3653,7 +3653,7 @@ def _amberimproperorder(pose, ctx, tp, cls, nbr, impbest):
 	tpls = ctx.get('templates') or {}
 	pos = {k: {a[0]: n for n, a in enumerate(t['atoms'])}
 		for k, t in tpls.items()}
-	src = pose.data.get('Amino Acids')
+	src = pose.data.get('Amino Acids') or pose.data.get('Nucleotides')
 	if not src:
 		return {c: (v[0], v[1]) for c, v in impbest.items()}
 	resof, trank, k = {}, {}, 0
