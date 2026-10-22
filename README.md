@@ -661,7 +661,7 @@ Come ask questions, share what you've built with Pose, or discuss contributions.
 
 If Pose is useful in your research, please cite it. The repository ships a `CITATION.cff` file at the project root with the canonical citation metadata; GitHub's "Cite this repository" button and most reference managers (Zotero, Mendeley) can import it directly. The current entry is:
 
-> Sabban, S. *Pose: A bare metal Python library for building and manipulating protein molecular structures.* 2026. https://github.com/sarisabban/Pose (ORCID: [0000-0002-9621-2395](https://orcid.org/0000-0002-9621-2395))
+> Sabban, S. (2026). Pose: a pure-NumPy, chirality-aware, structural engine for building and manipulating the molecular structures of proteins, nucleic acids, and small organic molecules. bioRxiv. https://doi.org/10.1101/2026.10.19.760100
 
 ---
 
