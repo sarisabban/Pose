@@ -6,10 +6,26 @@ authors:
   given-names: "Sari"
   orcid: "https://orcid.org/0000-0002-9621-2395"
 
-title: "Pose: a pure-NumPy, chirality-aware, structural engine for building and manipulating the molecular structures of proteins, nucleic acids, and small organic molecules"
+title: "Pose: a pure-NumPy, chirality-aware, structural engine for building and manipulating the molecular structures of proteins, nucleic acids, and small
+organic molecules"
 
-version: 1.0.0
+version: 1.1.1
 
-date-released: 2026-09-28
+date-released: 2026-10-18
 
 url: "https://github.com/sarisabban/Pose"
+
+doi: 10.1101/2026.10.19.760100
+
+preferred-citation:
+  type: article
+  authors:
+  - family-names: "Sabban"
+    given-names: "Sari"
+    orcid: "https://orcid.org/0000-0002-9621-2395"
+  title: "Pose: a pure-NumPy, chirality-aware, structural engine for building and manipulating the molecular structures of proteins, nucleic acids, and small
+organic molecules"
+  journal: "bioRxiv"
+  year: 2026
+  doi: 10.1101/2026.10.19.760100
+  url: "https://doi.org/10.1101/2026.10.19.760100"
