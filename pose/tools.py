@@ -12358,3 +12358,94 @@ def TM(pose1, pose2):
 				if it and np.array_equal(new, sel): break
 				sel, cut = new, ds + 1
 	return round(float(best), 5)
+
+def DockQ(pose1, pose2):
+	'''
+	DockQ score (Basu & Wallner 2016 of a model protein-protein interface
+	against a reference
+	Arguments:
+	----------
+		pose1: Reference protein pose of two chains
+		pose2: Model protein pose of two chains, paired with pose1 in chain
+			order, its sequences may differ from pose1
+	Returns:
+	--------
+		tuple: (DockQ, Fnat, iRMSD, LRMSD) where DockQ runs from 0 to 1,
+		Fnat is the fraction of reference contacts kept by the model, iRMSD
+		the interface RMSD and LRMSD the RMSD of the ligand (the shorter
+		chain) after superposing the receptor, both in A
+	'''
+	def chains(p):
+		A, At = p.data['Amino Acids'], p.data['Atoms']
+		X = np.asarray(p.data['Coordinates'], dtype=np.float32)
+		out = {}
+		for r in sorted(A):
+			out.setdefault(A[r][1], []).append((A[r][0].upper(), {At[a][0]: X[a]
+				for a in A[r][2] + A[r][3] if At[a][1].upper() != 'H'}))
+		if len(out) != 2: raise Exception('DockQ needs poses of two chains')
+		return list(out.values())
+	def pairs(a, b):
+		if a == b: return [(i, i) for i in range(len(a))]
+		m, n = len(a), len(b)
+		T = np.full((3, m + 1, n + 1), -np.inf)
+		T[0, 0, 0] = 0
+		T[1, 1:, 0], T[2, 0, 1:] = -4 - 0.5*np.arange(m), -4 - 0.5*np.arange(n)
+		for i in range(1, m + 1):
+			for j in range(1, n + 1):
+				T[0, i, j] = T[:, i-1, j-1].max() + 5 * (a[i-1] == b[j-1])
+				T[1, i, j] = (T[:, i-1, j] - (4, 0.5, 4)).max()
+				T[2, i, j] = (T[:, i, j-1] - (4, 4, 0.5)).max()
+		out, i, j, s = [], m, n, int(np.argmax(T[:, m, n]))
+		while i or j:
+			if s == 0:
+				if a[i-1] == b[j-1]: out.append((i-1, j-1))
+				v, i, j = T[0, i, j] - 5 * (a[i-1] == b[j-1]), i - 1, j - 1
+				c = T[:, i, j]
+			elif s == 1: v, i = T[1, i, j], i - 1; c = T[:, i, j] - (4, 0.5, 4)
+			else: v, j = T[2, i, j], j - 1; c = T[:, i, j] - (4, 4, 0.5)
+			s = int(np.argmax(c == v))
+		return out[::-1]
+	def dist(R1, R2):
+		A = np.array([x for r in R1 for x in r.values()])
+		B = np.array([x for r in R2 for x in r.values()])
+		D = ((A[:, None] - B[None]) ** 2).sum(-1)
+		s1, s2 = (np.cumsum([0] + [len(r) for r in R[:-1]]) for R in (R1, R2))
+		return np.minimum.reduceat(np.minimum.reduceat(D, s1, 0), s2, 1)
+	def bb(P, Q, sub=None):
+		p, q = [], []
+		for i in (set(sub) if sub else range(len(P))):
+			for t in ('CA', 'C', 'N', 'O'):
+				if t in P[i] and t in Q[i]: p.append(P[i][t]); q.append(Q[i][t])
+		return p, q
+	def fit(P, Q):
+		a1, a2 = sum(Q) / len(Q), sum(P) / len(P)
+		u, _, vt = np.linalg.svd(np.dot((Q - a1).T, P - a2))
+		R = np.dot(vt.T, u.T).T
+		if np.linalg.det(R) < 0:
+			vt[2] = -vt[2]
+			R = np.dot(vt.T, u.T).T
+		return R, a2 - np.dot(a1, R)
+	rms = lambda P, Q: np.sqrt(sum(sum((P - Q) * (P - Q))) / P.shape[0])
+	ref, mod = chains(pose1), chains(pose2)
+	R = dist(*[[r[1] for r in c] for c in ref])
+	nat = int((R < 25.0).sum())
+	if not nat: raise Exception('The reference chains make no contact')
+	ali = [pairs(''.join(r[0] for r in m), ''.join(r[0] for r in n))
+		for m, n in zip(mod, ref)]
+	M = [[mod[k][i][1] for i, j in ali[k]] for k in (0, 1)]
+	N = [[ref[k][j][1] for i, j in ali[k]] for k in (0, 1)]
+	S = dist(*M)
+	if R.shape != S.shape: R = dist(*N)
+	fnat = ((S < 25.0) * (R < 25.0)).sum() / nat
+	I = np.nonzero(R < 100.0)
+	(p1, q1), (p2, q2) = bb(M[0], N[0], tuple(I[0])), bb(M[1],N[1],tuple(I[1]))
+	P, Q = np.array(p1 + p2), np.array(q1 + q2)
+	rot, tran = fit(P, Q)
+	irms = rms(np.dot(Q, rot) + tran, P)
+	r, l = (0, 1) if len(ref[0]) > len(ref[1]) else (1, 0)
+	(Pr, Qr), (Pl, Ql) = bb(N[r], M[r]), bb(N[l], M[l])
+	rot, tran = fit(np.array(Pr), np.array(Qr))
+	lrms = rms(np.array(Pl), np.dot(np.array(Ql), rot) + tran)
+	dq = (float(fnat) + 1 / (1 + (irms / 1.5) * (irms / 1.5))
+		+ 1 / (1 + (lrms / 8.5) * (lrms / 8.5))) / 3
+	return float(dq), float(fnat), float(irms), float(lrms)
