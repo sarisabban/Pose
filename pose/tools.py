@@ -1152,6 +1152,9 @@ def Split(pose, chain=None, start=None, end=None):
 		'Bonds':       {a_remap[o]: sorted(a_remap[b]
 			for b in sb.get(o, []) if b in a_remap)
 			for o in keep_atoms},
+		'BondOrders': {a_remap[o]: [bo for b, bo in
+			zip(sb.get(o, []), pose.data['BondOrders'].get(o, []))
+			if b in a_remap] for o in keep_atoms},
 		'Coordinates': np.array([sc[o] for o in keep_atoms],
 			dtype=float) if keep_atoms else np.zeros((0, 3))}
 	tgt = new.data[rk]
@@ -11959,6 +11962,8 @@ def Analyse(metric, target, binder, hotspots=None, ff=None, sasa_cutoff=20.0, cu
 			'M':                   Number of exposed Met in the binder
 			'W':                   Number of exposed Trp in the binder
 			'RK':                  Number of exposed R/K not followed by P (trypsin sites)
+			'core':                Fraction of binder residues that are core (relative SASA < 0.25)
+			'core hydrophobic':    Fraction of core binder residues that are W F L I M V Y
 			'hydrophobic surface': Fraction of exposed binder residues that are W F L I M V Y
 			'charge':              Net charge of the binder, K + R - D - E
 			'iP':                  Isoelectric point of the binder
@@ -11971,7 +11976,9 @@ def Analyse(metric, target, binder, hotspots=None, ff=None, sasa_cutoff=20.0, cu
 			'interface energy':    ff(complex) - ff(target) - ff(binder)
 			'hbonds':              Number of actual hydrogen bonds across the target/binder interface
 			'binder length':       Number of residues in the binder
-			'binder loops':        Percentage of binder residues in loops (DSSP, not helix H/G/I and not strand E/B)
+			'sse loops':           Percentage of binder residues in loops (DSSP, not helix H/G/I and not strand E/B)
+			'sse alpha':           Percentage of binder residues in a helix (DSSP H/G/I)
+			'sse beta':            Percentage of binder residues in a strand (DSSP E/B)
 			'interface residues':  Number of binder residues with any atom within 4.0 A of the target
 			'C-term direction':    True if the binder's C-terminus points away from the target
 			'unsatisfied hbonds':  Number of buried polar N/O atoms at the interface that form no hydrogen bond
@@ -11993,6 +12000,9 @@ def Analyse(metric, target, binder, hotspots=None, ff=None, sasa_cutoff=20.0, cu
 		The selected metric's value: float, int, tuple, or dict depending
 		on which metric key is given; see the metric list above for each
 	'''
+	MAXSASA = {'A':129,'R':274,'N':195,'D':193,'C':167,'E':223,'Q':225,'G':104,
+				'H':224,'I':197,'L':201,'K':236,'M':224,'F':240,'P':159,'S':155,
+				'T':172,'W':285,'Y':263,'V':174}
 	binder.CalcFASTA()
 	binder.CalcSASA()
 	complex_pose = Concatenate(target, binder)
@@ -12042,6 +12052,14 @@ def Analyse(metric, target, binder, hotspots=None, ff=None, sasa_cutoff=20.0, cu
 		AAs = binder.data['Amino Acids']
 		surface = [v[0] for v in AAs.values() if v[6] > sasa_cutoff]
 		return sum(1 for r in surface if r in 'WFLIMVY') / len(surface)
+	elif metric in ('core', 'core hydrophobic'):
+		binder.CalcSASA()
+		AAs = binder.data['Amino Acids']
+		buried = [v[0] for v in AAs.values()
+			if v[6] / MAXSASA.get(v[0], 200) < 0.25]
+		if metric == 'core': return len(buried) / len(AAs)
+		if not buried: return 0.0
+		return sum(1 for r in buried if r in 'WFLIMVY') / len(buried)
 	elif metric == 'charge':
 		return (seq.count('K') + seq.count('R')
 			- seq.count('D') - seq.count('E'))
@@ -12098,7 +12116,10 @@ def Analyse(metric, target, binder, hotspots=None, ff=None, sasa_cutoff=20.0, cu
 		cx_bonds = complex_pose.data['Bonds']
 		cx_AAs = complex_pose.data['Amino Acids']
 		if not any(a[1].upper() == 'H' for a in cx_atoms.values()):
-			raise ValueError('hbonds needs hydrogens: call ReBuild() on target and binder first')
+			complex_pose.ReBuild()
+			cx_atoms  = complex_pose.data['Atoms']
+			cx_bonds  = complex_pose.data['Bonds']
+			cx_AAs    = complex_pose.data['Amino Acids']
 		res_of = {a: r for r, v in cx_AAs.items() for a in v[2] + v[3]}
 		n1 = len(target.data['Amino Acids'])
 		donors = [(nb[0], i) for i, a in cx_atoms.items() if a[1].upper() == 'H'
@@ -12121,10 +12142,15 @@ def Analyse(metric, target, binder, hotspots=None, ff=None, sasa_cutoff=20.0, cu
 		return len(found)
 	elif metric == 'binder length':
 			return L
-	elif metric == 'binder loops':
+	elif metric == 'sse loops':
 		binder.CalcDSSP()
 		ss = ''.join(binder.data['SS'].values())
 		return 100 * sum(1 for s in ss if s not in 'HGIEB') / len(ss)
+	elif metric in ('sse alpha', 'sse beta'):
+		binder.CalcDSSP()
+		ss = ''.join(binder.data['SS'].values())
+		keys = 'HGI' if metric == 'sse alpha' else 'EB'
+		return 100 * sum(1 for s in ss if s in keys) / len(ss)
 	elif metric == 'interface residues':
 		t_xyz = target.data['Coordinates']
 		count = 0
