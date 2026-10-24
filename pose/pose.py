@@ -2045,6 +2045,8 @@ class Pose():
 					i += 1
 				start = i
 			if not C: raise Exception(f'No _atom_site loop in {filename}')
+			for k in ('atom_id','comp_id','asym_id','seq_id'):
+				C.setdefault('auth_'+k, C.get('label_'+k))
 			i_mdl = C.get('pdbx_PDB_model_num')
 			i_alt = C.get('label_alt_id')
 			i_ic  = C.get('pdbx_PDB_ins_code')
@@ -2110,7 +2112,7 @@ class Pose():
 					float(f[C['Cartn_x']]),
 					float(f[C['Cartn_y']]),
 					float(f[C['Cartn_z']]),
-					float(f[C['occupancy']]),
+					float(f[C['occupancy']]) if 'occupancy' in C else 1.0,
 					float(f[C['B_iso_or_equiv']]),
 					f[C['type_symbol']],
 					ic, alt))
