@@ -11939,7 +11939,7 @@ def Port(name='openff', accept_rosetta_license=False):
 	print('[+] Done')
 	return True
 
-def Analyse(metric, target, binder, hotspots=None, ff=None, sasa_cutoff=20.0, cutoff=5.0):
+def Analyse(metric, target, binder, hotspots=None, ff=None, sasa_cutoff=20.0, cutoff=5.0, reference=None):
 	'''
 	Binder-design metrics
 	Arguments:
@@ -11977,6 +11977,7 @@ def Analyse(metric, target, binder, hotspots=None, ff=None, sasa_cutoff=20.0, cu
 			'unsatisfied hbonds':  Number of buried polar N/O atoms at the interface that form no hydrogen bond
 			'binder energy':       Returns the binder's potential energy
 			'binder RMSD':         RMSD of the binder CA atoms before and after relaxing it with Minimise
+			'DockQ':               DockQ score of the target/binder complex against reference
 		target:      Pose of the target protein
 		binder:      Pose of the binder protein
 		hotspots:    List of target residue indices
@@ -11985,6 +11986,8 @@ def Analyse(metric, target, binder, hotspots=None, ff=None, sasa_cutoff=20.0, cu
 			counts as exposed
 		cutoff:      Distance in Angstroms below which a hotspot
 			residue counts as contacted; used by 'hotspot contacts'
+		reference:   Pose of the reference complex, target chain first and
+			binder chain second; used by 'DockQ'
 	Returns:
 	--------
 		The selected metric's value: float, int, tuple, or dict depending
@@ -12154,6 +12157,8 @@ def Analyse(metric, target, binder, hotspots=None, ff=None, sasa_cutoff=20.0, cu
 		relaxed = copy.deepcopy(binder)
 		Minimise(relaxed, ff=ff)
 		return RMSD(binder, relaxed)
+	elif metric == 'DockQ':
+		return DockQ(reference, complex_pose)[0]
 	else:
 		raise ValueError(f'Unknown metric: {metric!r}')
 
@@ -12164,7 +12169,7 @@ def Gates(target, binder, hotspots, ff, ff_relax,
 	cterm_distance=15.0, cterm_direction=True, cterm_exposure=20.0,
 	hotspot_contacts=3, hotspot_cutoff=4.5, glycan=7.0, kmer=0,
 	interface_residues=7, unsat_hbonds=4, loops=90.0,
-	binder_energy=0.0, rmsd=3.5, sasa_cutoff=20.0):
+	binder_energy=0.0, rmsd=3.5, sasa_cutoff=20.0, dockq=0.49, reference=None):
 	'''
 	Apply every binder-design gate that Analyse() can measure
 	Arguments:
@@ -12199,8 +12204,10 @@ def Gates(target, binder, hotspots, ff, ff_relax,
 		binder_energy:      Max binder energy
 		rmsd:               Max CA RMSD in A of the binder after relaxing it
 		sasa_cutoff:        Per-residue SASA in A^2 above which a residue counts as exposed
-		Any argument set to None is skipped: a cutoff skips its own gate, and
-		hotspots, hotspot_cutoff, ff, ff_relax or sasa_cutoff skip every gate that needs them
+		dockq:              Min DockQ score of the complex against reference
+		reference:          Pose of the reference complex, target chain first, for the DockQ gate
+	Any argument set to None is skipped: a cutoff skips its own gate, and
+	hotspots, hotspot_cutoff, ff, ff_relax, sasa_cutoff, or reference skip every gate that needs them
 	Returns:
 	--------
 		tuple: (True, []) when every gate passes, otherwise (False, list of
@@ -12234,7 +12241,8 @@ def Gates(target, binder, hotspots, ff, ff_relax,
 		('unsatisfied hbonds', unsat_hbonds, 'unsatisfied hbonds', {}, None, most, lambda a: f'at most {a}'),
 		('binder loops', loops, 'binder loops', {}, None, most, lambda a: f'at most {a} %'),
 		('binder energy', binder_energy, 'binder energy', {'ff': ff}, None, most, lambda a: f'at most {a}'),
-		('binder RMSD', rmsd, 'binder RMSD', {'ff': ff_relax}, None, most, lambda a: f'at most {a} A')]
+		('binder RMSD', rmsd, 'binder RMSD', {'ff': ff_relax}, None, most, lambda a: f'at most {a} A'),
+		('DockQ', dockq, 'DockQ', {'reference': reference}, None, least, lambda a: f'at least {a}')]
 	failed = []
 	for name, arg, metric, kw, pick, ok, rule in rows:
 		if arg is None or any(x is None for x in kw.values()): continue
