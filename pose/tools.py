@@ -11942,345 +11942,6 @@ def Port(name='openff', accept_rosetta_license=False):
 	print('[+] Done')
 	return True
 
-def Analyse(metric, target, binder, hotspots=None, ff=None, sasa_cutoff=20.0, cutoff=5.0, reference=None):
-	'''
-	Binder-design metrics
-	Arguments:
-	----------
-		metric:                    Which metric to run, one of:
-			'rg':                  Radius of gyration of the binder in A (compactness)
-			'interface':           (Sc, area): shape complementarity and the rim-trimmed patch area it is computed over
-			'interface area':      Buried SASA in A^2 summed over both surfaces: SASA(target) + SASA(binder) - SASA(complex)
-			'DE':                  Percentage of D + E in the binder
-			'KE':                  Percentage of K + E in the binder
-			'C':                   Number of Cys in the binder
-			'DG':                  Number of DG motifs (Asp isomerisation)
-			'NG':                  Number of NG motifs (Asn deamidation)
-			'HPQ':                 Number of HPQ motifs (binds Strep-Tactin)
-			'DP':                  Number of DP motifs (acid cleavage)
-			'glycan sites':        Number of N-X-S/T (X is not P) glycosylation sites in the binder
-			'M':                   Number of exposed Met in the binder
-			'W':                   Number of exposed Trp in the binder
-			'RK':                  Number of exposed R/K not followed by P (trypsin sites)
-			'core':                Fraction of binder residues that are core (relative SASA < 0.25)
-			'core hydrophobic':    Fraction of core binder residues that are W F L I M V Y
-			'hydrophobic surface': Fraction of exposed binder residues that are W F L I M V Y
-			'charge':              Net charge of the binder, K + R - D - E
-			'iP':                  Isoelectric point of the binder
-			'hotspot contacts':    Number of hotspots with an atom within cutoff A of the binder
-			'clashes':             Number of heavy-atom pairs under 2.5 A between target and binder
-			'C-term distance':     Distance in A from the binder's last C atom to the nearest target atom
-			'C-term exposure':     SASA in A^2 of the binder's last residue in the complex
-			'glycan distance':     Dict of target glycan site -> distances from its ND2 to every binder atom
-			'8-mer':               Number of 8-residue stretches shared by target and binder
-			'interface energy':    ff(complex) - ff(target) - ff(binder)
-			'hbonds':              Number of actual hydrogen bonds across the target/binder interface
-			'binder length':       Number of residues in the binder
-			'sse loops':           Percentage of binder residues in loops (DSSP, not helix H/G/I and not strand E/B)
-			'sse alpha':           Percentage of binder residues in a helix (DSSP H/G/I)
-			'sse beta':            Percentage of binder residues in a strand (DSSP E/B)
-			'interface residues':  Number of binder residues with any atom within 4.0 A of the target
-			'C-term direction':    True if the binder's C-terminus points away from the target
-			'unsatisfied hbonds':  Number of buried polar N/O atoms at the interface that form no hydrogen bond
-			'binder energy':       Returns the binder's potential energy
-			'binder RMSD':         RMSD of the binder CA atoms before and after relaxing it with Minimise
-			'DockQ':               DockQ score of the target/binder complex against reference
-		target:      Pose of the target protein
-		binder:      Pose of the binder protein
-		hotspots:    List of target residue indices
-		ff:          Score() or ForceField(...)
-		sasa_cutoff: Per-residue SASA in A^2 above which a residue
-			counts as exposed
-		cutoff:      Distance in Angstroms below which a hotspot
-			residue counts as contacted; used by 'hotspot contacts'
-		reference:   Pose of the reference complex, target chain first and
-			binder chain second; used by 'DockQ'
-	Returns:
-	--------
-		The selected metric's value: float, int, tuple, or dict depending
-		on which metric key is given; see the metric list above for each
-	'''
-	MAXSASA = {'A':129,'R':274,'N':195,'D':193,'C':167,'E':223,'Q':225,'G':104,
-				'H':224,'I':197,'L':201,'K':236,'M':224,'F':240,'P':159,'S':155,
-				'T':172,'W':285,'Y':263,'V':174}
-	binder.CalcFASTA()
-	binder.CalcSASA()
-	complex_pose = Concatenate(target, binder)
-	complex_pose.CalcSASA()
-	seq = next(iter(binder.data['FASTA'].values()))
-	AAs = binder.data['Amino Acids']
-	res = sorted(AAs.keys())
-	L = len(seq)
-	if metric == 'rg':
-		binder.CalcRg()
-		return binder.data['Rg']
-	elif metric == 'interface':
-		Sc, area, CMS_A, CMS_B = Complementarity(target, binder)
-		return Sc, area
-	elif metric == 'interface area':
-		target.CalcSASA()
-		s = lambda p: sum(v[6] for v in p.data['Amino Acids'].values())
-		return s(target) + s(binder) - s(complex_pose)
-	elif metric == 'DE':
-		return 100 * (seq.count('D') + seq.count('E')) / L
-	elif metric == 'KE':
-		return 100 * (seq.count('K') + seq.count('E')) / L
-	elif metric == 'C':
-		return seq.count('C')
-	elif metric == 'DG':
-		return seq.count('DG')
-	elif metric == 'NG':
-		return seq.count('NG')
-	elif metric == 'HPQ':
-		return seq.count('HPQ')
-	elif metric == 'DP':
-		return seq.count('DP')
-	elif metric == 'glycan sites':
-		return len(PROSITE(seq, 'N-{P}-[ST]'))
-	elif metric == 'M':
-		return sum(1 for i in res
-			if AAs[i][0] == 'M' and AAs[i][6] > sasa_cutoff)
-	elif metric == 'W':
-		return sum(1 for i in res
-			if AAs[i][0] == 'W' and AAs[i][6] > sasa_cutoff)
-	elif metric == 'RK':
-		return sum(1 for k, i in enumerate(res)
-			if AAs[i][0] in ('R', 'K') and AAs[i][6] > sasa_cutoff
-			and not (k + 1 < len(res) and AAs[res[k+1]][0] == 'P'))
-	elif metric == 'hydrophobic surface':
-		binder.CalcSASA()
-		AAs = binder.data['Amino Acids']
-		surface = [v[0] for v in AAs.values() if v[6] > sasa_cutoff]
-		return sum(1 for r in surface if r in 'WFLIMVY') / len(surface)
-	elif metric in ('core', 'core hydrophobic'):
-		binder.CalcSASA()
-		AAs = binder.data['Amino Acids']
-		buried = [v[0] for v in AAs.values()
-			if v[6] / MAXSASA.get(v[0], 200) < 0.25]
-		if metric == 'core': return len(buried) / len(AAs)
-		if not buried: return 0.0
-		return sum(1 for r in buried if r in 'WFLIMVY') / len(buried)
-	elif metric == 'charge':
-		return (seq.count('K') + seq.count('R')
-			- seq.count('D') - seq.count('E'))
-	elif metric == 'iP':
-		seq = next(iter(binder.data['FASTA'].values()))
-		return Isoelectric(seq)
-	elif metric == 'hotspot contacts':
-		AAs = target.data['Amino Acids']
-		b_xyz = binder.data['Coordinates']
-		count = 0
-		for h in hotspots:
-			atoms = AAs[h][2] + AAs[h][3]
-			xyz = target.data['Coordinates'][atoms]
-			d = np.linalg.norm(xyz[:, None, :] - b_xyz[None, :, :], axis=-1)
-			if d.min() < cutoff: count += 1
-		return count
-	elif metric == 'clashes':
-		t_atoms, b_atoms = target.data['Atoms'], binder.data['Atoms']
-		t = target.data['Coordinates'][[a for a, v in t_atoms.items() if v[1].upper() != 'H']]
-		b = binder.data['Coordinates'][[a for a, v in b_atoms.items() if v[1].upper() != 'H']]
-		return int((np.linalg.norm(t[:, None] - b[None], axis=-1) < 2.5).sum())
-	elif metric == 'C-term distance':
-		last_res = max(binder.data['Amino Acids'])
-		xyz = binder.GetAtomCoord(last_res, 'C')
-		d = np.linalg.norm(target.data['Coordinates'] - xyz, axis=1)
-		return float(d.min())
-	elif metric == 'C-term exposure':
-		n1 = len(target.data['Amino Acids'])
-		last_res = n1 + max(binder.data['Amino Acids'])
-		return complex_pose.data['Amino Acids'][last_res][6]
-	elif metric == 'glycan distance':
-		target.CalcFASTA()
-		seq = next(iter(target.data['FASTA'].values()))
-		sites = PROSITE(seq, 'N-{P}-[ST]')
-		res = sorted(target.data['Amino Acids'].keys())
-		b_xyz = binder.data['Coordinates']
-		out = {}
-		for start, end, match in sites:
-			r = res[start - 1]
-			n_xyz = target.GetAtomCoord(r, 'ND2')
-			out[r] = np.linalg.norm(b_xyz - n_xyz, axis=1)
-		return out
-	elif metric == '8-mer':
-		length = 8
-		t_seq = ''.join(target.data['FASTA'].values())
-		b_seq = ''.join(binder.data['FASTA'].values())
-		t_windows = {t_seq[i:i+length] for i in range(len(t_seq)-length+1)}
-		b_windows = {b_seq[i:i+length] for i in range(len(b_seq)-length+1)}
-		return len(t_windows & b_windows)
-	elif metric == 'interface energy':
-		return ff(complex_pose) - ff(target) - ff(binder)
-	elif metric == 'hbonds':
-		cx_atoms = complex_pose.data['Atoms']
-		cx_bonds = complex_pose.data['Bonds']
-		cx_AAs = complex_pose.data['Amino Acids']
-		if not any(a[1].upper() == 'H' for a in cx_atoms.values()):
-			complex_pose.ReBuild()
-			cx_atoms  = complex_pose.data['Atoms']
-			cx_bonds  = complex_pose.data['Bonds']
-			cx_AAs    = complex_pose.data['Amino Acids']
-		res_of = {a: r for r, v in cx_AAs.items() for a in v[2] + v[3]}
-		n1 = len(target.data['Amino Acids'])
-		donors = [(nb[0], i) for i, a in cx_atoms.items() if a[1].upper() == 'H'
-			for nb in [cx_bonds.get(i, [])] if len(nb) == 1
-			and cx_atoms[nb[0]][1].upper() in ('N', 'O', 'S')]
-		acceptors = [i for i, a in cx_atoms.items() if a[1].upper() == 'O'
-			or (a[1].upper() == 'N' and len(cx_bonds.get(i, [])) == 2
-				and not any(cx_atoms[j][1].upper() == 'H' for j in cx_bonds[i]))]
-		found = set()
-		for (D, H), A in itertools.product(donors, acceptors):
-			if (res_of[D] < n1) == (res_of[A] < n1): continue
-			if complex_pose.GetDistance(res_of[D], cx_atoms[D][0],
-					res_of[A], cx_atoms[A][0]) > 3.5: continue
-			if complex_pose.GetDistance(res_of[H], cx_atoms[H][0],
-					res_of[A], cx_atoms[A][0]) > 2.5: continue
-			if complex_pose.GetAngle(res_of[D], cx_atoms[D][0],
-					res_of[H],cx_atoms[H][0],res_of[A],cx_atoms[A][0]) <= 120.0:
-				continue
-			found.add((D, A))
-		return len(found)
-	elif metric == 'binder length':
-			return L
-	elif metric == 'sse loops':
-		binder.CalcDSSP()
-		ss = ''.join(binder.data['SS'].values())
-		return 100 * sum(1 for s in ss if s not in 'HGIEB') / len(ss)
-	elif metric in ('sse alpha', 'sse beta'):
-		binder.CalcDSSP()
-		ss = ''.join(binder.data['SS'].values())
-		keys = 'HGI' if metric == 'sse alpha' else 'EB'
-		return 100 * sum(1 for s in ss if s in keys) / len(ss)
-	elif metric == 'interface residues':
-		t_xyz = target.data['Coordinates']
-		count = 0
-		for i, v in binder.data['Amino Acids'].items():
-			xyz = binder.data['Coordinates'][v[2] + v[3]]
-			d = np.linalg.norm(xyz[:, None, :] - t_xyz[None, :, :], axis=-1)
-			if d.min() <= 4.0: count += 1
-		return count
-	elif metric == 'C-term direction':
-		t_atoms = target.data['Atoms']
-		t = target.data['Coordinates'][[a for a, v in t_atoms.items() if v[1].upper() != 'H']]
-		ca_last = binder.GetAtomCoord(res[-1], 'CA')
-		ca_prev = binder.GetAtomCoord(res[-2], 'CA')
-		outward = ca_last - t.mean(axis=0)
-		direction = ca_last - ca_prev
-		return bool(np.dot(outward, direction) > 0)
-	elif metric == 'unsatisfied hbonds':
-		BO, off = {}, 0
-		for p in (target, binder):
-			old = sorted(p.data['Atoms'])
-			m = {o: off + i for i, o in enumerate(old)}
-			for o in old: BO[m[o]] = p.data['BondOrders'][o]
-			off += len(old)
-		complex_pose.data['BondOrders'] = BO
-		cAAs = complex_pose.data['Amino Acids']
-		return BuriedUnsatisfiedHbonds(complex_pose, chain=cAAs[len(cAAs) - 1][1])[0]
-	elif metric == 'binder energy':
-		return ff(binder)
-	elif metric == 'binder RMSD':
-		relaxed = copy.deepcopy(binder)
-		Minimise(relaxed, ff=ff)
-		return RMSD(binder, relaxed)
-	elif metric == 'DockQ':
-		return DockQ(reference, complex_pose)[0]
-	else:
-		raise ValueError(f'Unknown metric: {metric!r}')
-
-def Gates(target, binder, hotspots, ff, ff_relax,
-	area=(1300, 3800), rg=(1.25, 2.2, 0.38), charge=(-10, 10), pI=(7.4, 0.5),
-	hydrophobic=0.35, clashes=0, cys=0, hpq=0, length=(70, 120),
-	sc=0.6, energy=0.0, hbonds=3,
-	cterm_distance=15.0, cterm_direction=True, cterm_exposure=20.0,
-	hotspot_contacts=3, hotspot_cutoff=4.5, glycan=7.0, kmer=0,
-	interface_residues=7, unsat_hbonds=4, loops=90.0,
-	binder_energy=0.0, rmsd=3.5, sasa_cutoff=20.0, dockq=0.49, reference=None):
-	'''
-	Apply every binder-design gate that Analyse() can measure
-	Arguments:
-	----------
-		target:             Pose of the target protein
-		binder:             Pose of the binder protein
-		hotspots:           List of target residue indices (Pose indices, from 0)
-		ff:                 Score() for the interface and binder energy gates
-		ff_relax:           ForceField('OpenFF') for the binder RMSD gate
-		area:               (min, max) interface area in A^2
-		rg:                 (slack, coefficient, exponent), max Rg = slack * coefficient * N^exponent
-		charge:             (min, max) net charge
-		pI:                 (target, margin), fails when the pI is within margin of target
-		hydrophobic:        Max fraction of exposed binder residues that are W F L I M V Y
-		clashes:            Max number of heavy-atom pairs under 2.5 A
-		cys:                Max number of Cys
-		hpq:                Max number of HPQ motifs
-		length:             (min, max) binder length in residues
-		sc:                 Min shape complementarity
-		energy:             Interface energy must be below this value
-		hbonds:             Min number of interface hydrogen bonds
-		cterm_distance:     Min distance in A from the C-terminus to the target
-		cterm_direction:    Required C-terminus direction, True is pointing away
-		cterm_exposure:     Min SASA in A^2 of the last residue
-		hotspot_contacts:   Min number of hotspots contacted
-		hotspot_cutoff:     Distance in A below which a hotspot counts as contacted
-		glycan:             Min distance in A from any sequon ND2 to every binder atom
-		kmer:               Max number of 8-mers shared with the target
-		interface_residues: Min number of binder residues at the interface
-		unsat_hbonds:       Max number of buried unsatisfied polar atoms
-		loops:              Max percentage of binder residues in loops
-		binder_energy:      Max binder energy
-		rmsd:               Max CA RMSD in A of the binder after relaxing it
-		sasa_cutoff:        Per-residue SASA in A^2 above which a residue counts as exposed
-		dockq:              Min DockQ score of the complex against reference
-		reference:          Pose of the reference complex, target chain first, for the DockQ gate
-	Any argument set to None is skipped: a cutoff skips its own gate, and
-	hotspots, hotspot_cutoff, ff, ff_relax, sasa_cutoff, or reference skip every gate that needs them
-	Returns:
-	--------
-		tuple: (True, []) when every gate passes, otherwise (False, list of
-		strings 'gate: value (needs rule)' for each gate that failed)
-	'''
-	N = Analyse('binder length', target, binder)
-	span = lambda v, a: a[0] <= v <= a[1]
-	least = lambda v, a: v >= a
-	most = lambda v, a: v <= a
-	nearest = lambda v: min([float(d.min()) for d in v.values()] or [float('inf')])
-	rows = [
-		('interface area', area, 'interface area', {}, None, span, lambda a: f'{a[0]} to {a[1]} A^2'),
-		('Rg', rg, 'rg', {}, None, lambda v, a: v <= a[0] * a[1] * N ** a[2], lambda a: f'at most {a[0] * a[1] * N ** a[2]:.2f} A'),
-		('net charge', charge, 'charge', {}, None, span, lambda a: f'{a[0]} to {a[1]}'),
-		('pI', pI, 'iP', {}, None, lambda v, a: abs(v - a[0]) > a[1], lambda a: f'more than {a[1]} from {a[0]}'),
-		('hydrophobic surface', hydrophobic, 'hydrophobic surface', {'sasa_cutoff': sasa_cutoff}, None, most, lambda a: f'at most {a}'),
-		('clashes', clashes, 'clashes', {}, None, most, lambda a: f'at most {a}'),
-		('Cys', cys, 'C', {}, None, most, lambda a: f'at most {a}'),
-		('HPQ', hpq, 'HPQ', {}, None, most, lambda a: f'at most {a}'),
-		('length', length, 'binder length', {}, None, span, lambda a: f'{a[0]} to {a[1]}'),
-		('shape complementarity', sc, 'interface', {}, lambda v: v[0], least, lambda a: f'at least {a}'),
-		('interface energy', energy, 'interface energy', {'ff': ff}, None, lambda v, a: v < a, lambda a: f'below {a}'),
-		('hbonds', hbonds, 'hbonds', {}, None, least, lambda a: f'at least {a}'),
-		('C-term distance', cterm_distance, 'C-term distance', {}, None, least, lambda a: f'at least {a} A'),
-		('C-term direction', cterm_direction, 'C-term direction', {}, None, lambda v, a: v == a, lambda a: f'{a}'),
-		('C-term exposure', cterm_exposure, 'C-term exposure', {}, None, lambda v, a: v > a, lambda a: f'more than {a} A^2'),
-		('hotspot contacts', hotspot_contacts, 'hotspot contacts', {'hotspots': hotspots, 'cutoff': hotspot_cutoff}, None, least, lambda a: f'at least {a} within {hotspot_cutoff} A'),
-		('glycan', glycan, 'glycan distance', {}, nearest, lambda v, a: v > a, lambda a: f'more than {a} A'),
-		('8-mer overlap', kmer, '8-mer', {}, None, most, lambda a: f'at most {a}'),
-		('interface residues', interface_residues, 'interface residues', {}, None, least, lambda a: f'at least {a}'),
-		('unsatisfied hbonds', unsat_hbonds, 'unsatisfied hbonds', {}, None, most, lambda a: f'at most {a}'),
-		('binder loops', loops, 'binder loops', {}, None, most, lambda a: f'at most {a} %'),
-		('binder energy', binder_energy, 'binder energy', {'ff': ff}, None, most, lambda a: f'at most {a}'),
-		('binder RMSD', rmsd, 'binder RMSD', {'ff': ff_relax}, None, most, lambda a: f'at most {a} A'),
-		('DockQ', dockq, 'DockQ', {'reference': reference}, None, least, lambda a: f'at least {a}')]
-	failed = []
-	for name, arg, metric, kw, pick, ok, rule in rows:
-		if arg is None or any(x is None for x in kw.values()): continue
-		try:
-			v = Analyse(metric, target, binder, **kw)
-			if pick: v = pick(v)
-			if not ok(v, arg):
-				failed.append(f'{name}: {round(v, 3) if isinstance(v, float) else v} (needs {rule(arg)})')
-		except Exception as e:
-			failed.append(f'{name}: could not be measured ({e})')
-	return len(failed) == 0, failed
-
 def LDDT(pose1, pose2):
 	'''
 	All-atom Local Distance Difference Test (Mariani et al. 2013) of a
@@ -12483,3 +12144,348 @@ def DockQ(pose1, pose2):
 	dq = (float(fnat) + 1 / (1 + (irms / 1.5) * (irms / 1.5))
 		+ 1 / (1 + (lrms / 8.5) * (lrms / 8.5))) / 3
 	return float(dq), float(fnat), float(irms), float(lrms)
+
+def Analyse(metric, target, binder, hotspots=None, ff=None, sasa_cutoff=20.0, cutoff=5.0, reference=None):
+	'''
+	Binder-design metrics
+	Arguments:
+	----------
+		metric:                    Which metric to run, one of:
+			'rg':                  Radius of gyration of the binder in A (compactness)
+			'interface':           (Sc, area): (shape complementarity, the rim-trimmed patch area it is computed over)
+			'interface sasa':      Buried SASA in A^2 summed over both surfaces: SASA(target) + SASA(binder) - SASA(complex)
+			'DE':                  Percentage of D + E in the binder
+			'KE':                  Percentage of K + E in the binder
+			'C':                   Number of Cys in the binder
+			'DG':                  Number of DG motifs (Asp isomerisation)
+			'NG':                  Number of NG motifs (Asn deamidation)
+			'HPQ':                 Number of HPQ motifs (binds Strep-Tactin)
+			'DP':                  Number of DP motifs (acid cleavage)
+			'glycan sites':        Number of N-X-S/T (X is not P) glycosylation sites in the binder
+			'M':                   Number of exposed Met in the binder
+			'W':                   Number of exposed Trp in the binder
+			'RK':                  Number of exposed R/K not followed by P (trypsin sites)
+			'core':                Fraction of binder residues that are core (relative SASA < 0.25)
+			'core hydrophobic':    Fraction of core binder residues that are W F L I M V Y
+			'hydrophobic surface': Fraction of exposed binder residues that are W F L I M V Y
+			'charge':              Net charge of the binder, K + R - D - E
+			'pI':                  Isoelectric point of the binder
+			'hotspot contacts':    Number of hotspots with an atom within cutoff A of the binder
+			'clashes':             Number of heavy-atom pairs under 2.5 A between target and binder
+			'C-term distance':     Distance in A from the binder's last C atom to the nearest target atom
+			'C-term exposure':     SASA in A^2 of the binder's last residue in the complex
+			'glycan distance':     Dict of target glycan site -> distances from its ND2 to every binder atom
+			'8-mer':               Number of 8-residue stretches shared by target and binder
+			'interface energy':    ff(complex) - ff(target) - ff(binder)
+			'hbonds':              Number of actual hydrogen bonds across the target/binder interface
+			'binder length':       Number of residues in the binder
+			'sse loops':           Percentage of binder residues in loops (DSSP, not helix H/G/I and not strand E/B)
+			'sse alpha':           Percentage of binder residues in a helix (DSSP H/G/I)
+			'sse beta':            Percentage of binder residues in a strand (DSSP E/B)
+			'interface residues':  Number of binder residues with any atom within 4.0 A of the target
+			'C-term direction':    True if the binder's C-terminus points away from the target
+			'unsatisfied hbonds':  Number of buried polar N/O atoms at the interface that form no hydrogen bond
+			'binder energy':       Returns the binder's potential energy
+			'binder RMSD':         RMSD of the binder CA atoms before and after relaxing it with Minimise
+			'DockQ':               DockQ score of the target/binder complex against reference
+		target:      Pose of the target protein
+		binder:      Pose of the binder protein
+		hotspots:    List of target residue indices
+		ff:          Score() or ForceField(...)
+		sasa_cutoff: Per-residue SASA in A^2 above which a residue
+			counts as exposed
+		cutoff:      Distance in Angstroms below which a hotspot
+			residue counts as contacted; used by 'hotspot contacts'
+		reference:   Pose of the reference complex, target chain first and
+			binder chain second; used by 'DockQ'
+	Returns:
+	--------
+		The selected metric's value: float, int, tuple, or dict depending
+		on which metric key is given; see the metric list above for each
+	'''
+	MAXSASA = {'A':129,'R':274,'N':195,'D':193,'C':167,'E':223,'Q':225,'G':104,
+				'H':224,'I':197,'L':201,'K':236,'M':224,'F':240,'P':159,'S':155,
+				'T':172,'W':285,'Y':263,'V':174}
+	binder.CalcFASTA()
+	binder.CalcSASA()
+	complex_pose = Concatenate(target, binder)
+	complex_pose.CalcSASA()
+	seq = next(iter(binder.data['FASTA'].values()))
+	AAs = binder.data['Amino Acids']
+	res = sorted(AAs.keys())
+	L = len(seq)
+	if metric == 'rg':
+		binder.CalcRg()
+		return binder.data['Rg']
+	elif metric == 'interface':
+		Sc, area, CMS_A, CMS_B = Complementarity(target, binder)
+		return Sc, area
+	elif metric == 'interface sasa':
+		target.CalcSASA()
+		s = lambda p: sum(v[6] for v in p.data['Amino Acids'].values())
+		return s(target) + s(binder) - s(complex_pose)
+	elif metric == 'DE':
+		return 100 * (seq.count('D') + seq.count('E')) / L
+	elif metric == 'KE':
+		return 100 * (seq.count('K') + seq.count('E')) / L
+	elif metric == 'C':
+		return seq.count('C')
+	elif metric == 'DG':
+		return seq.count('DG')
+	elif metric == 'NG':
+		return seq.count('NG')
+	elif metric == 'HPQ':
+		return seq.count('HPQ')
+	elif metric == 'DP':
+		return seq.count('DP')
+	elif metric == 'glycan sites':
+		return len(PROSITE(seq, 'N-{P}-[ST]'))
+	elif metric == 'M':
+		return sum(1 for i in res
+			if AAs[i][0] == 'M' and AAs[i][6] > sasa_cutoff)
+	elif metric == 'W':
+		return sum(1 for i in res
+			if AAs[i][0] == 'W' and AAs[i][6] > sasa_cutoff)
+	elif metric == 'RK':
+		return sum(1 for k, i in enumerate(res)
+			if AAs[i][0] in ('R', 'K') and AAs[i][6] > sasa_cutoff
+			and not (k + 1 < len(res) and AAs[res[k+1]][0] == 'P'))
+	elif metric == 'hydrophobic surface':
+		binder.CalcSASA()
+		AAs = binder.data['Amino Acids']
+		surface = [v[0] for v in AAs.values() if v[6] > sasa_cutoff]
+		return sum(1 for r in surface if r in 'WFLIMVY') / len(surface)
+	elif metric in ('core', 'core hydrophobic'):
+		binder.CalcSASA()
+		AAs = binder.data['Amino Acids']
+		buried = [v[0] for v in AAs.values()
+			if v[6] / MAXSASA.get(v[0], 200) < 0.25]
+		if metric == 'core': return len(buried) / len(AAs)
+		if not buried: return 0.0
+		return sum(1 for r in buried if r in 'WFLIMVY') / len(buried)
+	elif metric == 'charge':
+		return (seq.count('K') + seq.count('R')
+			- seq.count('D') - seq.count('E'))
+	elif metric == 'pI':
+		seq = next(iter(binder.data['FASTA'].values()))
+		return Isoelectric(seq)
+	elif metric == 'hotspot contacts':
+		AAs = target.data['Amino Acids']
+		b_xyz = binder.data['Coordinates']
+		count = 0
+		for h in hotspots:
+			atoms = AAs[h][2] + AAs[h][3]
+			xyz = target.data['Coordinates'][atoms]
+			d = np.linalg.norm(xyz[:, None, :] - b_xyz[None, :, :], axis=-1)
+			if d.min() < cutoff: count += 1
+		return count
+	elif metric == 'clashes':
+		t_atoms, b_atoms = target.data['Atoms'], binder.data['Atoms']
+		t = target.data['Coordinates'][[a for a, v in t_atoms.items() if v[1].upper() != 'H']]
+		b = binder.data['Coordinates'][[a for a, v in b_atoms.items() if v[1].upper() != 'H']]
+		return int((np.linalg.norm(t[:, None] - b[None], axis=-1) < 2.5).sum())
+	elif metric == 'C-term distance':
+		last_res = max(binder.data['Amino Acids'])
+		xyz = binder.GetAtomCoord(last_res, 'C')
+		d = np.linalg.norm(target.data['Coordinates'] - xyz, axis=1)
+		return float(d.min())
+	elif metric == 'C-term exposure':
+		n1 = len(target.data['Amino Acids'])
+		last_res = n1 + max(binder.data['Amino Acids'])
+		return complex_pose.data['Amino Acids'][last_res][6]
+	elif metric == 'glycan distance':
+		target.CalcFASTA()
+		seq = next(iter(target.data['FASTA'].values()))
+		sites = PROSITE(seq, 'N-{P}-[ST]')
+		res = sorted(target.data['Amino Acids'].keys())
+		b_xyz = binder.data['Coordinates']
+		out = {}
+		for start, end, match in sites:
+			r = res[start - 1]
+			n_xyz = target.GetAtomCoord(r, 'ND2')
+			out[r] = np.linalg.norm(b_xyz - n_xyz, axis=1)
+		return out
+	elif metric == '8-mer':
+		length = 8
+		t_seq = ''.join(target.data['FASTA'].values())
+		b_seq = ''.join(binder.data['FASTA'].values())
+		t_windows = {t_seq[i:i+length] for i in range(len(t_seq)-length+1)}
+		b_windows = {b_seq[i:i+length] for i in range(len(b_seq)-length+1)}
+		return len(t_windows & b_windows)
+	elif metric == 'interface energy':
+		return ff(complex_pose) - ff(target) - ff(binder)
+	elif metric == 'hbonds':
+		cx_atoms = complex_pose.data['Atoms']
+		cx_bonds = complex_pose.data['Bonds']
+		cx_AAs = complex_pose.data['Amino Acids']
+		if not any(a[1].upper() == 'H' for a in cx_atoms.values()):
+			complex_pose.ReBuild()
+			cx_atoms  = complex_pose.data['Atoms']
+			cx_bonds  = complex_pose.data['Bonds']
+			cx_AAs    = complex_pose.data['Amino Acids']
+		res_of = {a: r for r, v in cx_AAs.items() for a in v[2] + v[3]}
+		n1 = len(target.data['Amino Acids'])
+		donors = [(nb[0], i) for i, a in cx_atoms.items() if a[1].upper() == 'H'
+			for nb in [cx_bonds.get(i, [])] if len(nb) == 1
+			and cx_atoms[nb[0]][1].upper() in ('N', 'O', 'S')]
+		acceptors = [i for i, a in cx_atoms.items() if a[1].upper() == 'O'
+			or (a[1].upper() == 'N' and len(cx_bonds.get(i, [])) == 2
+				and not any(cx_atoms[j][1].upper() == 'H' for j in cx_bonds[i]))]
+		found = set()
+		for (D, H), A in itertools.product(donors, acceptors):
+			if (res_of[D] < n1) == (res_of[A] < n1): continue
+			if complex_pose.GetDistance(res_of[D], cx_atoms[D][0],
+					res_of[A], cx_atoms[A][0]) > 3.5: continue
+			if complex_pose.GetDistance(res_of[H], cx_atoms[H][0],
+					res_of[A], cx_atoms[A][0]) > 2.5: continue
+			if complex_pose.GetAngle(res_of[D], cx_atoms[D][0],
+					res_of[H],cx_atoms[H][0],res_of[A],cx_atoms[A][0]) <= 120.0:
+				continue
+			found.add((D, A))
+		return len(found)
+	elif metric == 'binder length':
+			return L
+	elif metric == 'sse loops':
+		binder.CalcDSSP()
+		ss = ''.join(binder.data['SS'].values())
+		return 100 * sum(1 for s in ss if s not in 'HGIEB') / len(ss)
+	elif metric in ('sse alpha', 'sse beta'):
+		binder.CalcDSSP()
+		ss = ''.join(binder.data['SS'].values())
+		keys = 'HGI' if metric == 'sse alpha' else 'EB'
+		return 100 * sum(1 for s in ss if s in keys) / len(ss)
+	elif metric == 'interface residues':
+		t_xyz = target.data['Coordinates']
+		count = 0
+		for i, v in binder.data['Amino Acids'].items():
+			xyz = binder.data['Coordinates'][v[2] + v[3]]
+			d = np.linalg.norm(xyz[:, None, :] - t_xyz[None, :, :], axis=-1)
+			if d.min() <= 4.0: count += 1
+		return count
+	elif metric == 'C-term direction':
+		t_atoms = target.data['Atoms']
+		t = target.data['Coordinates'][[a for a, v in t_atoms.items() if v[1].upper() != 'H']]
+		ca_last = binder.GetAtomCoord(res[-1], 'CA')
+		ca_prev = binder.GetAtomCoord(res[-2], 'CA')
+		outward = ca_last - t.mean(axis=0)
+		direction = ca_last - ca_prev
+		return bool(np.dot(outward, direction) > 0)
+	elif metric == 'unsatisfied hbonds':
+		BO, off = {}, 0
+		for p in (target, binder):
+			old = sorted(p.data['Atoms'])
+			m = {o: off + i for i, o in enumerate(old)}
+			for o in old: BO[m[o]] = p.data['BondOrders'][o]
+			off += len(old)
+		complex_pose.data['BondOrders'] = BO
+		cAAs = complex_pose.data['Amino Acids']
+		return BuriedUnsatisfiedHbonds(complex_pose, chain=cAAs[len(cAAs) - 1][1])[0]
+	elif metric == 'binder energy':
+		return ff(binder)
+	elif metric == 'binder RMSD':
+		relaxed = copy.deepcopy(binder)
+		Minimise(relaxed, ff=ff)
+		return RMSD(binder, relaxed)
+	elif metric == 'DockQ':
+		return DockQ(reference, complex_pose)[0]
+	else:
+		raise ValueError(f'Unknown metric: {metric!r}')
+
+def Gates(target, binder, reference, hotspots,
+	length=[70, 120], cys=0, hpq=0, rg=True, sseH=0, sseS=0, sseL=45,
+	hyd_surf=0.35, hyd_core=0.35, frc_core=0.2, charge=[-10, 10], pI=[2.0, 7.4],
+	int_C=0.50, int_A=[1200, 3800], int_H=3, int_U=20, int_R=12, int_E=None,
+	Ctrm_d=12, Ctrm_v=True, Ctrm_e=40,
+	clash=3, glycan=7, mer8=0, rmsd=2.5,
+	scores=None, dockq=0.49, pLDDT=0.80, ipTM=0.60, ipSAE=0.60):
+	'''
+	Apply every binder-design gate that Analyse() can measure
+	Arguments (Any argument set to None is skipped):
+	----------
+		target:             Pose of the target structure
+		binder:             Pose of the binder structure
+		reference:          Pose of generated design reference
+		hotspots:           List of target hotspot residue indices
+		length:             Acceptable Binder length range
+		cys:                Max number of Cys of Binder
+		hpq:                Max number of HPQ motifs of Binder
+		rg:                 Binder True/False Rg < 1.625 * 2.2 * length^0.38
+		H:                  Min % helix of Binder
+		S:                  Min % sheet of Binder
+		L:                  Max % loops of Binder
+		hyd_surf:           Max hydrophobic surface fraction of Binder
+		hyd_core:           Min core hydrophobic fraction of Binder
+		frc_core:           Min Core structure fraction of Binder
+		charge:             Net charge range of Binder
+		pI:                 Isoelectric point pH range of Binder
+		int_C:              Min interface shape complementarity of complex
+		int_A:              Min interface surface area of complex
+		int_H:              Min interface H-bond number of complex
+		int_U:              Max interface unsatisfied H-bond number of complex
+		int_R:              Min interface bound residue number of complex
+		int_E:              ForceField() / Score() to calculate interface energy
+		Ctrm_d:             Min Binder C-term distance from Target
+		Ctrm_v:             True/False Binder C-term direction
+		Ctrm_e:             Min Binder C-term exposure
+		clash:              Min clash number between Binder and Target poses
+		glycan:             Min distance of Binder atoms from Target glyco sites
+		mer8:               Number of 8-mer shared sequences
+		rmsd:               Min Binder to generated design RMSD score
+		dockq:              Min Binder DockQ score
+		pLDDT:              Min Binder pLDDT score
+		ipTM:               Min Binder ipTM score
+		ipSAE:              Min Binder ipSAE score
+	Returns:
+	--------
+		tuple: (True, []) when every gate passes, otherwise (False, list of
+		strings 'gate: value (needs rule)' for each gate that failed)
+	'''
+	nearest  = lambda d: min((float(v.min()) for v in d.values()), default=float('inf'))
+	N        = list(binder.data['Size'].values())[0]
+	l        = length is None or length[0] <= N <= length[1]
+	c        = cys is None or Analyse('C', target, binder) <= cys
+	h        = hpq is None or Analyse('HPQ', target, binder) <= hpq
+	r        = rg is None or binder.data['Rg'] <= (1.625 * 2.2 * N**0.38)
+	H        = sseH is None or Analyse('sse alpha', target, binder) >= sseH
+	S        = sseS is None or Analyse('sse beta', target, binder) >= sseS
+	L        = sseL is None or Analyse('sse loops', target, binder) <= sseL
+	surf_hyd = hyd_surf is None or Analyse('hydrophobic surface', target, binder) <= hyd_surf
+	core_hyd = hyd_core is None or Analyse('core hydrophobic', target, binder) >= hyd_core
+	core_frc = frc_core is None or Analyse('core', target, binder) >= frc_core + 0.0015 * N
+	q        = charge is None or charge[0] <= Analyse('charge', target, binder) <= charge[1]
+	pi       = pI is None or abs(Analyse('pI', target, binder) - pI[1]) > pI[0]
+	i_C      = int_C is None or Analyse('interface', target, binder)[0] >= int_C
+	i_A      = int_A is None or int_A[0] <= Analyse('interface sasa', target, binder) <= int_A[1]
+	i_H      = int_H is None or Analyse('hbonds', target, binder) >= int_H
+	i_U      = int_U is None or Analyse('unsatisfied hbonds', target, binder) <= int_U
+	i_R      = int_R is None or Analyse('interface residues', target, binder) >= int_R
+	c_d      = Ctrm_d is None or Analyse('C-term distance', target, binder) >= Ctrm_d
+	c_v      = Ctrm_v is None or Analyse('C-term direction', target, binder) == Ctrm_v
+	c_e      = Ctrm_e is None or Analyse('C-term exposure', target, binder) >= Ctrm_e
+	clsh     = clash is None or len(Clash(target, binder, overlap=1.0)) <= clash
+	glyc     = glycan is None or nearest(Analyse('glycan distance', target, binder)) > glycan
+	mer      = mer8 is None or Analyse('8-mer', target, binder) <= mer8
+	spots    = hotspots is None or Analyse('hotspot contacts', target, binder, hotspots=hotspots, cutoff=4.5) >= 0.75 * len(hotspots)
+	rms      = rmsd is None or RMSD(reference, binder) <= rmsd
+	s        = scores or {}
+	dq       = dockq is None or s.get('dockq') is None or s['dockq'] > dockq
+	plddt    = pLDDT is None or s.get('pLDDT') is None or s['pLDDT'] >= pLDDT
+	iptm     = ipTM  is None or s.get('ipTM')  is None or s['ipTM']  >= ipTM
+	ipsae    = ipSAE is None or s.get('ipSAE') is None or s['ipSAE'] >= ipSAE
+	if int_E is not None:
+		target.ReBuild()
+		binder.ReBuild()
+		cx = Concatenate(target, binder)
+		Minimise(cx, ff=int_E, max_steps=300)
+		tE, bE = Split(cx, chain='A'), Split(cx, chain='B')
+	i_E = int_E is None or Analyse('interface energy', tE, bE, ff=int_E) < 0
+	gates = {'length':l, 'cys':c, 'hpq':h, 'rg':r, 'sseH':H, 'sseS':S,
+			'sseL':L, 'hyd_surf':surf_hyd, 'hyd_core':core_hyd,
+			'frc_core':core_frc, 'charge':q, 'pI':pi, 'int_C':i_C,
+			'int_A':i_A, 'int_H':i_H, 'int_U':i_U, 'int_R':i_R,
+			'int_E':i_E, 'Ctrm_d':c_d, 'Ctrm_v':c_v, 'Ctrm_e':c_e,
+			'clash':clsh, 'glycan':glyc, 'mer8':mer, 'hotspots':spots,
+			'rmsd':rms, 'dockq':dq, 'pLDDT':plddt, 'ipTM':iptm,
+			'ipSAE':ipsae}
+	failed = [k for k, v in gates.items() if not v]
+	return not failed, failed

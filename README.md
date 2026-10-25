@@ -176,6 +176,23 @@ m.GetInfo()
 
 This RDKit plugin gives you the power and flexibility to manipulate molecules using RDKit and then import them to the Molecule() class when they are ready.
 
+Filtering miniprotein designs using Gates(), the default parameters are a good start:
+
+```python
+from pose import *
+
+FILENAME = 'FILENAME.cif'
+HOTSPOTS = [130, 134, 136, 137, 170, 171, 186]
+SCORES = {'dockq': 0.73, 'pLDDT': 0.89, 'ipTM': 0.877, 'ipSAE': 0.748}
+
+T, B, R = Pose(), Pose(), Pose()
+T.Import(FILENAME, chain='A')
+B.Import(FILENAME, chain='B')
+R.Import(FILENAME, chain='B')
+result = Gates(T, B, R, HOTSPOTS, scores=SCORES)
+print(result)
+```
+
 ---
 
 ## Key Concepts
@@ -426,8 +443,8 @@ These are standalone tools (not Pose() class methods) and thus are called on the
 | `SMIRKSMatch()`                                                                                               | Matches atom type for the `ForceField()` class |
 | `ScoreMatch()`                                                                                                | Matches atom type for the `Score` class |
 | `DockQ(pose1, pose2)`                                                                                         | Computes the DockQ score (Basu & Wallner 2016) of a model protein/protein complex `pose2` against a reference complex `pose1` |
-| `Analyse(metric, target, binder, hotspots=None, ff=None, sasa_cutoff=20.0, cutoff=5.0, reference=None)`       | Computes one binder-design metric for a target/binder pair of Poses, chosen by name. Metrics: `'rg'`, `'interface'` (Sc and rim-trimmed patch area), `'interface area'` (buried SASA), `'DE'`, `'KE'`, `'C'`, `'DG'`, `'NG'`, `'HPQ'`, `'DP'`, `'glycan sites'` (binder N-X-S/T), `'M'`, `'W'`, `'RK'` (exposed Met, Trp, R/K not before P), `'hydrophobic surface'`, `'charge'` (K + R - D - E), `'iP'`, `'hotspot contacts'` (`hotspots` as Pose residue indices, which start at 0, within `cutoff` Å), `'clashes'` (heavy-atom pairs under 2.5 Å), `'C-term distance'`, `'C-term exposure'`, `'glycan distance'` (target sequon ND2 to binder atoms), `'8-mer'`, `'interface energy'` and `'binder energy'` (both need `ff`), `'hbonds'` (needs hydrogens: run `ReBuild()` on both Poses first), `'binder length'`, `'binder loops'` (percentage of binder residues in loops by DSSP), `'interface residues'` (binder residues within 4.0 Å of the target), `'C-term direction'` (True if the C-terminus points away from the target), `'unsatisfied hbonds'` (buried polar N/O atoms at the interface with no hydrogen bond), `'binder RMSD'` (CA RMSD of the binder before and after `Minimise`; needs `ff=ForceField()`), and `'DockQ'` (DockQ score of the target/binder complex against `reference`). `sasa_cutoff` is the SASA in Å² above which a residue counts as exposed. Returns a float, int, bool, tuple or dict depending on the metric |
-| `Gates(target, binder, hotspots, ff, ff_relax, area=(1300, 3800), rg=(1.25, 2.2, 0.38), charge=(-10, 10), pI=(7.4, 0.5), hydrophobic=0.35, clashes=0, cys=0, hpq=0, length=(70, 120), sc=0.6, energy=0.0, hbonds=3, cterm_distance=15.0, cterm_direction=True, cterm_exposure=20.0, hotspot_contacts=3, hotspot_cutoff=4.5, glycan=7.0, kmer=0, interface_residues=7, unsat_hbonds=4, loops=90.0, binder_energy=0.0, rmsd=3.5, sasa_cutoff=20.0, dockq=0.49, reference=None)` | Runs every gate that `Analyse()` can measure on a target/binder pair of Poses. Every cutoff is an argument (ranges are `(min, max)` tuples), and any argument set to `None` is skipped, together with the gates that need it. `hotspots` are Pose indices (from 0), `ff` is a `Score()` for the energy gates, and `ff_relax` is `ForceField('OpenFF')` for the binder RMSD. Takes about 2 minutes per structure. Returns `(True, [])` if every gate passes, otherwise `(False, [...])` with each failed gate, its value and the cutoff it needed. `reference` is a Pose of the reference complex, target chain first (e.g. a structure prediction of the design), for the DockQ gate, which is skipped without it. Any argument set to None is skipped |
+| `Analyse(metric, target, binder, hotspots=None, ff=None, sasa_cutoff=20.0, cutoff=5.0, reference=None)`       | Computes one binder-design metric for a target/binder pair of Poses, chosen by name. Metrics: `'rg'`, `'interface'` (Sc and rim-trimmed patch area), `'interface sasa'` (buried SASA), `'DE'`, `'KE'`, `'C'`, `'DG'`, `'NG'`, `'HPQ'`, `'DP'`, `'glycan sites'` (binder N-X-S/T), `'M'`, `'W'`, `'RK'` (exposed Met, Trp, R/K not before P), `'hydrophobic surface'`, `'charge'` (K + R - D - E), `'pI'`, `'hotspot contacts'` (`hotspots` as Pose residue indices, which start at 0, within `cutoff` Å), `'clashes'` (heavy-atom pairs under 2.5 Å), `'C-term distance'`, `'C-term exposure'`, `'glycan distance'` (target sequon ND2 to binder atoms), `'8-mer'`, `'interface energy'` and `'binder energy'` (both need `ff`), `'hbonds'` (needs hydrogens: run `ReBuild()` on both Poses first), `'binder length'`, `'binder loops'` (percentage of binder residues in loops by DSSP), `'interface residues'` (binder residues within 4.0 Å of the target), `'C-term direction'` (True if the C-terminus points away from the target), `'unsatisfied hbonds'` (buried polar N/O atoms at the interface with no hydrogen bond), `'binder RMSD'` (CA RMSD of the binder before and after `Minimise`; needs `ff=ForceField()`), and `'DockQ'` (DockQ score of the target/binder complex against `reference`). `sasa_cutoff` is the SASA in Å² above which a residue counts as exposed. Returns a float, int, bool, tuple or dict depending on the metric |
+| `Gates(target, binder, reference, hotspots, length=[70, 120], cys=0, hpq=0, rg=True, sseH=0, sseS=0, sseL=45, hyd_surf=0.35, hyd_core=0.35, frc_core=0.2, charge=[-10, 10], pI=[2.0, 7.4], int_C=0.50, int_A=[1200, 3800], int_H=3, int_U=20, int_R=12, int_E=None, Ctrm_d=12, Ctrm_v=True, Ctrm_e=40, clash=3, glycan=7, mer8=0, rmsd=2.5, scores=None, dockq=0.49, pLDDT=0.80, ipTM=0.60, ipSAE=0.60)` | Default gate cutoffs for a typical miniprotein bider design |
 
 > BLAST handles sequences beyond the 20 canonical L-amino acids automatically: **D-amino acids**: stored as lowercase letters in `pose.data['FASTA']`. BLAST uppercases both sequences before alignment, treating each D-amino acid as its L-counterpart for scoring purposes. This correctly reflects the chemical reality that D- and L-forms of the same residue have identical side-chain chemistry. **Non-canonical amino acids**: any letter not in the 20-letter BLOSUM62 alphabet falls back to: `+4` for a self-match (equal to the minimum BLOSUM62 diagonal), `−1` for a mismatch. This keeps non-canonical residues visible to the aligner without inflating scores.
 
