@@ -262,8 +262,7 @@ class ForceField():
 			par = assigns['bonds'].get((int(a), int(b)))
 			if par is not None:
 				bond_r0[p] = par[0]
-				if (int(a), int(b)) not in constraints:
-					bond_Kb[p] = par[1]
+				bond_Kb[p] = par[1]
 		cache['bond_Kb'] = bond_Kb
 		cache['bond_r0'] = bond_r0
 		cache['bond_De'] = np.zeros(len(pairs))

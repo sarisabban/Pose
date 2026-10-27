@@ -2571,7 +2571,7 @@ class Pose():
 		'''
 		A = (self.GetAtomCoord(res3, atom3)- self.GetAtomCoord(res1, atom1))
 		B = (self.GetAtomCoord(res3, atom3)- self.GetAtomCoord(res2, atom2))
-		u = np.cross(B, A)
+		u = np.cross(A, B)
 		lu = np.linalg.norm(u)
 		if lu < 1e-10: return
 		u = u / lu
@@ -4514,7 +4514,7 @@ class Molecule():
 		'''
 		self._check_idx(idx1, idx2, idx3)
 		C = self.data['Coordinates']
-		u = np.cross(C[idx3] - C[idx2], C[idx3] - C[idx1])
+		u = np.cross(C[idx3] - C[idx1], C[idx3] - C[idx2])
 		lu = np.linalg.norm(u)
 		if lu < 1e-10: return
 		ori = C[idx2].copy(); RM = self._rotmat(theta, u / lu)
