@@ -1142,6 +1142,10 @@ def Split(pose, chain=None, start=None, end=None):
 	a_remap = {old: new for new, old in enumerate(keep_atoms)}
 	sa, sb, sc = (pose.data['Atoms'], pose.data['Bonds'],
 		pose.data['Coordinates'])
+	so = pose.data.get('BondOrders') or {}
+	bp = {a_remap[o]: sorted((a_remap[b], k) for b, k in zip(sb.get(o, []),
+		so.get(o, [1] * len(sb.get(o, [])))) if b in a_remap)
+		for o in keep_atoms}
 	new = Pose()
 	new.data = {
 		'Type':        mol,  'Energy': 0, 'Rg': 0, 'Mass': 0,
@@ -1149,12 +1153,8 @@ def Split(pose, chain=None, start=None, end=None):
 		'Nucleotides': None if is_pro else {},
 		'Amino Acids': {} if is_pro else None,
 		'Atoms':       {a_remap[o]: list(sa[o]) for o in keep_atoms},
-		'Bonds':       {a_remap[o]: sorted(a_remap[b]
-			for b in sb.get(o, []) if b in a_remap)
-			for o in keep_atoms},
-		'BondOrders': {a_remap[o]: [bo for b, bo in
-			zip(sb.get(o, []), pose.data['BondOrders'].get(o, []))
-			if b in a_remap] for o in keep_atoms},
+		'Bonds':       {a: [b for b, _ in v] for a, v in bp.items()},
+		'BondOrders':  {a: [k for _, k in v] for a, v in bp.items()},
 		'Coordinates': np.array([sc[o] for o in keep_atoms],
 			dtype=float) if keep_atoms else np.zeros((0, 3))}
 	tgt = new.data[rk]
@@ -12477,7 +12477,8 @@ def Gates(target, binder, reference, hotspots,
 		binder.ReBuild()
 		cx = Concatenate(target, binder)
 		Minimise(cx, ff=int_E, max_steps=300)
-		tE, bE = Split(cx, chain='A'), Split(cx, chain='B')
+		ch = list(dict.fromkeys(v[1] for v in cx.data['Amino Acids'].values()))
+		tE, bE = Split(cx, chain=ch[0]), Split(cx, chain=ch[-1])
 	i_E = int_E is None or Analyse('interface energy', tE, bE, ff=int_E) < 0
 	gates = {'length':l, 'cys':c, 'hpq':h, 'rg':r, 'sseH':H, 'sseS':S,
 			'sseL':L, 'hyd_surf':surf_hyd, 'hyd_core':core_hyd,
