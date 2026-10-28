@@ -720,22 +720,23 @@ class Pose():
 				self.data['Nucleotides'][ni] = [sym, chain, bbi, bsi, tricode]
 				nt_ch[chain].append(ni)
 				ni += 1
-		for ch5 in nt_ch.values():
-			nr = self.data['Nucleotides'][ch5[0]]
+		ends = ((0, "O5'", "C5'"), (-1, "O3'", "C3'"))
+		for ch5, o, c in ((v[k],o,c) for v in nt_ch.values() for k,o,c in ends):
+			nr = self.data['Nucleotides'][ch5]
 			nx = {self.data['Atoms'][a][0]: a for a in nr[2] + nr[3]}
-			ov, cv = Co[nx["O5'"]], Co[nx["C5'"]]
+			ov, cv = Co[nx[o]], Co[nx[c]]
 			u = (cv - ov) / np.linalg.norm(cv - ov)
-			ax = np.array([0., 0., 1.]) if abs(u[2]) < 0.9 else np.array([1., 0., 0.])
+			ax = np.array([0.,0.,1.]) if abs(u[2])<0.9 else np.array([1.,0.,0.])
 			pp = ax - np.dot(ax, u) * u
 			pp = pp / np.linalg.norm(pp)
 			th = math.radians(108.5)
-			self.data['Atoms'][ai] = ["HO5'", 'H', 0.0, 1.0, 0.0, 's']
+			self.data['Atoms'][ai] = ['H' + o, 'H', 0.0, 1.0, 0.0, 's']
 			Co.append(ov + 0.96 * (math.cos(th) * u + math.sin(th) * pp))
 			nr[2].append(ai)
-			self.data['Bonds'].setdefault(ai, []).append(nx["O5'"])
+			self.data['Bonds'].setdefault(ai, []).append(nx[o])
 			self.data['BondOrders'].setdefault(ai, []).append(1)
-			self.data['Bonds'].setdefault(nx["O5'"], []).append(ai)
-			self.data['BondOrders'].setdefault(nx["O5'"], []).append(1)
+			self.data['Bonds'].setdefault(nx[o], []).append(ai)
+			self.data['BondOrders'].setdefault(nx[o], []).append(1)
 			ai += 1
 		self.data['Coordinates'] = (
 			np.array(Co) if Co else np.zeros((0, 3)))

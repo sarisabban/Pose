@@ -4564,6 +4564,7 @@ def SMIRKSMatch(pose, params):
 			for pos, ni in enumerate(nis):
 				tri = str(nucs[ni][4]).upper()
 				keys = []
+				if len(nis) == 1: keys.append(tri + 'N')
 				if pos == 0: keys.append(tri + '5')
 				if pos == len(nis) - 1: keys.append(tri + '3')
 				keys.append(tri)
